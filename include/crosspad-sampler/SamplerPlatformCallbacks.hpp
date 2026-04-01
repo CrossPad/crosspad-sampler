@@ -80,6 +80,12 @@ struct SamplerKitCallbacks {
     void (*reloadPad)(uint8_t padIdx)                                                  = nullptr;
     /// Reload all pads in the audio engine.
     void (*reloadPads)()                                                               = nullptr;
+    /// Check if a waveform cache file exists for the given kit.
+    /// Returns true if cache is available on disk.
+    bool (*hasCacheFile)(int kitId)                                                   = nullptr;
+    /// Start async kit loading (platform spawns background task).
+    /// kitId = index in IKitManager, onlyModified = reload dirty pads only.
+    void (*startLoadKit)(int kitId, bool onlyModified)                                = nullptr;
 };
 
 // ---------------------------------------------------------------------------
