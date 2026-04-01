@@ -122,8 +122,10 @@ void waveform_draw_chunk(lv_obj_t* canvas, int16_t* waveform, uint32_t sampleCou
         for (uint32_t s = ss; s < se && s < samplesPerChannel; s++) {
             int16_t l = waveform[s * 2];
             int16_t r = waveform[s * 2 + 1];
-            if (l < lMin) lMin = l; if (l > lMax) lMax = l;
-            if (r < rMin) rMin = r; if (r > rMax) rMax = r;
+            if (l < lMin) lMin = l;
+            if (l > lMax) lMax = l;
+            if (r < rMin) rMin = r;
+            if (r > rMax) rMax = r;
         }
 
         int lMaxO, lMinO, rMaxO, rMinO;
