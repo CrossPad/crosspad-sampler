@@ -8,6 +8,10 @@
 #include <cstring>
 #include <lvgl.h>
 
+#ifdef ESP_PLATFORM
+#include <esp_heap_caps.h>
+#endif
+
 namespace crosspad_sampler {
 
 // ---------------------------------------------------------------------------

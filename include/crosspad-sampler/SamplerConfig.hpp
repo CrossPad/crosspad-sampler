@@ -12,9 +12,11 @@ constexpr int WAVEFORM_CANVAS_HEIGHT = 70;
 constexpr int PAD_UPDATE_INTERVAL_MS = 50;
 
 // Pad grid
-constexpr int PAD_COUNT = 16;
+constexpr int PAD_COUNT     = 16;
 constexpr int PAD_GRID_COLS = 4;
 constexpr int PAD_GRID_ROWS = 4;
+// KIT_PADS is defined as a preprocessor macro by crosspad-core's KitInfo.hpp.
+// Do NOT redefine it here — just include KitInfo.hpp where needed.
 
 // Default colors (uint32_t RRGGBB)
 constexpr uint32_t DEFAULT_PAD_COLOR     = 0x20FF10;
@@ -25,5 +27,18 @@ constexpr uint32_t DEFAULT_PLAYING_COLOR = 0x320005;
 constexpr uint32_t WAVEFORM_START_COLOR = 0x00FF00;  // green
 constexpr uint32_t WAVEFORM_END_COLOR   = 0xFF0000;  // red
 constexpr uint32_t WAVEFORM_HEAD_COLOR  = 0xFF0000;  // red playhead
+
+// Pad note mapping: physical pad index (0-15) -> displayed label number (1-16)
+// Bottom-left is pad 0 displayed as "1", top-right is pad 15 displayed as "16"
+constexpr int PAD_NOTES[] = {13, 14, 15, 16, 9, 10, 11, 12, 5, 6, 7, 8, 1, 2, 3, 4};
+
+// Max sample slots per pad
+constexpr int MAX_SAMPLES_PER_PAD = 1;
+
+// Default kit path
+constexpr const char* DEFAULT_KIT_PATH = "/crosspad/kits";
+
+// Loop end sentinel value (max uint32_t)
+constexpr uint32_t SAMPLE_END_MAX = 0xFFFFFFFF;
 
 } // namespace crosspad_sampler
