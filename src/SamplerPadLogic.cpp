@@ -94,7 +94,7 @@ void SamplerPadLogic::onDeactivate(crosspad::PadManager& padManager) {
     }
 
     // Reset all pad colors to neutral gray
-    constexpr crosspad::RgbColor neutral(50, 50, 50);
+    const crosspad::RgbColor neutral(50, 50, 50);
     for (int i = 0; i < PAD_COUNT; ++i) {
         padManager.setPadColor(i, neutral);
     }

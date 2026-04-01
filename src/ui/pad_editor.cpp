@@ -115,7 +115,7 @@ static void populate_sample_list(crosspad::Pad* pad)
 {
     if (!s_state.sampleList) return;
 
-    lv_list_clean(s_state.sampleList);
+    lv_obj_clean(s_state.sampleList);
 
     if (!pad || pad->samples.empty()) {
         lv_list_add_text(s_state.sampleList, "(no samples)");

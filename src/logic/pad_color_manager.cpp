@@ -2,6 +2,7 @@
 #include "crosspad-sampler/SamplerConfig.hpp"
 
 #include "crosspad/pad/PadManager.hpp"
+#include "crosspad/kit/IKitManager.hpp"
 #include "crosspad/platform/PlatformServices.hpp"
 
 namespace crosspad_sampler {

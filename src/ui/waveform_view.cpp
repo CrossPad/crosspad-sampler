@@ -21,7 +21,7 @@ static void*                s_userData  = nullptr;
 static int16_t s_waveformBuf[WAVEFORM_CANVAS_WIDTH];
 
 /// Canvas pixel buffer (RGB565, one per pixel).
-static lv_color_t cbuf[LV_CANVAS_BUF_SIZE(WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT, 16)];
+static lv_color_t cbuf[LV_CANVAS_BUF_SIZE(WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT, 16, 1)];
 
 // ---------------------------------------------------------------------------
 // Helper: convert uint32_t 0xRRGGBB to lv_color_t

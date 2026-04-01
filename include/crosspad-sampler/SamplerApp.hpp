@@ -3,6 +3,7 @@
 
 #ifdef USE_LVGL
 
+#include "lvgl.h"
 #include <crosspad/app/AppEntry.hpp>
 
 namespace crosspad_sampler {
