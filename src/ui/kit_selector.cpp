@@ -172,6 +172,16 @@ void kit_selector_destroy(lv_obj_t* selector) {
         lv_timer_delete(s_loadPollTimer);
         s_loadPollTimer = nullptr;
     }
+
+    // Detach encoder from our groups before deleting them
+    lv_indev_t* enc = getEncoder();
+    if (enc) {
+        lv_group_t* cur = lv_indev_get_group(enc);
+        if (cur == s_mainGroup || cur == s_listGroup) {
+            lv_indev_set_group(enc, nullptr);
+        }
+    }
+
     if (s_mainGroup) {
         lv_group_delete(s_mainGroup);
         s_mainGroup = nullptr;
