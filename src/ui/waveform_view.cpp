@@ -110,7 +110,7 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
 
 void waveform_view_load(lv_obj_t* waveformView, uint8_t padIdx, uint8_t sampleSlot)
 {
-    if (!s_provider) return;
+    if (!s_provider) { LV_LOG_WARN("waveform_view_load: no provider!"); return; }
 
     lv_obj_t* canvas = lv_obj_get_child(waveformView, 0);
     if (!canvas) return;

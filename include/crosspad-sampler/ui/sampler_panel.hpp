@@ -31,6 +31,14 @@ PadColorManager& getPadColorManager();
 /// Access the shared KitOrchestrator instance.
 KitOrchestrator& getKitOrchestrator();
 
+/// Called by the platform's audio engine NoteOn callback to update GUI state
+/// (playhead timing, sample index tracking). PadManager/EventBus updates are
+/// handled platform-side; this is GUI-only.
+void sampler_on_engine_note_on(uint8_t note, uint8_t wavIdx);
+
+/// Called by the platform's audio engine NoteOff callback to update GUI state.
+void sampler_on_engine_note_off(uint8_t note, uint8_t wavIdx);
+
 } // namespace crosspad_sampler
 
 #endif // USE_LVGL

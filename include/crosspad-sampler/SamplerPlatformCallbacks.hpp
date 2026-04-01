@@ -48,6 +48,11 @@ struct SamplerPlayerCallbacks {
     void (*wipeOut)(uint8_t padIdx)                                                   = nullptr;
     /// Return number of free sample slots in the engine.
     int  (*getFreeSlotCount)()                                                        = nullptr;
+    /// Provide downsampled waveform data for a pad/slot (for waveform_view).
+    /// Fills outData with up to maxSamples PCM values, sets actualSamples.
+    void (*getWaveformData)(uint8_t padIdx, uint8_t sampleSlot,
+                            int16_t* outData, uint32_t maxSamples,
+                            uint32_t* actualSamples)                                  = nullptr;
 };
 
 /// Callbacks the audio engine invokes back INTO the sampler (NoteOn/NoteOff
