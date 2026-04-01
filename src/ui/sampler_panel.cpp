@@ -8,6 +8,7 @@
 #include "crosspad-sampler/ui/sampler_panel.hpp"
 #include "crosspad-sampler/ui/waveform_view.hpp"
 #include "crosspad-sampler/ui/pad_editor.hpp"
+#include "crosspad-sampler/waveform/waveform_cache.hpp"
 
 // crosspad-gui
 #include "crosspad-gui/crosspad_gui.h"   // styles, widgets, App class
@@ -655,16 +656,43 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent)
     // Clear destruction flag in case this is a recreation after destroy.
     appIsDestroying = false;
 
-    // Set up waveform data provider — delegates to platform callback
+    // Set up waveform data provider — reads from waveform cache.
+    // The cache is populated by the waveform loader background task.
     waveform_view_set_provider([](uint8_t padIdx, uint8_t sampleSlot,
                                   int16_t* outData, uint32_t maxSamples,
                                   uint32_t* actualSamples, void* /*userData*/) {
+        *actualSamples = 0;
+
+        // Resolve pad sample filename via kit
+        auto* mgr = crosspad::getKitManager();
+        auto* kit = mgr ? mgr->getCurrentKit() : nullptr;
+        if (!kit || padIdx >= KIT_PADS) return;
+        if (sampleSlot >= kit->pads[padIdx].samples.size()) return;
+
         const auto& cb = sampler_get_platform_callbacks();
-        if (cb.player.getWaveformData) {
-            cb.player.getWaveformData(padIdx, sampleSlot, outData, maxSamples, actualSamples);
-        } else {
-            *actualSamples = 0;
+        const char* fullPath = nullptr;
+        if (cb.kit.getFullPath) {
+            fullPath = cb.kit.getFullPath(kit->pads[padIdx].samples[sampleSlot].sample.c_str());
         }
+        if (!fullPath || fullPath[0] == '\0') return;
+
+        // Look up in waveform cache
+        WaveformCacheEntry* entry = waveform_cache_find(fullPath);
+        if (!entry || !entry->valid || !entry->waveformData || entry->sampleCount == 0) return;
+
+        // Copy from cache, downsampling if cache has more samples than requested
+        uint32_t count = entry->sampleCount < maxSamples ? entry->sampleCount : maxSamples;
+        if (entry->sampleCount <= maxSamples) {
+            memcpy(outData, entry->waveformData, count * sizeof(int16_t));
+        } else {
+            // Downsample: pick evenly spaced samples
+            for (uint32_t i = 0; i < maxSamples; i++) {
+                uint32_t srcIdx = (uint64_t)i * entry->sampleCount / maxSamples;
+                outData[i] = entry->waveformData[srcIdx];
+            }
+            count = maxSamples;
+        }
+        *actualSamples = count;
     }, nullptr);
     // color for the panel
     lv_color_t color = lv_color_hex(0xF0F0F0);
