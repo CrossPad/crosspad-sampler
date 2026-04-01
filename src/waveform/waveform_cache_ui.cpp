@@ -39,13 +39,11 @@ static lv_timer_t* s_progressTimer   = nullptr;
 // Focus helpers — uses crosspad-gui's encoder input device
 // ---------------------------------------------------------------------------
 
-extern lv_indev_t* indev_encoderTop;   // from platform GUI init
-
 static void restore_focus_after_prompt() {
     if (s_promptGroup) { lv_group_delete(s_promptGroup); s_promptGroup = nullptr; }
     if (s_prevFocused) {
         lv_group_t* g = lv_obj_get_group(s_prevFocused);
-        if (g) { lv_indev_set_group(indev_encoderTop, g); lv_group_focus_obj(s_prevFocused); }
+        if (g) { lv_indev_set_group(crosspad_gui::getGuiPlatform().getNavigationEncoder(), g); lv_group_focus_obj(s_prevFocused); }
         s_prevFocused = nullptr;
     }
 }
@@ -62,7 +60,7 @@ void waveform_ui_create_prompt(lv_obj_t* canvas) {
     if (s_promptOverlay) return;
 
     // Save current focus
-    lv_group_t* cur = lv_indev_get_group(indev_encoderTop);
+    lv_group_t* cur = lv_indev_get_group(crosspad_gui::getGuiPlatform().getNavigationEncoder());
     if (cur) s_prevFocused = lv_group_get_focused(cur);
 
     lv_obj_t* parent = lv_obj_get_parent(canvas);
@@ -77,17 +75,13 @@ void waveform_ui_create_prompt(lv_obj_t* canvas) {
     lv_obj_set_style_pad_all(s_promptOverlay, 1, 0);
 
     s_promptGroup = lv_group_create();
-    lv_indev_set_group(indev_encoderTop, s_promptGroup);
+    lv_indev_set_group(crosspad_gui::getGuiPlatform().getNavigationEncoder(), s_promptGroup);
 
     // Question
     lv_obj_t* label = lv_label_create(s_promptOverlay);
     lv_label_set_text(label, "Cache all\n.wav files\nat once?");
     lv_obj_set_style_text_color(label, lv_color_hex(0xCCCCCC), 0);
     lv_obj_align(label, LV_ALIGN_LEFT_MID, 5, 0);
-
-    // Shared styles from crosspad-gui
-    extern lv_style_t styleButton;
-    extern lv_style_t styleButtonPressed;
 
     // Yes button
     lv_obj_t* yesBtn = lv_button_create(s_promptOverlay);
