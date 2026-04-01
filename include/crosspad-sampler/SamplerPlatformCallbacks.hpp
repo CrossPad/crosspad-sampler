@@ -83,6 +83,48 @@ struct SamplerKitCallbacks {
 };
 
 // ---------------------------------------------------------------------------
+// Waveform loading — platform provides file info + raw PCM reading.
+// The cache and loader live in crosspad-sampler; only I/O is platform-specific.
+// ---------------------------------------------------------------------------
+
+/// Audio file metadata (returned by getFileInfo).
+struct AudioFileInfo {
+    uint32_t sampleCount = 0;
+    uint32_t sampleRate  = 0;
+    uint8_t  channels    = 0;
+    uint8_t  bitDepth    = 0;
+};
+
+struct SamplerWaveformCallbacks {
+    /// Get metadata for an audio file (sample count, rate, channels, etc.).
+    /// Platform wraps SampleStreamPlayer_GetInfo or equivalent.
+    bool (*getFileInfo)(const char* path, AudioFileInfo* outInfo)                     = nullptr;
+
+    /// Read downsampled/compressed waveform data from a file range.
+    /// outBuf receives `outSamples` int16_t values covering [startSample..endSample).
+    /// Platform wraps SampleStreamPlayer_GetWaveform or equivalent.
+    bool (*getWaveformSamples)(const char* path, int16_t* outBuf,
+                               uint32_t outSamples,
+                               uint32_t startSample, uint32_t endSample)             = nullptr;
+
+    /// Save binary data to a file path. Returns true on success.
+    /// Used by disk cache persistence.
+    bool (*writeFile)(const char* path, const uint8_t* data, uint32_t size)          = nullptr;
+
+    /// Read binary data from a file path into outBuf (up to maxSize bytes).
+    /// Returns actual bytes read, or 0 on failure.
+    uint32_t (*readFile)(const char* path, uint8_t* outBuf, uint32_t maxSize)        = nullptr;
+
+    /// Allocate memory for waveform cache (platform routes to PSRAM if available).
+    /// Falls back to malloc if nullptr.
+    void* (*allocWaveformMem)(uint32_t bytes)                                        = nullptr;
+
+    /// Free memory allocated by allocWaveformMem.
+    /// Falls back to free if nullptr.
+    void  (*freeWaveformMem)(void* ptr)                                              = nullptr;
+};
+
+// ---------------------------------------------------------------------------
 // File browsing — platform provides a way to open a file browser.
 // The callback receives the selected file path or nullptr on cancel.
 // ---------------------------------------------------------------------------
@@ -103,9 +145,10 @@ struct SamplerFileCallbacks {
 // ---------------------------------------------------------------------------
 
 struct SamplerPlatformCallbacks {
-    SamplerPlayerCallbacks player;
-    SamplerKitCallbacks    kit;
-    SamplerFileCallbacks   file;
+    SamplerPlayerCallbacks   player;
+    SamplerKitCallbacks      kit;
+    SamplerFileCallbacks     file;
+    SamplerWaveformCallbacks waveform;
 };
 
 /// Register the platform callbacks.  Must be called before sampler_panel_create().

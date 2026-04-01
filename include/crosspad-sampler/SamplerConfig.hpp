@@ -41,4 +41,14 @@ constexpr const char* DEFAULT_KIT_PATH = "/crosspad/kits";
 // Loop end sentinel value (max uint32_t)
 constexpr uint32_t SAMPLE_END_MAX = 0xFFFFFFFF;
 
+// Waveform cache
+constexpr int WAVEFORM_CACHE_SIZE = 17;  // 16 pads + 1 preview
+constexpr uint32_t TARGET_CACHE_SAMPLES = 600; // Fixed target cache sample count
+
+// Waveform loader (FreeRTOS task)
+constexpr int LOADER_QUEUE_SIZE  = 32;
+constexpr int LOADER_STACK_SIZE  = 6192;
+constexpr int LOADER_PRIORITY    = 2;
+constexpr int LOADER_CORE        = 0;    // Core 0 (LVGL on Core 1)
+
 } // namespace crosspad_sampler
