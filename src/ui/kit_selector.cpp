@@ -104,11 +104,10 @@ static void load_poll_timer_cb(lv_timer_t* timer) {
     auto* mgr = crosspad::getKitManager();
     if (mgr && !mgr->isLoading()) {
         s_loadingStarted = false;
+        // Notify caller — caller is responsible for destroying the overlay
+        // (e.g. via thisApp->destroyApp() which calls kit_selector_destroy)
         if (s_onLoaded) {
             s_onLoaded(s_userData);
-        }
-        if (s_overlay) {
-            kit_selector_destroy(s_overlay);
         }
     }
 }
