@@ -48,7 +48,6 @@ static uint32_t portable_millis() {
 }
 
 lv_subject_t s_pad_sampler; // subject for the last pressed pad (non-static: shared with pad_editor)
-static lv_subject_t s_preview_audio; // subject for the preview audio, bool
 static lv_subject_t s_kit_name; // subject for the kit name label
 static lv_subject_t s_audio_idx; // subject for the audio index
 static lv_subject_t s_audio_name; // subject for the audio name label
@@ -363,8 +362,6 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
 
     static long lastTime = 0;
     static char time_str[24]; // Increased buffer for "M:SS:T / M:SS:T" format
-    static uint8_t last_pad = 1; // last pad number
-    static uint8_t last_sampleIdx = 0; // last sample index
     static crosspad::KitInfo * lastKit = NULL; // last kit
 
     // Check for pad state changes and update GUI directly (timer-safe approach)
@@ -482,7 +479,7 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
         int minutes = (elapsedMs / 1000) / 60;
 
         // Calculate total sample duration (if sample info available)
-        char totalTimeStr[16] = "";
+        char totalTimeStr[24] = "";
         if (sampleInfoValid && currentSampleInfo.sampleRate > 0) {
             crosspad::KitInfo* kitP = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
             uint32_t startS = 0, endS = 0;
@@ -694,9 +691,6 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent)
         }
         *actualSamples = count;
     }, nullptr);
-    // color for the panel
-    lv_color_t color = lv_color_hex(0xF0F0F0);
-
     g_sampler = lv_group_create(); // create the group for the sampler buttons
     lv_indev_t * navEncoder = crosspad_gui::getGuiPlatform().getNavigationEncoder();
     if (navEncoder) lv_indev_set_group(navEncoder, g_sampler); // set the group for the encoder input device
@@ -738,9 +732,6 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent)
     lv_obj_align(editBtn, LV_ALIGN_BOTTOM_MID, 50, -8);
     lv_obj_add_event_cb(editBtn, [](lv_event_t * e) {
         LV_LOG_INFO("Opening pad editor");
-        uint8_t padIdx = 0;
-        int sv = lv_subject_get_int(&s_pad_sampler);
-        if (sv > 0 && sv <= 16) padIdx = static_cast<uint8_t>(sv - 1);
         // Create pad editor as child overlay of the sampler container
         lv_obj_t * cont = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
         if (cont) {
