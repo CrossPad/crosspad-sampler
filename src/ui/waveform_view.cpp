@@ -20,8 +20,9 @@ static void*                s_userData  = nullptr;
 /// PCM buffer used during waveform_view_load() — one sample per canvas pixel column.
 static int16_t s_waveformBuf[WAVEFORM_CANVAS_WIDTH];
 
-/// Canvas pixel buffer (RGB565, one per pixel).
-static lv_color_t cbuf[LV_CANVAS_BUF_SIZE(WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT, 16, 1)];
+/// Canvas pixel buffer — allocated from PSRAM on first use to avoid wasting DRAM.
+static uint8_t* cbuf = nullptr;
+static constexpr uint32_t CBUF_BYTES = LV_CANVAS_BUF_SIZE(WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT, 16, 1);
 
 // ---------------------------------------------------------------------------
 // Helper: convert uint32_t 0xRRGGBB to lv_color_t
@@ -54,6 +55,15 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
     lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
 
     // --- Canvas (child index 0) ---
+    // Allocate canvas buffer from PSRAM if available, else heap
+    if (!cbuf) {
+#ifdef ESP_PLATFORM
+        cbuf = static_cast<uint8_t*>(heap_caps_malloc(CBUF_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+#endif
+        if (!cbuf) {
+            cbuf = static_cast<uint8_t*>(malloc(CBUF_BYTES));
+        }
+    }
     lv_obj_t* canvas = lv_canvas_create(cont);
     lv_canvas_set_buffer(canvas, cbuf, WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT,
                          LV_COLOR_FORMAT_RGB565);
