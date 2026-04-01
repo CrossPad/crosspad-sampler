@@ -1,0 +1,10 @@
+{
+    "name": "crosspad-sampler",
+    "version": "0.1.0",
+    "description": "CrossPad Sampler Application — shared LVGL GUI and business logic",
+    "keywords": ["crosspad", "sampler", "lvgl", "pad"],
+    "dependencies": {
+        "crosspad-core": "*",
+        "crosspad-gui": "*"
+    }
+}
