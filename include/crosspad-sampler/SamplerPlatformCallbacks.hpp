@@ -64,24 +64,17 @@ struct SamplerEngineCallbacks {
 };
 
 // ---------------------------------------------------------------------------
-// Kit operations — things that are platform-specific because they hit the
-// filesystem or the platform's kit loader implementation.
+// Audio reload — platform-specific because they hit the audio engine
+// (e.g. SampleStreamPlayer_SetupSample, WipeOut, async FreeRTOS task).
+// Kit metadata is accessed via PlatformServices (IKitManager/IKitLoader).
 // ---------------------------------------------------------------------------
 
-struct SamplerKitCallbacks {
-    /// Resolve a relative sample path to the full filesystem path.
-    /// Returns a pointer to an internal buffer valid until the next call.
-    const char* (*getFullPath)(const char* sampleRelPath)                              = nullptr;
-    /// Save the current kit to persistent storage.
-    void (*saveKit)()                                                                  = nullptr;
-    /// Reload the current kit from persistent storage (discard in-memory edits).
-    void (*loadKit)()                                                                  = nullptr;
+struct SamplerAudioCallbacks {
     /// Reload a single pad in the audio engine (after sample assignment changes).
     void (*reloadPad)(uint8_t padIdx)                                                  = nullptr;
     /// Reload all pads in the audio engine.
     void (*reloadPads)()                                                               = nullptr;
     /// Check if a waveform cache file exists for the given kit.
-    /// Returns true if cache is available on disk.
     bool (*hasCacheFile)(int kitId)                                                   = nullptr;
     /// Start async kit loading (platform spawns background task).
     /// kitId = index in IKitManager, onlyModified = reload dirty pads only.
@@ -103,46 +96,35 @@ struct AudioFileInfo {
 
 struct SamplerWaveformCallbacks {
     /// Get metadata for an audio file (sample count, rate, channels, etc.).
-    /// Platform wraps SampleStreamPlayer_GetInfo or equivalent.
     bool (*getFileInfo)(const char* path, AudioFileInfo* outInfo)                     = nullptr;
 
     /// Read downsampled/compressed waveform data from a file range.
-    /// outBuf receives `outSamples` int16_t values covering [startSample..endSample).
-    /// Platform wraps SampleStreamPlayer_GetWaveform or equivalent.
     bool (*getWaveformSamples)(const char* path, int16_t* outBuf,
                                uint32_t outSamples,
                                uint32_t startSample, uint32_t endSample)             = nullptr;
 
     /// Save binary data to a file path. Returns true on success.
-    /// Used by disk cache persistence.
     bool (*writeFile)(const char* path, const uint8_t* data, uint32_t size)          = nullptr;
 
     /// Read binary data from a file path into outBuf (up to maxSize bytes).
-    /// Returns actual bytes read, or 0 on failure.
     uint32_t (*readFile)(const char* path, uint8_t* outBuf, uint32_t maxSize)        = nullptr;
 
     /// Allocate memory for waveform cache (platform routes to PSRAM if available).
-    /// Falls back to malloc if nullptr.
     void* (*allocWaveformMem)(uint32_t bytes)                                        = nullptr;
 
     /// Free memory allocated by allocWaveformMem.
-    /// Falls back to free if nullptr.
     void  (*freeWaveformMem)(void* ptr)                                              = nullptr;
 };
 
 // ---------------------------------------------------------------------------
-// File browsing — platform provides a way to open a file browser.
-// The callback receives the selected file path or nullptr on cancel.
+// Kit selector app callbacks — platform-specific actions around kit loading.
 // ---------------------------------------------------------------------------
 
-using FileSelectedCallback = void (*)(const char* filePath, void* userData);
-
-struct SamplerFileCallbacks {
-    /// Open a file browser rooted at basePath.  onSelected is called with
-    /// the chosen file path (or nullptr on cancel).
-    void (*openFileBrowser)(const char* basePath,
-                            FileSelectedCallback onSelected,
-                            void* userData)                                            = nullptr;
+struct KitSelectorAppCallbacks {
+    /// Called before a kit is loaded (e.g. stop sequencer playback).
+    void (*onBeforeKitLoad)(int kitId)  = nullptr;
+    /// Called after a kit has loaded (e.g. signal orchestrator).
+    void (*onKitLoaded)()               = nullptr;
 };
 
 // ---------------------------------------------------------------------------
@@ -151,10 +133,10 @@ struct SamplerFileCallbacks {
 // ---------------------------------------------------------------------------
 
 struct SamplerPlatformCallbacks {
-    SamplerPlayerCallbacks   player;
-    SamplerKitCallbacks      kit;
-    SamplerFileCallbacks     file;
-    SamplerWaveformCallbacks waveform;
+    SamplerPlayerCallbacks      player;
+    SamplerAudioCallbacks       audio;
+    SamplerWaveformCallbacks    waveform;
+    KitSelectorAppCallbacks     kitSelector;
 };
 
 /// Register the platform callbacks.  Must be called before sampler_panel_create().
@@ -164,8 +146,6 @@ void sampler_set_platform_callbacks(const SamplerPlatformCallbacks& cb);
 const SamplerPlatformCallbacks& sampler_get_platform_callbacks();
 
 /// Register the engine-to-sampler callbacks (NoteOn/NoteOff from audio engine).
-/// The sampler populates these; the platform should wire them into
-/// SampleStreamPlayer_NoteOnCb / SampleStreamPlayer_NoteOffCb.
 SamplerEngineCallbacks sampler_get_engine_callbacks();
 
 } // namespace crosspad_sampler

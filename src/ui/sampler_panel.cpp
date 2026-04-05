@@ -18,7 +18,9 @@
 #include <crosspad/pad/PadManager.hpp>
 #include <crosspad/pad/PadLedController.hpp>
 #include <crosspad/kit/IKitManager.hpp>
+#include <crosspad/kit/IKitLoader.hpp>
 #include <crosspad/kit/KitInfo.hpp>
+#include <crosspad/kit/KitPathUtils.hpp>
 #include <crosspad/event/IEventBus.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
 #include <crosspad/platform/IClock.hpp>
@@ -86,10 +88,10 @@ public:
             if (cb.player.noteOn) cb.player.noteOn(padIdx, velocity);
         } else {
             // One Shot / Hold: use PreviewSave for immediate feedback
-            const char* fullPath = cb.kit.getFullPath ? cb.kit.getFullPath(pad->samples[0].sample.c_str()) : nullptr;
-            if (fullPath) {
-                LV_LOG_INFO("Playing sample: %s", fullPath);
-                if (cb.player.previewSample) cb.player.previewSample(fullPath, pad->samples[0].start, pad->samples[0].end, pad->volume, pad->pan);
+            std::string resolved = crosspad::resolveKitSamplePath(kit->path, pad->samples[0].sample);
+            if (!resolved.empty()) {
+                LV_LOG_INFO("Playing sample: %s", resolved.c_str());
+                if (cb.player.previewSample) cb.player.previewSample(resolved.c_str(), pad->samples[0].start, pad->samples[0].end, pad->volume, pad->pan);
             }
         }
     }
@@ -285,8 +287,11 @@ static void ShowSaveConfirmationDialog(lv_obj_t * panel) {
     // Save button callback
     lv_obj_add_event_cb(saveBtn, [](lv_event_t * e) {
         LV_LOG_INFO("Saving kit before closing...");
-        auto& cb = sampler_get_platform_callbacks();
-        if (cb.kit.saveKit) cb.kit.saveKit();
+        auto* kitLoader = crosspad::getKitLoader();
+        auto* kitMgr = crosspad::getKitManager();
+        if (kitLoader && kitMgr && kitMgr->getCurrentKit()) {
+            kitLoader->saveKit(*kitMgr->getCurrentKit());
+        }
 
         // Clear both dirty flags after saving
         crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
@@ -317,8 +322,8 @@ static void ShowSaveConfirmationDialog(lv_obj_t * panel) {
             }
 
             // Reload the entire kit from storage to restore original values
-            auto& cb = sampler_get_platform_callbacks();
-            if (cb.kit.loadKit) cb.kit.loadKit();
+            auto* kitLdr = crosspad::getKitLoader();
+            if (kitLdr && kit) kitLdr->loadKit(*kit);
         }
 
         if (g_saveConfirmMsgbox) {
@@ -596,7 +601,8 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
                 if (kitP2 && padIdxTime < KIT_PADS && !kitP2->pads[padIdxTime].samples.empty()) {
                     uint8_t sIdx = currentSampleIndex[padIdxTime];
                     if (sIdx >= kitP2->pads[padIdxTime].samples.size()) sIdx = 0;
-                    const char* fullPath = cb.kit.getFullPath ? cb.kit.getFullPath(kitP2->pads[padIdxTime].samples[sIdx].sample.c_str()) : nullptr;
+                    std::string resolvedP = crosspad::resolveKitSamplePath(kitP2->path, kitP2->pads[padIdxTime].samples[sIdx].sample);
+                    const char* fullPath = resolvedP.empty() ? nullptr : resolvedP.c_str();
                     if (fullPath && (infoPath[0] == '\0' || strcmp(infoPath, fullPath) != 0)) {
                         sampleInfoValid = false;
                         if (cb.player.getSampleInfo) {
@@ -666,12 +672,9 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent)
         if (!kit || padIdx >= KIT_PADS) return;
         if (sampleSlot >= kit->pads[padIdx].samples.size()) return;
 
-        const auto& cb = sampler_get_platform_callbacks();
-        const char* fullPath = nullptr;
-        if (cb.kit.getFullPath) {
-            fullPath = cb.kit.getFullPath(kit->pads[padIdx].samples[sampleSlot].sample.c_str());
-        }
-        if (!fullPath || fullPath[0] == '\0') return;
+        std::string resolvedSample = crosspad::resolveKitSamplePath(kit->path, kit->pads[padIdx].samples[sampleSlot].sample);
+        if (resolvedSample.empty()) return;
+        const char* fullPath = resolvedSample.c_str();
 
         // Look up in waveform cache
         WaveformCacheEntry* entry = waveform_cache_find(fullPath);

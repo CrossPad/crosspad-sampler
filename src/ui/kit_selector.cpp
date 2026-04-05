@@ -90,8 +90,8 @@ static void on_load_clicked(lv_event_t* e) {
 
     // Start loading via platform callback
     const auto& cb = sampler_get_platform_callbacks();
-    if (cb.kit.startLoadKit) {
-        cb.kit.startLoadKit(s_selectedKitId, false);
+    if (cb.audio.startLoadKit) {
+        cb.audio.startLoadKit(s_selectedKitId, false);
         s_loadingStarted = true;
         if (s_loadBtn) lv_obj_set_state(s_loadBtn, LV_STATE_PRESSED, true);
     }
@@ -257,8 +257,8 @@ void kit_selector_refresh(lv_obj_t* selector) {
         }
 
         // Cache status dot
-        if (s_showCacheDots && cb.kit.hasCacheFile) {
-            bool cached = cb.kit.hasCacheFile(i);
+        if (s_showCacheDots && cb.audio.hasCacheFile) {
+            bool cached = cb.audio.hasCacheFile(i);
             lv_obj_t* label = lv_obj_get_child(btn, 1);
             if (label) lv_obj_set_flex_grow(label, 1);
 

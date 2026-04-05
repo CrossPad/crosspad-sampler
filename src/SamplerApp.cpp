@@ -4,6 +4,7 @@
 
 #include <crosspad-sampler/SamplerApp.hpp>
 #include <crosspad/app/AppRegistry.hpp>
+#include <crosspad/app/AppRegistrar.hpp>
 #include <crosspad/app/AppEntry.hpp>
 #include <crosspad-sampler/ui/sampler_panel.hpp>
 
@@ -31,5 +32,9 @@ void sampler_register() {
 }
 
 } // namespace crosspad_sampler
+
+// Auto-registration via crosspad-core AppRegistrar (cross-platform static constructor).
+// Kept alive by --whole-archive when library.json has "appLibrary": true.
+static crosspad::AppRegistrar s_sampler_reg(crosspad_sampler::sampler_get_entry());
 
 #endif // USE_LVGL

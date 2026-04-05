@@ -14,6 +14,7 @@
 #include <crosspad/pad/PadManager.hpp>
 #include <crosspad/kit/IKitManager.hpp>
 #include <crosspad/kit/KitInfo.hpp>
+#include <crosspad/kit/KitPathUtils.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
 #include <crosspad/platform/IClock.hpp>
 #include <crosspad/status/CrosspadStatus.hpp>
@@ -212,7 +213,7 @@ static void ShowDuplicateConfirmation(int sourcePadIdx, int targetPadIdx)
         target->CopyFrom(*source);
 
         // Reload target pad in sampler engine
-        if (cbs.kit.reloadPad) cbs.kit.reloadPad(s_dupTargetIdx);
+        if (cbs.audio.reloadPad) cbs.audio.reloadPad(s_dupTargetIdx);
 
         // Update LED color
         crosspad::getPadManager().setPadColor(s_dupTargetIdx, crosspad::HtmlColor(target->color));
@@ -455,7 +456,7 @@ static void DestroyPadEditor(lv_event_t * e) {
     // reload pad if it was modified in a way that requires sampler setup
     // (we avoid reload when only volume/pan/color were changed because those are applied immediately)
     auto & cbs = sampler_get_platform_callbacks();
-    if (cbs.kit.reloadPads) cbs.kit.reloadPads();
+    if (cbs.audio.reloadPads) cbs.audio.reloadPads();
 
     // switch back to default logic, assuming that sampler is the only entry point to this app
     crosspad::getPadManager().setActivePadLogic("Samplerrr"); // TODO: fix name, update sampler pad logic properly
@@ -610,7 +611,7 @@ static lv_obj_t * lv_CreatePadEditorContext(lv_obj_t *parent)
         pad->dirty = true; // needs reload
         pad->dirtyModified = true; // modified
         auto & cbs = sampler_get_platform_callbacks();
-        if (cbs.kit.reloadPad) cbs.kit.reloadPad(lv_subject_get_int(&s_pad_sampler) - 1);
+        if (cbs.audio.reloadPad) cbs.audio.reloadPad(lv_subject_get_int(&s_pad_sampler) - 1);
     }, LV_EVENT_VALUE_CHANGED, NULL);
 
     // volume
@@ -813,7 +814,7 @@ void Load_button_cb(lv_event_t * e) {
     }
 
     pad->AddSample(currentFile.path);
-    if (cbs.kit.reloadPad) cbs.kit.reloadPad(lv_subject_get_int(&s_pad_sampler)-1); // only this pad
+    if (cbs.audio.reloadPad) cbs.audio.reloadPad(lv_subject_get_int(&s_pad_sampler)-1); // only this pad
     lastPad = NULL; // force update on next timer tick
     lv_timer_resume(t_padUpdate);
 }
@@ -821,7 +822,8 @@ void Load_button_cb(lv_event_t * e) {
 // open file browser to load samples, stop pad update timer to prevent conflicts
 static void Browse_button_cb(lv_event_t * e) {
     LV_LOG_ERROR("Browse samples button pressed");
-    lv_obj_t * popup = lv_CreateFileExplorer(thisApp->getAppContainer(), FILTER_AUDIO, DEFAULT_KIT_PATH, Load_button_cb, lv_event_get_user_data(e));
+    lv_obj_t * parent = thisApp ? thisApp->getAppContainer() : lv_scr_act();
+    lv_obj_t * popup = lv_CreateFileExplorer(parent, FILTER_AUDIO, DEFAULT_KIT_PATH, Load_button_cb, lv_event_get_user_data(e));
     lv_timer_pause(t_padUpdate);
 }
 
@@ -864,7 +866,7 @@ void isMovingCb(lv_obj_t * list, lv_obj_t * item) {
             lastPad->SwapSamples(index, index - 1);
             int padId = lv_subject_get_int(&s_pad_sampler) - 1;
             auto & cbs = sampler_get_platform_callbacks();
-            if (cbs.kit.reloadPad) cbs.kit.reloadPad(padId); // only this pads
+            if (cbs.audio.reloadPad) cbs.audio.reloadPad(padId); // only this pads
         }
         else if (*diff > 0) {
             LV_LOG_WARN("Item moving down");
@@ -877,7 +879,7 @@ void isMovingCb(lv_obj_t * list, lv_obj_t * item) {
                     if(lastPad != NULL) {
                         lastPad->RemoveSample(index);
                         auto & cbs = sampler_get_platform_callbacks();
-                        if (cbs.kit.reloadPad) cbs.kit.reloadPad(lv_subject_get_int(&s_pad_sampler) - 1); // only this pads
+                        if (cbs.audio.reloadPad) cbs.audio.reloadPad(lv_subject_get_int(&s_pad_sampler) - 1); // only this pads
                     }
                     endMoving(list);
                     return;
@@ -892,7 +894,7 @@ void isMovingCb(lv_obj_t * list, lv_obj_t * item) {
             }
             int padId = lv_subject_get_int(&s_pad_sampler);
             auto & cbs = sampler_get_platform_callbacks();
-            if (cbs.kit.reloadPad) cbs.kit.reloadPad(padId - 1); // only this pads
+            if (cbs.audio.reloadPad) cbs.audio.reloadPad(padId - 1); // only this pads
         }
         else LV_LOG_INFO("No movement");
         lv_obj_scroll_to_view(item, LV_ANIM_ON);
@@ -931,8 +933,8 @@ void change_item_cb(lv_event_t * e) {
         if (kit != NULL) {
             LV_LOG_TRACE("Button: %s", lv_list_get_button_text(list, item));
             auto & cbs = sampler_get_platform_callbacks();
-            const char * fullPath = nullptr;
-            if (cbs.kit.getFullPath) fullPath = cbs.kit.getFullPath(lv_list_get_button_text(list, item));
+            std::string resolved = crosspad::resolveKitSamplePath(kit->path, lv_list_get_button_text(list, item));
+            const char * fullPath = resolved.empty() ? nullptr : resolved.c_str();
             if (fullPath) {
                 LV_LOG_INFO("Playing sample: %s", fullPath);
                 Pad * pad = &kit->pads[lv_subject_get_int(&s_pad_sampler) - 1];
@@ -1067,9 +1069,9 @@ static void UpdatePadEditor(lv_timer_t * e) {
 
     // Update waveform display for the first sample
     if (waveformView && pad->GetSampleCount() > 0) {
-        auto & cbs = sampler_get_platform_callbacks();
-        const char * fullPath = nullptr;
-        if (cbs.kit.getFullPath) fullPath = cbs.kit.getFullPath(pad->samples[0].sample.c_str());
+        KitInfo * kitForWf = getCurrentKit();
+        std::string resolvedWf = kitForWf ? crosspad::resolveKitSamplePath(kitForWf->path, pad->samples[0].sample) : "";
+        const char * fullPath = resolvedWf.empty() ? nullptr : resolvedWf.c_str();
         if (fullPath) {
             strncpy(currentWaveformPath, fullPath, sizeof(currentWaveformPath) - 1);
             currentWaveformPath[sizeof(currentWaveformPath) - 1] = '\0';

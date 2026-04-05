@@ -6,5 +6,8 @@
     "dependencies": {
         "crosspad-core": "*",
         "crosspad-gui": "*"
+    },
+    "build": {
+        "appLibrary": true
     }
 }

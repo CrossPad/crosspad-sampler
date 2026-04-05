@@ -7,6 +7,7 @@
 
 #include <crosspad/kit/IKitManager.hpp>
 #include <crosspad/kit/KitInfo.hpp>
+#include <crosspad/kit/KitPathUtils.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
 
 #include "freertos/FreeRTOS.h"
@@ -177,17 +178,15 @@ void waveform_loader_preload_kit(int maxPads) {
     auto* kit = mgr->getCurrentKit();
     if (!kit) return;
 
-    auto& kitCb = sampler_get_platform_callbacks().kit;
     if (maxPads > 16) maxPads = 16;
 
     for (int i = 0; i < maxPads; i++) {
         if (kit->pads[i].samples.empty()) continue;
 
-        // Resolve full path via platform callback
-        const char* fullPath = nullptr;
-        if (kitCb.getFullPath)
-            fullPath = kitCb.getFullPath(kit->pads[i].samples[0].sample.c_str());
-        if (!fullPath || fullPath[0] == '\0') continue;
+        // Resolve full path from kit directory + relative sample name
+        std::string resolvedPath = crosspad::resolveKitSamplePath(kit->path, kit->pads[i].samples[0].sample);
+        if (resolvedPath.empty()) continue;
+        const char* fullPath = resolvedPath.c_str();
 
         if (waveform_cache_find(fullPath)) continue;
 
