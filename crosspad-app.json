@@ -1,0 +1,9 @@
+{
+  "name": "Sampler",
+  "id": "sampler",
+  "description": "Sample player with 16 pads, waveform editing, kit management",
+  "category": "music",
+  "icon": "audio.png",
+  "requires": ["crosspad-core", "crosspad-gui"],
+  "component_path": "components/crosspad-sampler"
+}
