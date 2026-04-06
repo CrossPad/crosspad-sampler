@@ -1,6 +1,7 @@
 {
   "name": "Sampler",
   "id": "sampler",
+  "version": "0.1.0",
   "description": "Sample player with 16 pads, waveform editing, kit management",
   "category": "music",
   "icon": "audio.png",
@@ -9,5 +10,8 @@
   "requires": {
     "crosspad-core": ">=0.3.0",
     "crosspad-gui": ">=0.2.0"
-  }
+  },
+  "changelog": [
+    "0.1.0: Initial release — pad playback, waveform view, kit selector"
+  ]
 }
