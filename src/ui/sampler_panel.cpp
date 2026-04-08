@@ -659,8 +659,9 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
 }
 
 // create the sampler panel
-lv_obj_t * sampler_panel_create(lv_obj_t *parent)
+lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
 {
+    s_on_back = onBack;
     g_parentContainer = NULL;
     // Clear destruction flag in case this is a recreation after destroy.
     appIsDestroying = false;
