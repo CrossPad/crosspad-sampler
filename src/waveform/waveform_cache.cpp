@@ -172,8 +172,7 @@ bool waveform_cache_add(const char* filename, int16_t* waveform, uint32_t sample
             entry->valid = false;
         } else {
             memcpy(entry->waveformData, waveform, sampleCount * sizeof(int16_t));
-            strncpy(entry->filename, filename, sizeof(entry->filename) - 1);
-            entry->filename[sizeof(entry->filename) - 1] = '\0';
+            snprintf(entry->filename, sizeof(entry->filename), "%s", filename);
             entry->sampleCount = sampleCount;
             entry->valid = true;
             entry->lastUsed = ++s_timestamp;
@@ -320,8 +319,7 @@ bool waveform_cache_load_from_disk(const char* kitJsonPath) {
             if (!entry) {
                 cache_free(data);
             } else {
-                strncpy(entry->filename, filename, sizeof(entry->filename) - 1);
-                entry->filename[sizeof(entry->filename) - 1] = '\0';
+                snprintf(entry->filename, sizeof(entry->filename), "%s", filename);
                 entry->waveformData = data;
                 entry->sampleCount = sampleCount;
                 entry->valid = true;
