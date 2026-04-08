@@ -63,13 +63,19 @@ void lv_KitSelector_destroy(lv_obj_t* app) {
 static crosspad::AppEntry kit_selector_get_entry() {
     crosspad::AppEntry entry;
     entry.name        = "KitSelector";
-    entry.icon        = "I:/notepick.png";
+    entry.icon        = "notepick.png";
     entry.createLVGL  = lv_CreateKitSelector;
     entry.destroyLVGL = lv_KitSelector_destroy;
     entry.priority    = 50;
     return entry;
 }
 
+#ifdef CROSSPAD_REGISTER_APP_NAMED_FUNCTIONS
+void _register_KitSelector_app() {
+    crosspad::AppRegistry::getInstance().registerApp(kit_selector_get_entry());
+}
+#else
 static crosspad::AppRegistrar s_kit_selector_reg(kit_selector_get_entry());
+#endif
 
 #endif // USE_LVGL

@@ -7,21 +7,31 @@
 #include <crosspad/app/AppRegistrar.hpp>
 #include <crosspad/app/AppEntry.hpp>
 #include <crosspad-sampler/ui/sampler_panel.hpp>
+#include <crosspad-gui/app/App.hpp>
 
 #include <lvgl.h>
 
 namespace crosspad_sampler {
 
-// Wrapper matching the generic createLVGL signature (App* parameter is unused).
-static lv_obj_t* sampler_create_fn(lv_obj_t* parent, void* /*app*/) {
-    return sampler_panel_create(parent);
+static App* s_samplerApp = nullptr;
+
+static void sampler_back_cb() {
+    if (s_samplerApp && s_samplerApp->isStarted()) {
+        s_samplerApp->destroyApp();
+    }
+    s_samplerApp = nullptr;
+}
+
+static lv_obj_t* sampler_create_fn(lv_obj_t* parent, App* app) {
+    s_samplerApp = app;
+    return sampler_panel_create(parent, sampler_back_cb);
 }
 
 crosspad::AppEntry sampler_get_entry() {
     crosspad::AppEntry entry;
     entry.name     = "Sampler";
     entry.icon     = LV_SYMBOL_AUDIO;
-    entry.createLVGL  = reinterpret_cast<decltype(entry.createLVGL)>(sampler_create_fn);
+    entry.createLVGL  = sampler_create_fn;
     entry.destroyLVGL = sampler_panel_destroy;
     entry.priority = 0;
     return entry;
@@ -33,8 +43,14 @@ void sampler_register() {
 
 } // namespace crosspad_sampler
 
-// Auto-registration via crosspad-core AppRegistrar (cross-platform static constructor).
-// Kept alive by --whole-archive when library.json has "appLibrary": true.
+// Named registration function for ESP-IDF (static constructors are unreliable).
+// On Arduino/Linux, sampler_register() or static AppRegistrar can be used instead.
+#ifdef CROSSPAD_REGISTER_APP_NAMED_FUNCTIONS
+void _register_Sampler_app() {
+    crosspad_sampler::sampler_register();
+}
+#else
 static crosspad::AppRegistrar s_sampler_reg(crosspad_sampler::sampler_get_entry());
+#endif
 
 #endif // USE_LVGL

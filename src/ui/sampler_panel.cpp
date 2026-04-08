@@ -120,6 +120,8 @@ static bool inverseNotesInit = false;
 
 static lv_timer_t * timerPad = NULL;
 static lv_group_t * g_sampler = NULL; // group for the sampler buttons
+static lv_group_t * s_saved_group = NULL; // saved encoder group (restored on destroy)
+static void (*s_on_back)() = nullptr; // back button callback (calls app->destroyApp())
 
 // callback for the sampler buttons to play the sample
 // Unified sampler pad event callback handling press, release and click based on playback mode
@@ -243,11 +245,15 @@ static std::string FormatDirtyPadsList(const std::vector<uint8_t>& dirtyPadNumbe
 // Close the sampler app properly through orchestrator (deferred to avoid
 // destroying LVGL objects during event processing)
 static void close_sampler_async(void*) {
-    auto& orch = crosspad_gui::AppOrchestrator::getInstance();
-    auto* running = orch.getRunningApp();
-    if (running && running->isStarted()) {
-        running->destroyApp();
-        orch.setRunningApp(nullptr);
+    if (s_on_back) {
+        s_on_back();
+    } else {
+        auto& orch = crosspad_gui::AppOrchestrator::getInstance();
+        auto* running = orch.getRunningApp();
+        if (running && running->isStarted()) {
+            running->destroyApp();
+            orch.setRunningApp(nullptr);
+        }
     }
 }
 

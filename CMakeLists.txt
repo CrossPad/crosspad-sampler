@@ -14,3 +14,6 @@ idf_component_register(
         crosspad-core
         crosspad-gui
 )
+
+# Preserve static AppRegistrar constructors (REGISTER_APP / auto-registration)
+set_property(TARGET ${COMPONENT_LIB} PROPERTY WHOLE_ARCHIVE ON)

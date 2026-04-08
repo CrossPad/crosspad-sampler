@@ -14,7 +14,7 @@ namespace crosspad_sampler {
 /// Initialises static logic objects, builds the UI, registers pad logic,
 /// and starts the periodic update timer.
 /// @return Pointer to the top-level lv_obj_t for the panel.
-lv_obj_t* sampler_panel_create(lv_obj_t* parent);
+lv_obj_t* sampler_panel_create(lv_obj_t* parent, void (*onBack)() = nullptr);
 
 /// Destroy the sampler panel previously created by sampler_panel_create().
 /// Stops the timer, clears UI state, unregisters pad logic, and
