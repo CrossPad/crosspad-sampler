@@ -4,6 +4,7 @@
 
 #include <crosspad-sampler/ui/kit_selector.hpp>
 #include <crosspad-sampler/SamplerPlatformCallbacks.hpp>
+#include <crosspad-sampler/logic/kit_load_task.hpp>
 
 #include <crosspad/kit/IKitManager.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
@@ -101,8 +102,7 @@ static void load_poll_timer_cb(lv_timer_t* timer) {
     (void)timer;
     if (!s_loadingStarted) return;
 
-    auto* mgr = crosspad::getKitManager();
-    if (mgr && !mgr->isLoading()) {
+    if (!kit_load_task_is_loading()) {
         s_loadingStarted = false;
         // Notify caller — caller is responsible for destroying the overlay
         // (e.g. via thisApp->destroyApp() which calls kit_selector_destroy)

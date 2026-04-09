@@ -18,7 +18,6 @@
 #include <crosspad/pad/PadManager.hpp>
 #include <crosspad/pad/PadLedController.hpp>
 #include <crosspad/kit/IKitManager.hpp>
-#include <crosspad/kit/IKitLoader.hpp>
 #include <crosspad/kit/KitInfo.hpp>
 #include <crosspad/kit/KitPathUtils.hpp>
 #include <crosspad/event/IEventBus.hpp>
@@ -293,10 +292,9 @@ static void ShowSaveConfirmationDialog(lv_obj_t * panel) {
     // Save button callback
     lv_obj_add_event_cb(saveBtn, [](lv_event_t * e) {
         LV_LOG_INFO("Saving kit before closing...");
-        auto* kitLoader = crosspad::getKitLoader();
         auto* kitMgr = crosspad::getKitManager();
-        if (kitLoader && kitMgr && kitMgr->getCurrentKit()) {
-            kitLoader->saveKit(*kitMgr->getCurrentKit());
+        if (kitMgr && kitMgr->getCurrentKit()) {
+            kitMgr->saveKit(*kitMgr->getCurrentKit());
         }
 
         // Clear both dirty flags after saving
@@ -328,8 +326,8 @@ static void ShowSaveConfirmationDialog(lv_obj_t * panel) {
             }
 
             // Reload the entire kit from storage to restore original values
-            auto* kitLdr = crosspad::getKitLoader();
-            if (kitLdr && kit) kitLdr->loadKit(*kit);
+            auto* kitMgr2 = crosspad::getKitManager();
+            if (kitMgr2 && kit) kitMgr2->loadKit(*kit);
         }
 
         if (g_saveConfirmMsgbox) {
@@ -658,6 +656,11 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
     }
 }
 
+// ── Shared logic objects (must precede sampler_panel_create) ───────────
+static SamplerPadLogic g_samplerPadLogic;
+static PadColorManager g_padColorManager;
+static KitOrchestrator g_kitOrchestrator;
+
 // create the sampler panel
 lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
 {
@@ -757,6 +760,11 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_group_add_obj(g_sampler, editBtn); // add the edit button to the group
     g_samplerPadEditorLogic = std::make_shared<PadEditorLogicHandler>();
     crosspad::getPadManager().registerPadLogic("Pad editor", g_samplerPadEditorLogic);
+
+    // Register and activate the main sampler pad logic (fingerdrumming)
+    static auto s_samplerLogic = std::shared_ptr<SamplerPadLogic>(&g_samplerPadLogic, [](SamplerPadLogic*){});
+    crosspad::getPadManager().registerPadLogic("Sampler", s_samplerLogic);
+    crosspad::getPadManager().setActivePadLogic("Sampler");
 
     // add keys
     // Create pad buttons without attaching default callbacks (pass NULL) then add our custom events
@@ -881,8 +889,10 @@ void sampler_panel_destroy(lv_obj_t * panel)
     // Set destruction flag to prevent issues during cleanup
     appIsDestroying = true;
 
+    crosspad::getPadManager().setActivePadLogic("");
+    crosspad::getPadManager().unregisterPadLogic("Sampler");
     crosspad::getPadManager().unregisterPadLogic("Pad editor");
-    g_samplerPadEditorLogic.reset(); // release the shared pointer
+    g_samplerPadEditorLogic.reset();
 
     lv_group_delete(g_sampler); // delete the group
     lv_subject_deinit(&s_pad_sampler);
@@ -941,10 +951,6 @@ void sampler_panel_destroy(lv_obj_t * panel)
 }
 
 // ── Accessors for shared logic objects ──────────────────────────────────
-
-static SamplerPadLogic g_samplerPadLogic;
-static PadColorManager g_padColorManager;
-static KitOrchestrator g_kitOrchestrator;
 
 SamplerPadLogic& getSamplerPadLogic() { return g_samplerPadLogic; }
 PadColorManager& getPadColorManager() { return g_padColorManager; }

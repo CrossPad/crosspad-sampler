@@ -66,7 +66,7 @@ struct SamplerEngineCallbacks {
 // ---------------------------------------------------------------------------
 // Audio reload — platform-specific because they hit the audio engine
 // (e.g. SampleStreamPlayer_SetupSample, WipeOut, async FreeRTOS task).
-// Kit metadata is accessed via PlatformServices (IKitManager/IKitLoader).
+// Kit metadata is accessed via PlatformServices (IKitManager).
 // ---------------------------------------------------------------------------
 
 struct SamplerAudioCallbacks {

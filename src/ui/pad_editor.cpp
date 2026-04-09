@@ -459,7 +459,7 @@ static void DestroyPadEditor(lv_event_t * e) {
     if (cbs.audio.reloadPads) cbs.audio.reloadPads();
 
     // switch back to default logic, assuming that sampler is the only entry point to this app
-    crosspad::getPadManager().setActivePadLogic("Samplerrr"); // TODO: fix name, update sampler pad logic properly
+    crosspad::getPadManager().setActivePadLogic("Sampler");
     auto * st = getStatus();
     if (st) st->isSamplerPlaying = true; // re-enable sampler direct playback
     LV_LOG_INFO("Pad editor destroyed");

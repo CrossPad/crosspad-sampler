@@ -14,7 +14,7 @@ using KitLoadProgressFn = void (*)(int current, int total, void* userData);
 /**
  * @brief Coordinates kit switching for the Sampler app.
  *
- * Stops all active sample playback, loads the new kit via IKitLoader,
+ * Stops all active sample playback, loads the new kit via IKitManager,
  * updates pad colors, reports load progress, and posts AppChanged to the
  * event bus.
  */
@@ -29,11 +29,11 @@ public:
     ///
     /// Flow:
     ///   1. Return false if already loading.
-    ///   2. Retrieve IKitManager and IKitLoader from PlatformServices.
-    ///   3. Retrieve the KitInfo for @p kitId from IKitManager.
+    ///   2. Retrieve IKitManager from PlatformServices.
+    ///   3. Retrieve the KitInfo for @p kitId.
     ///   4. Set loading_ = true.
     ///   5. Stop all playback (pads 0–15 via postSamplePlayback).
-    ///   6. Call IKitLoader::loadKit().
+    ///   6. Call IKitManager::loadKit() and setCurrentKitId().
     ///   7. On success, call PadColorManager::loadColorsFromKit().
     ///   8. Invoke the progress callback with (padsLoaded, PAD_COUNT).
     ///   9. Set loading_ = false.

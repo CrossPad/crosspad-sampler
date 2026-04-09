@@ -4,7 +4,6 @@
 #include <crosspad-sampler/logic/pad_color_manager.hpp>
 #include <crosspad-sampler/SamplerConfig.hpp>
 
-#include <crosspad/kit/IKitLoader.hpp>
 #include <crosspad/kit/IKitManager.hpp>
 #include <crosspad/event/IEventBus.hpp>
 #include <crosspad/event/EventTypes.hpp>
@@ -24,11 +23,9 @@ bool KitOrchestrator::changeKit(int kitId)
         return false;
     }
 
-    // 2. Obtain service pointers.
+    // 2. Obtain service pointer.
     crosspad::IKitManager* kitManager = crosspad::getKitManager();
-    crosspad::IKitLoader*  kitLoader  = crosspad::getKitLoader();
-
-    if (!kitManager || !kitLoader) {
+    if (!kitManager) {
         return false;
     }
 
@@ -51,8 +48,11 @@ bool KitOrchestrator::changeKit(int kitId)
             crosspad::EventSource::App);
     }
 
-    // 6. Load the kit from storage.
-    crosspad::KitLoadResult result = kitLoader->loadKit(*kit);
+    // 6. Load the kit from storage and track it as current.
+    crosspad::KitLoadResult result = kitManager->loadKit(*kit);
+    if (result.success) {
+        kitManager->setCurrentKitId(kitId);
+    }
 
     // 7. Sync pad colors with the newly loaded kit.
     if (result.success && colorManager_) {
