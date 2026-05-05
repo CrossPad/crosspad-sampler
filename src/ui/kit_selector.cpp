@@ -16,11 +16,13 @@ namespace crosspad_sampler {
 
 static KitSelectedFn s_onSelected  = nullptr;
 static KitLoadedFn   s_onLoaded    = nullptr;
+static KitClosedFn   s_onClose     = nullptr;
 static void*         s_userData    = nullptr;
 static bool          s_showCacheDots = true;
 
 static lv_group_t*   s_mainGroup   = nullptr;
 static lv_group_t*   s_listGroup   = nullptr;
+static lv_group_t*   s_prevGroup   = nullptr;
 static lv_obj_t*     s_loadBtn     = nullptr;
 static lv_obj_t*     s_overlay     = nullptr;
 static int           s_selectedKitId = -1;
@@ -36,6 +38,10 @@ static lv_indev_t* getEncoder() {
 
 static void on_back_clicked(lv_event_t* e) {
     (void)e;
+    if (s_onClose) {
+        s_onClose(s_userData);
+        return;
+    }
     lv_obj_t* overlay = s_overlay;
     if (overlay) kit_selector_destroy(overlay);
 }
@@ -117,6 +123,7 @@ static void load_poll_timer_cb(lv_timer_t* timer) {
 lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     s_onSelected = config.onSelected;
     s_onLoaded = config.onLoaded;
+    s_onClose = config.onClose;
     s_userData = config.userData;
     s_showCacheDots = config.showCacheDots;
     s_selectedKitId = -1;
@@ -142,7 +149,10 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     s_listGroup = lv_group_create();
 
     lv_indev_t* enc = getEncoder();
-    if (enc) lv_indev_set_group(enc, s_listGroup);
+    if (enc) {
+        s_prevGroup = lv_indev_get_group(enc);
+        lv_indev_set_group(enc, s_listGroup);
+    }
 
     // Back button
     lv_obj_t* backBtn = lv_CreateFooterButton(cont, "Back", -50, on_back_clicked);
@@ -172,14 +182,15 @@ void kit_selector_destroy(lv_obj_t* selector) {
         s_loadPollTimer = nullptr;
     }
 
-    // Detach encoder from our groups before deleting them
+    // Restore the previous encoder group (e.g. launcher) before deleting ours
     lv_indev_t* enc = getEncoder();
     if (enc) {
         lv_group_t* cur = lv_indev_get_group(enc);
         if (cur == s_mainGroup || cur == s_listGroup) {
-            lv_indev_set_group(enc, nullptr);
+            lv_indev_set_group(enc, s_prevGroup);
         }
     }
+    s_prevGroup = nullptr;
 
     if (s_mainGroup) {
         lv_group_delete(s_mainGroup);
@@ -277,6 +288,19 @@ void kit_selector_refresh(lv_obj_t* selector) {
 void kit_selector_set_callback(KitSelectedFn fn, void* userData) {
     s_onSelected = fn;
     s_userData = userData;
+}
+
+bool kit_selector_is_open() {
+    return s_overlay != nullptr;
+}
+
+void kit_selector_close() {
+    if (!s_overlay) return;
+    if (s_onClose) {
+        s_onClose(s_userData);
+        return;
+    }
+    kit_selector_destroy(s_overlay);
 }
 
 } // namespace crosspad_sampler

@@ -44,6 +44,14 @@ static void on_kit_loaded(void* /*userData*/) {
     }, nullptr);
 }
 
+static void on_kit_closed(void* /*userData*/) {
+    lv_async_call([](void*) {
+        if (s_thisApp && s_thisApp->isStarted()) {
+            s_thisApp->destroyApp();
+        }
+    }, nullptr);
+}
+
 lv_obj_t* lv_CreateKitSelector(lv_obj_t* parent, App* app) {
     s_thisApp = app;
 
@@ -51,6 +59,7 @@ lv_obj_t* lv_CreateKitSelector(lv_obj_t* parent, App* app) {
     config.parent        = parent;
     config.onSelected    = on_kit_selected;
     config.onLoaded      = on_kit_loaded;
+    config.onClose       = on_kit_closed;
     config.showCacheDots = true;
     return crosspad_sampler::kit_selector_create(config);
 }
