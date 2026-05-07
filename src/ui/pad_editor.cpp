@@ -1050,25 +1050,34 @@ static void UpdatePadEditor(lv_timer_t * e) {
         std::string resolvedWf = kitForWf ? crosspad::resolveKitSamplePath(kitForWf->path, pad->samples[0].sample) : "";
         const char * fullPath = resolvedWf.empty() ? nullptr : resolvedWf.c_str();
         if (fullPath) {
+            bool pathChanged = strcmp(currentWaveformPath, fullPath) != 0;
             strncpy(currentWaveformPath, fullPath, sizeof(currentWaveformPath) - 1);
             currentWaveformPath[sizeof(currentWaveformPath) - 1] = '\0';
             waveform_view_load(waveformView, (padId - 1) % 16, 0);
 
-            // Sample info for markers — skip for now to avoid SD race condition
-            // with audio engine (SampleStreamPlayer_GetInfo crashes if called
-            // while audio is streaming from SD)
-            waveformInfoValid = false;
+            // Use the waveform-side getFileInfo callback (separate fopen,
+            // no contention with SampleStreamPlayer's streaming handle).
+            if (pathChanged || !waveformInfoValid) {
+                auto& wf = sampler_get_platform_callbacks().waveform;
+                AudioFileInfo info = {};
+                if (wf.getFileInfo && wf.getFileInfo(fullPath, &info) && info.sampleCount > 0) {
+                    waveformSampleInfo.sampleCount      = info.sampleCount;
+                    waveformSampleInfo.sampleRate       = info.sampleRate;
+                    waveformSampleInfo.numberOfChannels = info.channels;
+                    waveformSampleInfo.bitsPerSample    = info.bitDepth;
+                    waveformInfoValid = true;
+                } else {
+                    waveformInfoValid = false;
+                }
+            }
 
-            // Update start/end markers using waveform_view API
             if (waveformInfoValid && waveformSampleInfo.sampleCount > 0) {
                 uint32_t startS = pad->samples[0].start;
                 uint32_t endS = pad->samples[0].end;
                 uint32_t totalSamples = waveformSampleInfo.sampleCount;
 
-                // If end is 0 or beyond total, use total samples
                 if (endS == 0 || endS > totalSamples) endS = totalSamples;
 
-                // Calculate marker positions (0.0 to 1.0 range)
                 float startPos = totalSamples > 0 ? (float)startS / (float)totalSamples : 0.0f;
                 float endPos = totalSamples > 0 ? (float)endS / (float)totalSamples : 1.0f;
 

@@ -222,7 +222,9 @@ void waveform_cache_notify_cached() {
 // ---------------------------------------------------------------------------
 
 static const char CACHE_MAGIC[4] = {'W', 'F', 'C', 'A'};
-static const uint8_t CACHE_VERSION = 1;
+// v2: full-file envelope (preload uses start=0/end=0). v1 entries were
+// cropped to the kit's in/out and would misalign with new markers.
+static const uint8_t CACHE_VERSION = 2;
 
 bool waveform_cache_save_to_disk(const char* kitJsonPath) {
     auto& wf = sampler_get_platform_callbacks().waveform;

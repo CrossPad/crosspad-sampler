@@ -190,10 +190,11 @@ void waveform_loader_preload_kit(int maxPads) {
 
         if (waveform_cache_find(fullPath)) continue;
 
-        uint32_t start = kit->pads[i].samples[0].start;
-        uint32_t end   = kit->pads[i].samples[0].end;
-
-        waveform_loader_request(fullPath, false, i, start, end);
+        // Cache the full-file envelope (start=0, end=0). Crop in/out is
+        // expressed via start/end markers on top of the rendered view,
+        // not by trimming the cache, so that the markers stay aligned
+        // with the displayed waveform.
+        waveform_loader_request(fullPath, false, i, 0, 0);
     }
 }
 
