@@ -67,6 +67,7 @@ static bool dontUpdateSettings = false;
 lv_group_t * pad_editor_group; // main group for whole overlay app
 lv_group_t * settings_editor_group; // group for the settings select functions
 lv_group_t * samples_editor_group; // group for the samples list select functions
+static lv_group_t * s_priorEncoderGroup = nullptr; // restored on destroy so encoder doesn't dangle
 
 static crosspad_gui::ILvglApp * thisApp = NULL; // current app instance
 
@@ -270,6 +271,8 @@ lv_obj_t * pad_editor_create(lv_obj_t *parent, crosspad_gui::ILvglApp * a) {
     // Enable wrap around for settings group (scroll down from last item goes to first)
     lv_group_set_wrap(settings_editor_group, true);
 
+    // remember caller's encoder group (e.g. sampler) so we can restore it on destroy
+    s_priorEncoderGroup = lv_indev_get_group(getEncoder());
     // set group to select between: back, browse, list, settings
     lv_indev_set_group(getEncoder(), pad_editor_group);
     // changing the group is handled elsewhere
@@ -429,12 +432,20 @@ static void DestroyPadEditor(lv_event_t * e) {
     lv_subject_deinit(&s_Volume);
     lv_subject_deinit(&s_Pan);
 
+    // restore encoder to caller's group BEFORE deleting our groups, otherwise
+    // the indev keeps a dangling pointer and the next lv_indev_read will deref freed mem
+    lv_indev_set_group(getEncoder(), s_priorEncoderGroup);
+    s_priorEncoderGroup = nullptr;
+
     lv_group_remove_all_objs(pad_editor_group);
     lv_group_remove_all_objs(settings_editor_group);
     lv_group_remove_all_objs(samples_editor_group);
     lv_group_delete(pad_editor_group);
     lv_group_delete(settings_editor_group);
     lv_group_delete(samples_editor_group);
+    pad_editor_group = nullptr;
+    settings_editor_group = nullptr;
+    samples_editor_group = nullptr;
 
     // Spinbox widgets will be automatically cleaned up via LV_EVENT_DELETE when container is destroyed
 
