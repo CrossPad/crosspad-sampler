@@ -297,12 +297,6 @@ lv_obj_t * pad_editor_create(lv_obj_t *parent, crosspad_gui::ILvglApp * a) {
     lv_label_set_text(browseLabel, "Browse");
     lv_obj_set_style_text_color(browseLabel, lv_color_hex(0x000000), 0);
 
-    // Pad indicator on the top
-    lv_obj_t * padIndicator = lv_label_create(cont);
-    lv_obj_align(padIndicator, LV_ALIGN_TOP_MID, 0, 4);
-    lv_label_bind_text(padIndicator, &s_pad_sampler, "Pad: %d");
-    lv_obj_add_style(padIndicator, &styleTitle, 0);
-
     // constants for both panels
     const int panelHeight = lv_obj_get_content_height(cont) - 70;
     const int panelWidth = (lv_obj_get_content_width(cont) / 2) - 15;
@@ -403,6 +397,18 @@ static void DestroyPadEditor(lv_event_t * e) {
     waveformPlaying = false;
 
     lastPad = NULL;
+
+    // Restore full LED colors for all pads (undo dim-others effect).
+    {
+        KitInfo * kit = getCurrentKit();
+        if (kit) {
+            auto & pm = crosspad::getPadManager();
+            for (int i = 0; i < 16; i++) {
+                pm.setPadColor((uint8_t)i, crosspad::HtmlColor(kit->pads[i].color));
+            }
+        }
+    }
+
     // reload pad if it was modified in a way that requires sampler setup
     // (we avoid reload when only volume/pan/color were changed because those are applied immediately)
     auto & cbs = sampler_get_platform_callbacks();
@@ -906,6 +912,24 @@ void change_item_cb(lv_event_t * e) {
     }
 }
 
+// Show selection on the physical pad LEDs: selected pad full color, others dim.
+static void applyPadEditorLeds(int selectedIdx) {
+    KitInfo * kit = getCurrentKit();
+    if (!kit) return;
+    auto & pm = crosspad::getPadManager();
+    for (int i = 0; i < 16; i++) {
+        uint32_t c = kit->pads[i].color;
+        if (i == selectedIdx) {
+            pm.setPadColor((uint8_t)i, crosspad::HtmlColor(c));
+        } else {
+            uint8_t r = ((c >> 16) & 0xFF) / 16;
+            uint8_t g = ((c >> 8)  & 0xFF) / 16;
+            uint8_t b = ( c        & 0xFF) / 16;
+            pm.setPadColor((uint8_t)i, r, g, b);
+        }
+    }
+}
+
 // update the pad editor variables
 static void UpdatePadEditor(lv_timer_t * e) {
     LV_LOG_INFO("Update pad editor...");
@@ -929,6 +953,9 @@ static void UpdatePadEditor(lv_timer_t * e) {
 
     if (pad == lastPad) return;
     lastPad = pad;
+
+    // Reflect selected pad on physical LEDs (full color), dim the rest.
+    applyPadEditorLeds((padId - 1) % 16);
 
     dontUpdateSettings = true;
 
