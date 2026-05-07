@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 
+#include <crosspad/kit/IKitManager.hpp>
+
 namespace crosspad_sampler {
 
 class PadColorManager;
@@ -39,8 +41,8 @@ public:
     ///   9. Set loading_ = false.
     ///  10. Post AppChanged("Sampler") via IEventBus.
     ///
-    /// @return true if the kit was loaded successfully.
-    bool changeKit(int kitId);
+    /// @return KitLoadResult — success flag, error string, padsLoaded.
+    crosspad::KitLoadResult changeKit(int kitId);
 
     /// Register a callback that is invoked with load progress.
     void setProgressCallback(KitLoadProgressFn fn, void* userData);

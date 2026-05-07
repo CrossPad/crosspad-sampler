@@ -16,23 +16,28 @@ void KitOrchestrator::init(PadColorManager& colorManager)
     colorManager_ = &colorManager;
 }
 
-bool KitOrchestrator::changeKit(int kitId)
+crosspad::KitLoadResult KitOrchestrator::changeKit(int kitId)
 {
+    crosspad::KitLoadResult result;
+
     // 1. Bail out if a load is already in progress.
     if (loading_) {
-        return false;
+        result.error = "Already loading";
+        return result;
     }
 
     // 2. Obtain service pointer.
     crosspad::IKitManager* kitManager = crosspad::getKitManager();
     if (!kitManager) {
-        return false;
+        result.error = "Kit manager unavailable";
+        return result;
     }
 
     // 3. Retrieve the kit metadata.
     crosspad::KitInfo* kit = kitManager->getKit(kitId);
     if (!kit) {
-        return false;
+        result.error = "Kit not found";
+        return result;
     }
 
     // 4. Mark as loading.
@@ -49,7 +54,7 @@ bool KitOrchestrator::changeKit(int kitId)
     }
 
     // 6. Load the kit from storage and track it as current.
-    crosspad::KitLoadResult result = kitManager->loadKit(*kit);
+    result = kitManager->loadKit(*kit);
     if (result.success) {
         kitManager->setCurrentKitId(kitId);
     }
@@ -70,7 +75,7 @@ bool KitOrchestrator::changeKit(int kitId)
     // 10. Notify the rest of the system that the active app has changed.
     bus.postAppChanged("Sampler", crosspad::EventSource::App);
 
-    return result.success;
+    return result;
 }
 
 void KitOrchestrator::setProgressCallback(KitLoadProgressFn fn, void* userData)
