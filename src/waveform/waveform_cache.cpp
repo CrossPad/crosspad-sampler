@@ -25,9 +25,11 @@ int waveformsCached       = 0;
 // ---------------------------------------------------------------------------
 
 static WaveformCacheEntry s_cache[WAVEFORM_CACHE_SIZE] = {};
-static uint32_t           s_timestamp  = 0;
-static void*              s_cachedKit  = nullptr;
-static SemaphoreHandle_t  s_mutex      = nullptr;
+static uint32_t           s_timestamp        = 0;
+static void*              s_cachedKit        = nullptr;
+static char               s_cachedKitPath[256] = {};
+static bool               s_savedThisBatch   = false;
+static SemaphoreHandle_t  s_mutex            = nullptr;
 
 // ---------------------------------------------------------------------------
 // Memory helpers — route through platform callbacks if available
@@ -100,6 +102,8 @@ void waveform_cache_init() {
         }
         s_timestamp = 0;
         s_cachedKit = nullptr;
+        s_cachedKitPath[0] = '\0';
+        s_savedThisBatch = false;
         xSemaphoreGive(s_mutex);
     }
 
@@ -114,10 +118,12 @@ bool waveform_cache_clear_if_kit_changed(void* kitPtr, const char* kitPath) {
 
     waveform_cache_init();
     s_cachedKit = kitPtr;
-
-    // Try loading from disk cache
+    s_savedThisBatch = false;
     if (kitPath && kitPath[0]) {
+        snprintf(s_cachedKitPath, sizeof(s_cachedKitPath), "%s", kitPath);
         waveform_cache_load_from_disk(kitPath);
+    } else {
+        s_cachedKitPath[0] = '\0';
     }
 
     return true;
@@ -199,6 +205,16 @@ void waveform_cache_get_stats(int* loaded, int* total) {
 
 void waveform_cache_notify_cached() {
     if (totalWaveformsToCache > 0) waveformsCached++;
+
+    // Persist once when a top-up batch completes so the disk cache
+    // covers the newly added entries on next boot.
+    if (!s_savedThisBatch
+        && totalWaveformsToCache > 0
+        && waveformsCached >= totalWaveformsToCache
+        && s_cachedKitPath[0] != '\0') {
+        s_savedThisBatch = true;
+        waveform_cache_save_to_disk(s_cachedKitPath);
+    }
 }
 
 // ---------------------------------------------------------------------------
