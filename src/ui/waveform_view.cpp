@@ -139,18 +139,24 @@ void waveform_view_load(lv_obj_t* waveformView, uint8_t padIdx, uint8_t sampleSl
     const int32_t midY  = WAVEFORM_CANVAS_HEIGHT / 2;
     const float   scale = static_cast<float>(midY) / 32768.0f;
 
-    // Map samples to pixel columns; draw line segments between consecutive points.
-    for (uint32_t i = 1; i < actualSamples; ++i) {
-        int32_t x0 = static_cast<int32_t>(i - 1);
-        int32_t x1 = static_cast<int32_t>(i);
+    // One vertical bar per column from -|peak| to +|peak|. Each cached
+    // sample is the abs-max of its source bin, so |peak| is the bin's
+    // loudness; mirroring it gives the standard symmetric envelope. This
+    // keeps loud transients visible inside long high-compression bins
+    // where the prior point-to-point line would zigzag near midY.
+    for (uint32_t i = 0; i < actualSamples; ++i) {
+        int16_t v   = s_waveformBuf[i];
+        int32_t mag = static_cast<int32_t>((v < 0 ? -v : v) * scale);
+        if (mag < 1) mag = 1;
 
-        int32_t y0 = midY - static_cast<int32_t>(s_waveformBuf[i - 1] * scale);
-        int32_t y1 = midY - static_cast<int32_t>(s_waveformBuf[i]     * scale);
+        int32_t x   = static_cast<int32_t>(i);
+        int32_t yTop = midY - mag;
+        int32_t yBot = midY + mag;
 
-        dsc.p1 = lv_point_precise_t{ static_cast<lv_value_precise_t>(x0),
-                                     static_cast<lv_value_precise_t>(y0) };
-        dsc.p2 = lv_point_precise_t{ static_cast<lv_value_precise_t>(x1),
-                                     static_cast<lv_value_precise_t>(y1) };
+        dsc.p1 = lv_point_precise_t{ static_cast<lv_value_precise_t>(x),
+                                     static_cast<lv_value_precise_t>(yTop) };
+        dsc.p2 = lv_point_precise_t{ static_cast<lv_value_precise_t>(x),
+                                     static_cast<lv_value_precise_t>(yBot) };
 
         lv_draw_line(&layer, &dsc);
     }
