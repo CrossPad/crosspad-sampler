@@ -64,9 +64,7 @@ static bool dontUpdateSettings = false;
 
 // Styles are now available via crosspad-gui/styles/styles.h (included through crosspad_gui.h)
 
-lv_group_t * pad_editor_group; // main group for whole overlay app
-lv_group_t * settings_editor_group; // group for the settings select functions
-lv_group_t * samples_editor_group; // group for the samples list select functions
+lv_group_t * pad_editor_group; // single flat group: settings widgets, list items, then bottom buttons
 static lv_group_t * s_priorEncoderGroup = nullptr; // restored on destroy so encoder doesn't dangle
 
 static crosspad_gui::ILvglApp * thisApp = NULL; // current app instance
@@ -122,45 +120,6 @@ static void DestroyPadEditor(lv_event_t * e);
 static void UpdateWaveformMarkers();
 static void ShowDuplicateConfirmation(int sourcePadIdx, int targetPadIdx);
 static void ExitDuplicateMode();
-
-static void SampleListFocusCb(lv_event_t * e) {
-    lv_obj_t * cont = (lv_obj_t *)lv_event_get_current_target(e);
-    lv_obj_t * other = (lv_obj_t *)lv_event_get_user_data(e);
-    lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_FOCUSED) {
-        LV_LOG_INFO("Samples list focused");
-        lv_indev_set_group(getEncoder(), samples_editor_group);
-        lv_state_t state = lv_obj_get_state(cont);
-        if (state & LV_STATE_FOCUSED && other != NULL) {
-            LV_LOG_TRACE("Samples list focused, defocusing other");
-            lv_obj_set_state(other, LV_STATE_FOCUSED, false);
-        }
-    }
-    if (code == LV_EVENT_DEFOCUSED) {
-        LV_LOG_INFO("Samples list defocused");
-        // it's not the list, only its children; ignore
-        if (cont != lv_event_get_target(e)) return;
-        lv_indev_set_group(getEncoder(), pad_editor_group);
-    }
-}
-
-static void SettingsListFocusCb(lv_event_t * e) {
-    lv_obj_t * cont = (lv_obj_t *)lv_event_get_current_target(e);
-    lv_obj_t * other = (lv_obj_t *)lv_event_get_user_data(e);
-    lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_FOCUSED) {
-        LV_LOG_INFO("Settings list focused");
-        lv_indev_set_group(getEncoder(), settings_editor_group);
-        if (other != NULL) {
-            LV_LOG_TRACE("Settings list focused, defocusing other");
-            lv_obj_set_state(other, LV_STATE_FOCUSED, false);
-        }
-    }
-    if (code == LV_EVENT_DEFOCUSED) {
-        LV_LOG_INFO("Settings list defocused");
-        lv_indev_set_group(getEncoder(), pad_editor_group);
-    }
-}
 
 // Exit duplicate mode and reset button style
 static void ExitDuplicateMode()
@@ -265,17 +224,11 @@ lv_obj_t * pad_editor_create(lv_obj_t *parent, crosspad_gui::ILvglApp * a) {
     lv_style_set_border_opa(&stylePadEditorContSel, LV_OPA_COVER);
 
     pad_editor_group = lv_group_create();
-    settings_editor_group = lv_group_create();
-    samples_editor_group = lv_group_create();
-
-    // Enable wrap around for settings group (scroll down from last item goes to first)
-    lv_group_set_wrap(settings_editor_group, true);
+    lv_group_set_wrap(pad_editor_group, true);
 
     // remember caller's encoder group (e.g. sampler) so we can restore it on destroy
     s_priorEncoderGroup = lv_indev_get_group(getEncoder());
-    // set group to select between: back, browse, list, settings
     lv_indev_set_group(getEncoder(), pad_editor_group);
-    // changing the group is handled elsewhere
 
     lv_obj_update_layout(parent); // refresh layout
     // constants for the buttons (3 buttons: Close, Record, Browse)
@@ -284,7 +237,6 @@ lv_obj_t * pad_editor_create(lv_obj_t *parent, crosspad_gui::ILvglApp * a) {
 
     // add close button (left)
     lv_obj_t * closeBtn = lv_button_create(cont);
-    lv_group_add_obj(pad_editor_group, closeBtn); // global group
     lv_obj_align(closeBtn, LV_ALIGN_BOTTOM_LEFT, 10, buttonYoffset);
     lv_obj_add_event_cb(closeBtn, [](lv_event_t * e) {
         LV_LOG_WARN("Close button clicked");
@@ -301,7 +253,6 @@ lv_obj_t * pad_editor_create(lv_obj_t *parent, crosspad_gui::ILvglApp * a) {
 
     // add copy/duplicate button (center)
     g_duplicateBtn = lv_button_create(cont);
-    lv_group_add_obj(pad_editor_group, g_duplicateBtn);
     lv_obj_align(g_duplicateBtn, LV_ALIGN_BOTTOM_MID, 0, buttonYoffset);
     lv_obj_add_event_cb(g_duplicateBtn, [](lv_event_t * e) {
         if (g_duplicateMode) {
@@ -337,7 +288,6 @@ lv_obj_t * pad_editor_create(lv_obj_t *parent, crosspad_gui::ILvglApp * a) {
 
     // add browse button (right)
     lv_obj_t * browseBtn = lv_button_create(cont);
-    lv_group_add_obj(pad_editor_group, browseBtn); // global group
     lv_obj_align(browseBtn, LV_ALIGN_BOTTOM_RIGHT, -10, buttonYoffset);
     lv_obj_add_event_cb(browseBtn, Browse_button_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_style(browseBtn, &styleButton, 0);
@@ -359,10 +309,8 @@ lv_obj_t * pad_editor_create(lv_obj_t *parent, crosspad_gui::ILvglApp * a) {
     const int panelYoffset = -8; // negative to move up
     const int panelXoffset = 5; // from the wall
 
-    // Left panel with settings
+    // Left panel with settings (settings widgets are added to pad_editor_group inside)
     lv_obj_t * settingsContext = lv_CreatePadEditorContext(cont);
-    lv_group_add_obj(pad_editor_group, settingsContext); // global group
-    lv_obj_add_style(settingsContext, &stylePadEditorContSel, LV_STATE_FOCUSED);
     lv_obj_align(settingsContext, LV_ALIGN_LEFT_MID, panelXoffset, panelYoffset);
     lv_obj_set_size(settingsContext, panelWidth, panelHeight);
 
@@ -370,25 +318,22 @@ lv_obj_t * pad_editor_create(lv_obj_t *parent, crosspad_gui::ILvglApp * a) {
     waveformView = waveform_view_create(cont);
     lv_obj_align(waveformView, LV_ALIGN_RIGHT_MID, -5, 0);
 
-    // Sample list as thin strip above waveform
+    // Sample list as thin strip above waveform (items are added to pad_editor_group in UpdatePadEditor)
     list = lv_list_create(cont);
-    lv_group_add_obj(pad_editor_group, list); // global group
     lv_obj_add_style(list, &styleFileExplorerList, 0);
     lv_obj_add_style(list, &styleFileExplorerScrollbar, LV_PART_SCROLLBAR);
-    lv_obj_add_style(list, &stylePadEditorContSel, LV_STATE_FOCUSED);
     lv_obj_set_width(list, lv_obj_get_width(waveformView)); // Match waveform width
     lv_obj_set_style_max_height(list, 30, 0); // Thin strip - 30px height
     lv_obj_align_to(list, waveformView, LV_ALIGN_OUT_TOP_MID, 0, -5); // Position above waveform
     lv_list_add_button(list, LV_SYMBOL_WARNING, "Select pad"); // default item
 
-    // focus switching logic (note: order changed due to layout swap)
-    lv_obj_add_event_cb(settingsContext, SettingsListFocusCb, LV_EVENT_FOCUSED, list);
-    lv_obj_add_event_cb(settingsContext, SettingsListFocusCb, LV_EVENT_DEFOCUSED, NULL);
-    lv_obj_add_event_cb(list, SampleListFocusCb, LV_EVENT_FOCUSED, settingsContext);
-    lv_obj_add_event_cb(list, SampleListFocusCb, LV_EVENT_DEFOCUSED, NULL);
+    // Bottom buttons appended last so encoder cycle ends with Close → Copy → Browse → wrap
+    lv_group_add_obj(pad_editor_group, closeBtn);
+    lv_group_add_obj(pad_editor_group, g_duplicateBtn);
+    lv_group_add_obj(pad_editor_group, browseBtn);
 
-    // Set default focus to settings panel (left section) for immediate encoder editing
-    lv_group_focus_obj(settingsContext);
+    // Default focus: first useful settings widget
+    if (chokeSpinbox) lv_group_focus_obj(chokeSpinbox);
 
     // update timer setup - faster polling for better responsiveness
     t_padUpdate = lv_timer_create(UpdatePadEditor, 200, list);
@@ -438,14 +383,8 @@ static void DestroyPadEditor(lv_event_t * e) {
     s_priorEncoderGroup = nullptr;
 
     lv_group_remove_all_objs(pad_editor_group);
-    lv_group_remove_all_objs(settings_editor_group);
-    lv_group_remove_all_objs(samples_editor_group);
     lv_group_delete(pad_editor_group);
-    lv_group_delete(settings_editor_group);
-    lv_group_delete(samples_editor_group);
     pad_editor_group = nullptr;
-    settings_editor_group = nullptr;
-    samples_editor_group = nullptr;
 
     // Spinbox widgets will be automatically cleaned up via LV_EVENT_DELETE when container is destroyed
 
@@ -501,7 +440,7 @@ lv_obj_t * lv_CreateSpinnboxParam(lv_obj_t * label, char * txt, int xOffset, lv_
     // Create spinbox using the standard widget
     lv_obj_t * spinbox = lv_CreateStandardSpinbox(lv_obj_get_parent(label), min, max,
                          lv_subject_get_int(subject), value_change_cb,
-                         settings_editor_group, subject, &lv_font_montserrat_14);
+                         pad_editor_group, subject, &lv_font_montserrat_14);
 
     // Handle negative values width adjustment (needed for Pan which can be negative)
     if (min < 0) {
@@ -510,7 +449,7 @@ lv_obj_t * lv_CreateSpinnboxParam(lv_obj_t * label, char * txt, int xOffset, lv_
     }
 
     lv_obj_align_to(spinbox, label, LV_ALIGN_OUT_RIGHT_MID, xOffset, 0);
-    lv_group_add_obj(settings_editor_group, spinbox); // settings group
+    lv_group_add_obj(pad_editor_group, spinbox); // settings group
 
     return spinbox;
 }
@@ -593,7 +532,7 @@ static lv_obj_t * lv_CreatePadEditorContext(lv_obj_t *parent)
     lv_label_set_text(color, "Color: ");
     // color roller
     lv_obj_t * colorRoller = lv_CreateColorRoler(cont, &styleSelectedColor, false);
-    lv_group_add_obj(settings_editor_group, colorRoller); // settings group
+    lv_group_add_obj(pad_editor_group, colorRoller); // settings group
     lv_obj_align_to(colorRoller, color, LV_ALIGN_OUT_RIGHT_MID, 2, 0);
 
     // Add event to scroll to top when color roller gets focus (for wrap-around navigation)
@@ -672,7 +611,7 @@ static lv_obj_t * lv_CreatePadEditorContext(lv_obj_t *parent)
     lv_obj_set_width(modeDropdown, 85);
     lv_obj_add_style(modeDropdown, &styleAppContainer, 0);
     lv_obj_align_to(modeDropdown, modeLabel, LV_ALIGN_OUT_RIGHT_MID, 0, 0);
-    lv_group_add_obj(settings_editor_group, modeDropdown);
+    lv_group_add_obj(pad_editor_group, modeDropdown);
     lv_obj_add_event_cb(modeDropdown, [](lv_event_t * e){
         if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
         if (dontUpdateSettings) return;
@@ -699,7 +638,7 @@ static lv_obj_t * lv_CreatePadEditorContext(lv_obj_t *parent)
     lv_obj_align_to(startLabel, modeLabel, LV_ALIGN_OUT_BOTTOM_LEFT, 0, entryYoffset);
     lv_label_set_text(startLabel, "Start: ");
     startSpinbox = lv_CreateStandardSpinbox(lv_obj_get_parent(startLabel), 0, INT32_MAX/16,
-                                 0, NULL, settings_editor_group, NULL, &lv_font_montserrat_14);
+                                 0, NULL, pad_editor_group, NULL, &lv_font_montserrat_14);
     lv_obj_align_to(startSpinbox, startLabel, LV_ALIGN_OUT_RIGHT_MID, 2, 0);
     lv_obj_add_event_cb(startSpinbox, [](lv_event_t * e) {
         int value = lv_spinbox_get_value((lv_obj_t*)lv_event_get_target(e));
@@ -725,7 +664,7 @@ static lv_obj_t * lv_CreatePadEditorContext(lv_obj_t *parent)
     lv_obj_align_to(endLabel, startLabel, LV_ALIGN_OUT_BOTTOM_LEFT, 0, entryYoffset);
     lv_label_set_text(endLabel, "End: ");
     endSpinbox = lv_CreateStandardSpinbox(lv_obj_get_parent(endLabel), 0, INT32_MAX/16,
-                                 0, NULL, settings_editor_group, NULL, &lv_font_montserrat_14);
+                                 0, NULL, pad_editor_group, NULL, &lv_font_montserrat_14);
     lv_obj_align_to(endSpinbox, endLabel, LV_ALIGN_OUT_RIGHT_MID, 2, 0);
     lv_obj_add_event_cb(endSpinbox, [](lv_event_t * e) {
         int value = lv_spinbox_get_value((lv_obj_t*)lv_event_get_target(e));
@@ -757,7 +696,7 @@ static lv_obj_t * lv_CreatePadEditorContext(lv_obj_t *parent)
     lv_obj_align_to(stepMultiplierBtn, stepLabel, LV_ALIGN_OUT_RIGHT_MID, 2, 0);
     lv_obj_add_style(stepMultiplierBtn, &styleSpinbox, 0);
     lv_obj_add_style(stepMultiplierBtn, &styleButtonPressed, LV_STATE_PRESSED);
-    lv_group_add_obj(settings_editor_group, stepMultiplierBtn);
+    lv_group_add_obj(pad_editor_group, stepMultiplierBtn);
 
     // Label inside button showing multiplier value
     lv_obj_t * stepValueLabel = lv_label_create(stepMultiplierBtn);
@@ -799,7 +738,7 @@ void Load_button_cb(lv_event_t * e) {
     LV_LOG_WARN("Load button pressed, closing file browser");
     lv_obj_t * obj = (lv_obj_t *)lv_event_get_target(e);
     lv_obj_delete_async(lv_obj_get_parent(obj));
-    lv_indev_set_group(getEncoder(), samples_editor_group); // switch encoder nav back
+    lv_indev_set_group(getEncoder(), pad_editor_group); // switch encoder nav back
 
     crosspad_gui::FileItem currentFile = GetCurrentFile();
     if (currentFile.path.empty() || currentFile.name.empty() || currentFile.isFolder) {
@@ -1044,7 +983,7 @@ static void UpdatePadEditor(lv_timer_t * e) {
         lv_obj_t * item = lv_list_add_button(list, LV_SYMBOL_AUDIO, pad->samples[i].sample.c_str());
         lv_obj_add_style(item, &styleFileExplorerEntry, 0);
         lv_obj_add_event_cb(item, change_item_cb, LV_EVENT_ALL, list);
-        lv_group_add_obj(samples_editor_group, item); // samples group
+        lv_group_add_obj(pad_editor_group, item); // samples group
         lv_obj_add_flag(item, LV_OBJ_FLAG_EVENT_BUBBLE);
     }
 
@@ -1071,7 +1010,7 @@ static void UpdatePadEditor(lv_timer_t * e) {
     adderItem = lv_list_add_button(list, LV_SYMBOL_PLUS, "Sample");
     lv_obj_add_style(adderItem, &styleFileExplorerEntry, 0);
     lv_obj_add_event_cb(adderItem, Browse_button_cb, LV_EVENT_CLICKED, NULL);
-    lv_group_add_obj(samples_editor_group, adderItem); // samples group
+    lv_group_add_obj(pad_editor_group, adderItem); // samples group
     lv_obj_set_hidden(adderItem, pad->GetSampleCount() >= maxSamples);
     lv_obj_add_flag(adderItem, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_set_style_bg_color(adderItem, lv_color_hex(0x008F00), LV_STATE_FOCUSED);
