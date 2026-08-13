@@ -15,6 +15,7 @@
 #include <freertos/idf_additions.h>
 #include <esp_heap_caps.h>
 
+#include <atomic>
 #include <cstring>
 #include <cstdio>
 
@@ -24,19 +25,30 @@ static volatile bool s_loading = false;
 
 static constexpr size_t LOAD_TASK_STACK = 8096;
 
-// ── lv_async_call helpers (thread-safe LVGL updates) ────────────────────────
+// ── Cross-thread progress hand-off ──────────────────────────────────────────
+// The load task must NOT touch LVGL: lv_async_call() itself mutates the timer
+// list and is not thread-safe without LV_USE_OS — concurrent calls from the
+// load task corrupted the list and crashed the LVGL task on a garbage
+// callback pointer (intermittent InstrFetchProhibited/LoadProhibited).
+// The task only writes these atomics; an LVGL timer created on the LVGL
+// thread in kit_load_task_start() polls them and drives the status bar.
 
-static void async_set_progress(void* data) {
-    int progress = reinterpret_cast<intptr_t>(data);
-    crosspad_gui::statusbar_set_loading(progress);
-}
+static std::atomic<int> s_progress{0};        // 0..100
+static std::atomic<int> s_outcome{0};         // 0 = running, 1 = done, -1 = error
 
-static void async_done(void* /*data*/) {
-    crosspad_gui::statusbar_process_loader_status(100, true, false, "Kit loaded");
-}
-
-static void async_error(void* /*data*/) {
-    crosspad_gui::statusbar_process_loader_status(100, true, true, "Kit load failed");
+static void progress_poll_timer_cb(lv_timer_t* timer) {
+    int outcome = s_outcome.load(std::memory_order_acquire);
+    if (outcome == 0) {
+        crosspad_gui::statusbar_set_loading(s_progress.load(std::memory_order_relaxed));
+        return;
+    }
+    if (outcome > 0) {
+        crosspad_gui::statusbar_process_loader_status(100, true, false, "Kit loaded");
+    } else {
+        crosspad_gui::statusbar_process_loader_status(100, true, true, "Kit load failed");
+    }
+    s_loading = false;
+    lv_timer_delete(timer);
 }
 
 // ── Background task ─────────────────────────────────────────────────────────
@@ -52,8 +64,7 @@ static void load_fn(void* param) {
 
     auto* kitMgr = crosspad::getKitManager();
     if (!kitMgr || !kitMgr->getCurrentKit()) {
-        lv_async_call(async_error, nullptr);
-        s_loading = false;
+        s_outcome.store(-1, std::memory_order_release);
         vTaskDelete(nullptr);
         return;
     }
@@ -68,12 +79,11 @@ static void load_fn(void* param) {
             cb.audio.reloadPad(padIdx);
         }
 
-        int progress = ((padIdx + 1) * 100) / PAD_COUNT;
-        lv_async_call(async_set_progress, reinterpret_cast<void*>(progress));
+        s_progress.store(((padIdx + 1) * 100) / PAD_COUNT,
+                         std::memory_order_relaxed);
     }
 
-    lv_async_call(async_done, nullptr);
-    s_loading = false;
+    s_outcome.store(1, std::memory_order_release);
     vTaskDelete(nullptr);
 }
 
@@ -88,8 +98,11 @@ void kit_load_task_poll() {
 }
 
 void kit_load_task_start(bool onlyModified) {
+    // Must be called from the LVGL thread (creates an lv_timer).
     if (s_loading) return;
     s_loading = true;
+    s_progress.store(0, std::memory_order_relaxed);
+    s_outcome.store(0, std::memory_order_release);
 
     crosspad_gui::statusbar_set_loading(0);
 
@@ -101,9 +114,11 @@ void kit_load_task_start(bool onlyModified) {
     if (ret != pdPASS) {
         printf("kit_load_task: xTaskCreate failed\n");
         delete p;
-        lv_async_call(async_error, nullptr);
+        crosspad_gui::statusbar_process_loader_status(100, true, true, "Kit load failed");
         s_loading = false;
+        return;
     }
+    lv_timer_create(progress_poll_timer_cb, 100, nullptr);
 }
 
 bool kit_load_task_is_loading() {
