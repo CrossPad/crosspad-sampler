@@ -119,7 +119,6 @@ static bool inverseNotesInit = false;
 
 static lv_timer_t * timerPad = NULL;
 static lv_group_t * g_sampler = NULL; // group for the sampler buttons
-static lv_group_t * s_saved_group = NULL; // saved encoder group (restored on destroy)
 static void (*s_on_back)() = nullptr; // back button callback (calls app->destroyApp())
 
 // callback for the sampler buttons to play the sample
@@ -523,8 +522,6 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
     // Update sample information when pad changes
     uint8_t pad = lv_subject_get_int(&s_pad_sampler);
     static uint8_t lastDisplayedPad = 0; // Track which pad was last displayed
-    static uint32_t lastDebugPrint = 0;
-    if (now - lastDebugPrint > 2000) { lastDebugPrint = now; LV_LOG_WARN("pad_subject=%d lastDisplayed=%d kit=%p waveform=%p", pad, lastDisplayedPad, (void*)kit, (void*)waveformCanvas); }
     static uint8_t lastDisplayedSampleIdx = 255; // Track last sample index displayed
 
     if (pad > 0) {
