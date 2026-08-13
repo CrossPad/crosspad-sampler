@@ -4,7 +4,6 @@
 
 #include <crosspad-sampler/SamplerApp.hpp>
 #include <crosspad/app/AppRegistry.hpp>
-#include <crosspad/app/AppRegistrar.hpp>
 #include <crosspad/app/AppEntry.hpp>
 #include <crosspad-sampler/ui/sampler_panel.hpp>
 #include <crosspad-gui/app/App.hpp>
@@ -43,14 +42,9 @@ void sampler_register() {
 
 } // namespace crosspad_sampler
 
-// Named registration function for ESP-IDF (static constructors are unreliable).
-// On Arduino/Linux, sampler_register() or static AppRegistrar can be used instead.
-#ifdef CROSSPAD_REGISTER_APP_NAMED_FUNCTIONS
+// Discovered by the platform registry generator.
 void _register_Sampler_app() {
     crosspad_sampler::sampler_register();
 }
-#else
-static crosspad::AppRegistrar s_sampler_reg(crosspad_sampler::sampler_get_entry());
-#endif
 
 #endif // USE_LVGL

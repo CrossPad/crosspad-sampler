@@ -15,5 +15,5 @@ idf_component_register(
         crosspad-gui
 )
 
-# Preserve static AppRegistrar constructors (REGISTER_APP / auto-registration)
+# Keep named _register_* functions available to the generated registry.
 set_property(TARGET ${COMPONENT_LIB} PROPERTY WHOLE_ARCHIVE ON)

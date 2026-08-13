@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
 // Kit Selector app — wraps kit_selector UI with platform callbacks
-// and LVGL app lifecycle.  Registered as a standalone app via AppRegistrar.
+// and LVGL app lifecycle. Registered via a named platform entry point.
 
 #ifdef USE_LVGL
 
@@ -10,7 +10,7 @@
 #include <crosspad-sampler/SamplerPlatformCallbacks.hpp>
 #include <crosspad-sampler/waveform/waveform_loader.hpp>
 #include <crosspad-sampler/waveform/waveform_cache.hpp>
-#include <crosspad/app/AppRegistrar.hpp>
+#include <crosspad/app/AppRegistry.hpp>
 #include <crosspad/kit/IKitManager.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
 #include <crosspad-gui/platform/IGuiPlatform.h>
@@ -79,12 +79,8 @@ static crosspad::AppEntry kit_selector_get_entry() {
     return entry;
 }
 
-#ifdef CROSSPAD_REGISTER_APP_NAMED_FUNCTIONS
 void _register_KitSelector_app() {
     crosspad::AppRegistry::getInstance().registerApp(kit_selector_get_entry());
 }
-#else
-static crosspad::AppRegistrar s_kit_selector_reg(kit_selector_get_entry());
-#endif
 
 #endif // USE_LVGL
