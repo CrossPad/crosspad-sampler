@@ -183,11 +183,13 @@ bool waveform_cache_add(const char* filename, int16_t* waveform, uint32_t sample
             entry->valid = true;
             entry->lastUsed = ++s_timestamp;
             ok = true;
-
-            waveform_cache_notify_cached();
         }
         xSemaphoreGive(s_mutex);
     }
+    // Outside the lock: notify may trigger save_to_disk, which takes s_mutex
+    // itself — calling it while held deadlocks the (non-recursive) mutex and
+    // the save silently writes nothing.
+    if (ok) waveform_cache_notify_cached();
     return ok;
 }
 
