@@ -109,8 +109,15 @@ void kit_load_task_start(bool onlyModified) {
     auto* p = new LoadParams{onlyModified};
 
     // Allocate task stack from PSRAM to avoid exhausting scarce internal SRAM.
+    // xTaskCreatePinnedToCoreWithCaps is ESP-IDF v5 only — Arduino (IDF v4.x)
+    // falls back to a plain internal-RAM stack.
+#if defined(ARDUINO)
+    BaseType_t ret = xTaskCreatePinnedToCore(load_fn, "kit_load", LOAD_TASK_STACK,
+                                             p, 1, nullptr, 0);
+#else
     BaseType_t ret = xTaskCreatePinnedToCoreWithCaps(load_fn, "kit_load", LOAD_TASK_STACK,
                                                      p, 1, nullptr, 0, MALLOC_CAP_SPIRAM);
+#endif
     if (ret != pdPASS) {
         printf("kit_load_task: xTaskCreate failed\n");
         delete p;
