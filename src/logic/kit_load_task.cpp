@@ -109,11 +109,17 @@ void kit_load_task_start(bool onlyModified) {
     auto* p = new LoadParams{onlyModified};
 
     // Allocate task stack from PSRAM to avoid exhausting scarce internal SRAM.
-    // xTaskCreatePinnedToCoreWithCaps is ESP-IDF v5 only — Arduino (IDF v4.x)
-    // falls back to a plain internal-RAM stack.
+    // xTaskCreatePinnedToCoreWithCaps is ESP-IDF v5 only — the Arduino build
+    // (IDF v4.x) uses a static BSS stack instead: its internal heap's largest
+    // free block (~7 kB at runtime) is smaller than LOAD_TASK_STACK, so a
+    // dynamically allocated stack fails outright. Buffers are reusable across
+    // loads — s_loading serializes them and load_fn self-deletes.
 #if defined(ARDUINO)
-    BaseType_t ret = xTaskCreatePinnedToCore(load_fn, "kit_load", LOAD_TASK_STACK,
-                                             p, 1, nullptr, 0);
+    static StaticTask_t s_loadTcb;
+    static StackType_t  s_loadStack[LOAD_TASK_STACK / sizeof(StackType_t)];
+    TaskHandle_t th = xTaskCreateStaticPinnedToCore(load_fn, "kit_load", LOAD_TASK_STACK,
+                                                    p, 1, s_loadStack, &s_loadTcb, 0);
+    BaseType_t ret = (th != nullptr) ? pdPASS : pdFAIL;
 #else
     BaseType_t ret = xTaskCreatePinnedToCoreWithCaps(load_fn, "kit_load", LOAD_TASK_STACK,
                                                      p, 1, nullptr, 0, MALLOC_CAP_SPIRAM);
