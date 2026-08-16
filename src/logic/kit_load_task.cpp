@@ -72,6 +72,10 @@ static void load_fn(void* param) {
     auto* kit = kitMgr->getCurrentKit();
     auto& cb = sampler_get_platform_callbacks();
 
+    // Let the audio/streaming background settle so it releases the storage
+    // bus and its file handles before the reload reopens files.
+    vTaskDelay(pdMS_TO_TICKS(150));
+
     for (uint8_t padIdx = 0; padIdx < PAD_COUNT; ++padIdx) {
         if (onlyModified && !kit->pads[padIdx].IsModified()) continue;
 
