@@ -115,9 +115,12 @@ void kit_load_task_start(bool onlyModified) {
     // dynamically allocated stack fails outright. Buffers are reusable across
     // loads — s_loading serializes them and load_fn self-deletes.
 #if defined(ARDUINO)
+    // 4 kB matches the stack the legacy Arduino loader task ran the same
+    // LoadPad work on; internal RAM is too scarce for the PSRAM-sized figure.
+    constexpr size_t kArduinoLoadStack = 4096;
     static StaticTask_t s_loadTcb;
-    static StackType_t  s_loadStack[LOAD_TASK_STACK / sizeof(StackType_t)];
-    TaskHandle_t th = xTaskCreateStaticPinnedToCore(load_fn, "kit_load", LOAD_TASK_STACK,
+    static StackType_t  s_loadStack[kArduinoLoadStack / sizeof(StackType_t)];
+    TaskHandle_t th = xTaskCreateStaticPinnedToCore(load_fn, "kit_load", kArduinoLoadStack,
                                                     p, 1, s_loadStack, &s_loadTcb, 0);
     BaseType_t ret = (th != nullptr) ? pdPASS : pdFAIL;
 #else
