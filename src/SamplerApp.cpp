@@ -6,9 +6,13 @@
 #include <crosspad/app/AppRegistry.hpp>
 #include <crosspad/app/AppEntry.hpp>
 #include <crosspad-sampler/ui/sampler_panel.hpp>
+#include <crosspad-sampler/SamplerPadLogic.hpp>
 #include <crosspad-gui/app/App.hpp>
+#include <crosspad/pad/PadManager.hpp>
+#include <crosspad/platform/PlatformServices.hpp>
 
 #include <lvgl.h>
+#include <memory>
 
 namespace crosspad_sampler {
 
@@ -34,6 +38,17 @@ crosspad::AppEntry sampler_get_entry() {
     entry.destroyLVGL = sampler_panel_destroy;
     entry.priority = 0;
     return entry;
+}
+
+void sampler_service_init() {
+    // Non-owning: the handler is a function-local static owned by the sampler
+    // panel translation unit and outlives every app instance, which is exactly
+    // what a system instrument needs.
+    auto logic = std::shared_ptr<SamplerPadLogic>(&getSamplerPadLogic(),
+                                                  [](SamplerPadLogic*) {});
+    auto& pads = crosspad::getPadManager();
+    pads.registerPadLogic("Sampler", logic);
+    pads.setBasePadLogic("Sampler");
 }
 
 void sampler_register() {

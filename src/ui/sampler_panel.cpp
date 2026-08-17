@@ -886,8 +886,10 @@ void sampler_panel_destroy(lv_obj_t * panel)
     // Set destruction flag to prevent issues during cleanup
     appIsDestroying = true;
 
+    // "Sampler" stays registered on purpose — it is the system instrument
+    // (sampler_service_init), so the pads keep playing after the app closes.
+    // setActivePadLogic("") drops back to it instead of going silent.
     crosspad::getPadManager().setActivePadLogic("");
-    crosspad::getPadManager().unregisterPadLogic("Sampler");
     crosspad::getPadManager().unregisterPadLogic("Pad editor");
     g_samplerPadEditorLogic.reset();
 

@@ -105,9 +105,11 @@ void SamplerPadLogic::onPadPress(crosspad::PadManager& padManager,
                                   uint8_t velocity) {
     if (padIdx >= PAD_COUNT) return;
 
-    // Trigger sample playback via EventBus
+    // Trigger sample playback via EventBus. The velocity handed to us is
+    // already post-curve (the STM32 applies the per-pad response curve), so
+    // it goes through linearly.
     crosspad::getEventBus().postSamplePlayback(
-        padIdx, /*wavIdx=*/0, /*isOn=*/true, crosspad::EventSource::App);
+        padIdx, /*wavIdx=*/0, /*isOn=*/true, crosspad::EventSource::App, velocity);
 
     // Visual feedback — light the pad as pressed
     padManager.notifyNoteOn(padIdx, velocity, /*fromSampler=*/true);
