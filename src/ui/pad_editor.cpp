@@ -68,6 +68,7 @@ lv_group_t * pad_editor_group; // single flat group: settings widgets, list item
 static lv_group_t * s_priorEncoderGroup = nullptr; // restored on destroy so encoder doesn't dangle
 
 static crosspad_gui::ILvglApp * thisApp = NULL; // current app instance
+static lv_obj_t * s_padEditorCont = NULL; // editor's own container — correctly bounded below the status bar
 
 // settings subjects
 lv_subject_t s_Color;
@@ -210,6 +211,7 @@ lv_obj_t * pad_editor_create(lv_obj_t *parent, crosspad_gui::ILvglApp * a) {
     lv_obj_set_size(cont, lv_obj_get_content_width(parent), lv_obj_get_content_height(parent));
     lv_obj_center(cont);
     lv_obj_add_style(cont, &styleAppContainer, 0);
+    s_padEditorCont = cont;
     lv_obj_add_event_cb(cont, DestroyPadEditor, LV_EVENT_DELETE, NULL);
     lv_obj_add_event_cb(cont, [](lv_event_t * e) {
         // if container is clicked, that means blank space is clicked, so defocus all childres
@@ -298,14 +300,17 @@ lv_obj_t * pad_editor_create(lv_obj_t *parent, crosspad_gui::ILvglApp * a) {
     lv_obj_set_style_text_color(browseLabel, lv_color_hex(0x000000), 0);
 
     // constants for both panels
-    const int panelHeight = lv_obj_get_content_height(cont) - 70;
+    const int panelTopMargin = 4; // no title above the panel anymore, keep this tight
+    const int panelBottomMargin = 27; // clears the Close/Copy/Browse footer band
+    const int panelHeight = lv_obj_get_content_height(cont) - panelTopMargin - panelBottomMargin;
     const int panelWidth = (lv_obj_get_content_width(cont) / 2) - 15;
-    const int panelYoffset = -8; // negative to move up
     const int panelXoffset = 5; // from the wall
 
     // Left panel with settings (settings widgets are added to pad_editor_group inside)
+    // Anchored to the top and stretched down — reclaims the space a removed
+    // title used to leave above it, so the params fit without scrolling.
     lv_obj_t * settingsContext = lv_CreatePadEditorContext(cont);
-    lv_obj_align(settingsContext, LV_ALIGN_LEFT_MID, panelXoffset, panelYoffset);
+    lv_obj_align(settingsContext, LV_ALIGN_TOP_LEFT, panelXoffset, panelTopMargin);
     lv_obj_set_size(settingsContext, panelWidth, panelHeight);
 
     // Right side: waveform display using waveform_view widget
@@ -381,6 +386,8 @@ static void DestroyPadEditor(lv_event_t * e) {
     pad_editor_group = nullptr;
 
     // Spinbox widgets will be automatically cleaned up via LV_EVENT_DELETE when container is destroyed
+
+    s_padEditorCont = NULL;
 
     // Clear duplicate mode state
     g_duplicateMode = false;
@@ -657,9 +664,12 @@ static lv_obj_t * lv_CreatePadEditorContext(lv_obj_t *parent)
         if (!pad->GetSampleCount()) return;
         SampleSlot * sample = &pad->samples[0]; // only one sample supported
         sample->start = value;
-        // mark pad as modified so it will be reloaded on exit (apply new start offset)
         pad->dirty = true; // needs reload
         pad->dirtyModified = true; // modified
+        // Reload now so pad-press playback (NoteOn) reflects the trim immediately,
+        // instead of only picking it up on the next kit save/exit.
+        auto & cbs = sampler_get_platform_callbacks();
+        if (cbs.audio.reloadPad) cbs.audio.reloadPad(padId);
         // Update waveform markers immediately
         UpdateWaveformMarkers();
     }, LV_EVENT_VALUE_CHANGED, NULL);
@@ -684,9 +694,12 @@ static lv_obj_t * lv_CreatePadEditorContext(lv_obj_t *parent)
         SampleSlot * sample = &pad->samples[0]; // only one sample supported
         if (value <= (int)sample->start) return; // ensure end > start
         sample->end = value;
-        // mark pad as modified so it will be reloaded on exit (apply new end offset)
         pad->dirty = true; // needs reload
         pad->dirtyModified = true; // modified
+        // Reload now so pad-press playback (NoteOn) reflects the trim immediately,
+        // instead of only picking it up on the next kit save/exit.
+        auto & cbs = sampler_get_platform_callbacks();
+        if (cbs.audio.reloadPad) cbs.audio.reloadPad(padId);
         // Update waveform markers immediately
         UpdateWaveformMarkers();
     }, LV_EVENT_VALUE_CHANGED, NULL);
@@ -778,7 +791,7 @@ void Load_button_cb(lv_event_t * e) {
 // open file browser to load samples, stop pad update timer to prevent conflicts
 static void Browse_button_cb(lv_event_t * e) {
     LV_LOG_ERROR("Browse samples button pressed");
-    lv_obj_t * parent = thisApp ? thisApp->getAppContainer() : lv_scr_act();
+    lv_obj_t * parent = thisApp ? thisApp->getAppContainer() : s_padEditorCont;
     lv_obj_t * popup = lv_CreateFileExplorer(parent, FILTER_AUDIO, DEFAULT_KIT_PATH, Load_button_cb, lv_event_get_user_data(e));
     lv_timer_pause(t_padUpdate);
 }

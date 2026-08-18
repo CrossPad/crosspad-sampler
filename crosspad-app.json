@@ -1,7 +1,7 @@
 {
   "name": "Sampler",
   "id": "sampler",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Sample player with 16 pads, waveform editing, kit management",
   "category": "music",
   "icon": "audio.png",
@@ -9,9 +9,10 @@
   "platforms": ["esp-idf", "arduino"],
   "requires": {
     "crosspad-core": ">=0.3.0",
-    "crosspad-gui": ">=0.2.0"
+    "crosspad-gui": ">=0.2.1"
   },
   "changelog": [
+    "0.2.1: Fix pad editor file browser off-screen, params panel scroll, pad-editor playback silence, live start/end trim preview",
     "0.2.0: Wire SamplerPadLogic, EventBus audio bridge, kit load task, end=0 normalization",
     "0.1.0: Initial release — pad playback, waveform view, kit selector"
   ]

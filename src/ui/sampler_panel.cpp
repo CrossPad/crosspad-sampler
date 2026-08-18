@@ -81,25 +81,22 @@ public:
         crosspad::Pad * pad = &kit->pads[padIdx];
         if (pad->sampleCount == 0) return;
 
-        auto& cb = sampler_get_platform_callbacks();
-        if (pad->playbackMode == 2) {
-            // Loop mode: use NoteOn (supports looping via SetLoopEnd)
-            if (cb.player.noteOn) cb.player.noteOn(padIdx, velocity);
-        } else {
-            // One Shot / Hold: use PreviewSave for immediate feedback
-            std::string resolved = crosspad::resolveKitSamplePath(kit->path, pad->samples[0].sample);
-            if (!resolved.empty()) {
-                LV_LOG_INFO("Playing sample: %s", resolved.c_str());
-                if (cb.player.previewSample) cb.player.previewSample(resolved.c_str(), pad->samples[0].start, pad->samples[0].end, pad->volume, pad->pan);
-            }
-        }
+        // Same trigger path as the main sampler window (SamplerPadLogic::onPadPress):
+        // the engine's own per-pad loop config (setLoopEnd/clearLoop) decides
+        // one-shot vs loop, not the call used to trigger it.
+        crosspad::getEventBus().postSamplePlayback(
+            padIdx, /*wavIdx=*/0, /*isOn=*/true, crosspad::EventSource::App, velocity);
     }
 
     void onPadRelease(PadManager& padManager, uint8_t padIdx) override {
         crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
         if (!kit) return;
-        // Loop stop is handled by PadManager toggle (EventBus NoteOff)
-        // Hold stop: NoteOff already posted by PadManager via EventBus
+
+        // Hold mode: cut playback on release, same as the main sampler window.
+        if (kit->parsed && kit->pads[padIdx].playbackMode == 1) {
+            crosspad::getEventBus().postSamplePlayback(
+                padIdx, /*wavIdx=*/0, /*isOn=*/false, crosspad::EventSource::App);
+        }
     }
     void onPadPressure(PadManager& padManager, uint8_t padIdx, uint8_t pressure) override {}
 };
