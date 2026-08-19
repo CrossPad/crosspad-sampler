@@ -79,6 +79,11 @@ struct SamplerAudioCallbacks {
     /// Start async kit loading (platform spawns background task).
     /// kitId = index in IKitManager, onlyModified = reload dirty pads only.
     void (*startLoadKit)(int kitId, bool onlyModified)                                = nullptr;
+    /// Called on the UI thread once a background kit load has finished, with
+    /// whether it succeeded. The load itself runs off-thread, so this is where
+    /// a platform does the follow-up work that must not happen there (cache
+    /// top-ups, status messages that need platform state).
+    void (*onKitLoadFinished)(bool success)                                            = nullptr;
 };
 
 // ---------------------------------------------------------------------------

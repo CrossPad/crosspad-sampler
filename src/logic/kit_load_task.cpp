@@ -4,6 +4,8 @@
 #include <crosspad-sampler/SamplerPlatformCallbacks.hpp>
 #include <crosspad-sampler/SamplerConfig.hpp>
 
+#include <crosspad-sampler/ui/sampler_panel.hpp>   // getKitOrchestrator()
+
 #include <crosspad/kit/IKitManager.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
 
@@ -36,6 +38,16 @@ static constexpr size_t LOAD_TASK_STACK = 8096;
 static std::atomic<int> s_progress{0};        // 0..100
 static std::atomic<int> s_outcome{0};         // 0 = running, 1 = done, -1 = error
 
+// Why the load failed, for the status bar. Written before s_outcome is stored
+// with release ordering and read after it is loaded with acquire, so that pair
+// publishes it — no extra lock needed.
+static char s_error[48] = {0};
+
+static void set_error(const char* msg) {
+    snprintf(s_error, sizeof(s_error), "%s",
+             (msg && *msg) ? msg : "Kit load failed");
+}
+
 static void progress_poll_timer_cb(lv_timer_t* timer) {
     int outcome = s_outcome.load(std::memory_order_acquire);
     if (outcome == 0) {
@@ -45,25 +57,49 @@ static void progress_poll_timer_cb(lv_timer_t* timer) {
     if (outcome > 0) {
         crosspad_gui::statusbar_process_loader_status(100, true, false, "Kit loaded");
     } else {
-        crosspad_gui::statusbar_process_loader_status(100, true, true, "Kit load failed");
+        crosspad_gui::statusbar_process_loader_status(100, true, true, s_error);
     }
     s_loading = false;
     lv_timer_delete(timer);
+
+    // Last, and on this thread: the platform's follow-up may touch UI or
+    // storage state the load task must not. Ordered after s_loading is cleared
+    // so a handler is free to start another load.
+    auto& cb = sampler_get_platform_callbacks();
+    if (cb.audio.onKitLoadFinished) {
+        cb.audio.onKitLoadFinished(outcome > 0);
+    }
 }
 
 // ── Background task ─────────────────────────────────────────────────────────
 
 struct LoadParams {
     bool onlyModified;
+    int  kitId;      // < 0 = a kit is already current, skip the change
 };
 
 static void load_fn(void* param) {
     auto* p = static_cast<LoadParams*>(param);
     bool onlyModified = p->onlyModified;
+    int  kitId        = p->kitId;
     delete p;
+
+    // The kit change belongs here, not on the caller's thread: it parses the
+    // kit JSON off storage, which is what made the UI thread miss the task
+    // watchdog when the selector drove it directly.
+    if (kitId >= 0) {
+        auto result = getKitOrchestrator().changeKit(kitId);
+        if (!result.success) {
+            set_error(result.error.c_str());
+            s_outcome.store(-1, std::memory_order_release);
+            vTaskDelete(nullptr);
+            return;
+        }
+    }
 
     auto* kitMgr = crosspad::getKitManager();
     if (!kitMgr || !kitMgr->getCurrentKit()) {
+        set_error("No kit loaded");
         s_outcome.store(-1, std::memory_order_release);
         vTaskDelete(nullptr);
         return;
@@ -101,16 +137,17 @@ void kit_load_task_poll() {
     // No-op — lv_async_call is drained by LVGL's own task handler.
 }
 
-void kit_load_task_start(bool onlyModified) {
+void kit_load_task_start(bool onlyModified, int kitId) {
     // Must be called from the LVGL thread (creates an lv_timer).
     if (s_loading) return;
     s_loading = true;
     s_progress.store(0, std::memory_order_relaxed);
+    set_error(nullptr);
     s_outcome.store(0, std::memory_order_release);
 
     crosspad_gui::statusbar_set_loading(0);
 
-    auto* p = new LoadParams{onlyModified};
+    auto* p = new LoadParams{onlyModified, kitId};
 
     // Allocate task stack from PSRAM to avoid exhausting scarce internal SRAM.
     // xTaskCreatePinnedToCoreWithCaps is ESP-IDF v5 only — the Arduino build
