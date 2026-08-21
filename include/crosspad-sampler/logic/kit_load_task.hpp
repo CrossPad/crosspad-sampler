@@ -13,7 +13,12 @@ void kit_load_task_init();
 /// On platforms using lv_async_call this is a no-op.
 void kit_load_task_poll();
 
-/// Start the background kit load.
+/// Start the background kit load. Must be called from the LVGL thread.
+///
+/// Requesting a load while one is running does not fail and is not dropped:
+/// the request is held and started when the running load reports. Only the
+/// most recent one is kept, so spinning through the selector lands on the kit
+/// you stopped at rather than replaying every kit you passed.
 ///
 /// @param onlyModified  reload only pads the kit marks as modified.
 /// @param kitId         when >= 0, the task runs KitOrchestrator::changeKit()
@@ -26,5 +31,8 @@ void kit_load_task_start(bool onlyModified, int kitId = -1);
 
 /// True while a background load task is running.
 bool kit_load_task_is_loading();
+
+/// Kit id held back until the running load finishes, or -1 if none is waiting.
+int kit_load_task_pending_kit();
 
 } // namespace crosspad_sampler
