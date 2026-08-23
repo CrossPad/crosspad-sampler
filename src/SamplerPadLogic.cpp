@@ -17,7 +17,9 @@
 #include <crosspad/pad/PadManager.hpp>
 #include <crosspad/pad/PadLedController.hpp>
 #include <crosspad/led/RgbColor.hpp>
+#include <crosspad/midi/IMidiOutput.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
+#include <crosspad/settings/CrosspadSettings.hpp>
 
 namespace crosspad_sampler {
 
@@ -29,6 +31,17 @@ static crosspad::RgbColor colorFromUint32(uint32_t rrggbb) {
     uint8_t g = (rrggbb >>  8) & 0xFF;
     uint8_t b = (rrggbb      ) & 0xFF;
     return crosspad::RgbColor(r, g, b);
+}
+
+/// The sampler is installed as the PadManager *base* pad logic, so an active
+/// handler exists from boot onwards and PadManager::handlePadPress() returns
+/// before its own MIDI branch ever runs. Pads would stop being a MIDI
+/// controller entirely, so the note is emitted here instead, under the same
+/// keypad gating PadManager applies. Routing to USB/STM32/BLE stays with
+/// MidiInputHandler behind getMidiOutput().
+static bool padMidiEnabled() {
+    auto* settings = crosspad::CrosspadSettings::getInstance();
+    return settings && settings->keypad.enableKeypad && !settings->keypad.sendCC;
 }
 
 // ── Static event callbacks ────────────────────────────────────────────────────
@@ -113,6 +126,12 @@ void SamplerPadLogic::onPadPress(crosspad::PadManager& padManager,
 
     // Visual feedback — light the pad as pressed
     padManager.notifyNoteOn(padIdx, velocity, /*fromSampler=*/true);
+
+    if (padMidiEnabled()) {
+        crosspad::getMidiOutput().sendNoteOn(padManager.getMidiNoteForPad(padIdx),
+                                             velocity,
+                                             padManager.getPadChannel(padIdx));
+    }
 }
 
 void SamplerPadLogic::onPadRelease(crosspad::PadManager& padManager,
@@ -121,6 +140,12 @@ void SamplerPadLogic::onPadRelease(crosspad::PadManager& padManager,
 
     // Visual feedback — return pad to resting state
     padManager.notifyNoteOff(padIdx, /*fromSampler=*/true);
+
+    if (padMidiEnabled()) {
+        crosspad::getMidiOutput().sendNoteOff(padManager.getMidiNoteForPad(padIdx),
+                                              /*velocity=*/0,
+                                              padManager.getPadChannel(padIdx));
+    }
 
     // For Hold mode (playbackMode == 1): send stop event so the audio engine
     // cuts playback when the pad is released.
