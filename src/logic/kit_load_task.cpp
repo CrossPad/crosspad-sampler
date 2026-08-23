@@ -118,6 +118,16 @@ static void progress_poll_timer_cb(lv_timer_t* timer) {
         cb.audio.onKitLoadFinished(outcome > 0);
     }
 
+    // Now that the load is over and no GUI callback is in flight, let the
+    // outgoing kit go. This has to happen on the LVGL thread: the panel
+    // reads getCurrentKit()->pads[i].samples across a waveform draw, which
+    // blocks on the SD card, and freeing those vectors from the loader
+    // thread crashed the reader when it resumed (LoadProhibited on a null
+    // samples[] base). Between timer callbacks there is no such reader.
+    if (crosspad::getKitManager()) {
+        crosspad::getKitManager()->releaseRetiredKit();
+    }
+
     // Last: whatever the user asked for while this one was busy. This runs on
     // the LVGL thread, which is where kit_load_task_start() must be called
     // from, and s_loading is already clear so the request is accepted.
