@@ -257,7 +257,8 @@ void kit_selector_refresh(lv_obj_t* selector) {
 
         lv_obj_t* btn = lv_list_add_button(list, LV_SYMBOL_FILE, kit->name.c_str());
         lv_obj_add_style(btn, &styleKitListItem, 0);
-        lv_obj_add_style(btn, &styleKitListItemFocused, LV_STATE_FOCUSED | LV_PART_SELECTED);
+        lv_obj_add_style(btn, &styleKitListItemFocused,
+                         (lv_style_selector_t)LV_STATE_FOCUSED | LV_PART_SELECTED);
         lv_obj_add_style(btn, &styleKitListItemSelected, LV_STATE_PRESSED);
         lv_obj_add_event_cb(btn, on_list_item_clicked, LV_EVENT_CLICKED, list);
         if (s_listGroup) lv_group_add_obj(s_listGroup, btn);

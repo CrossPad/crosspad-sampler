@@ -234,7 +234,6 @@ lv_obj_t * pad_editor_create(lv_obj_t *parent, crosspad_gui::ILvglApp * a) {
 
     lv_obj_update_layout(parent); // refresh layout
     // constants for the buttons (3 buttons: Close, Record, Browse)
-    const int buttonXoffset = 80;
     const int buttonYoffset = -8;
 
     // add close button (left)
@@ -792,7 +791,7 @@ void Load_button_cb(lv_event_t * e) {
 static void Browse_button_cb(lv_event_t * e) {
     LV_LOG_ERROR("Browse samples button pressed");
     lv_obj_t * parent = thisApp ? thisApp->getAppContainer() : s_padEditorCont;
-    lv_obj_t * popup = lv_CreateFileExplorer(parent, FILTER_AUDIO, DEFAULT_KIT_PATH, Load_button_cb, lv_event_get_user_data(e));
+    lv_CreateFileExplorer(parent, FILTER_AUDIO, DEFAULT_KIT_PATH, Load_button_cb, lv_event_get_user_data(e));
     lv_timer_pause(t_padUpdate);
 }
 
