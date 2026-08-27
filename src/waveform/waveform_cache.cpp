@@ -48,6 +48,21 @@ static void cache_free(void* ptr) {
 }
 
 // ---------------------------------------------------------------------------
+// Lock
+// ---------------------------------------------------------------------------
+
+/* The mutex used to exist only after waveform_cache_init(), and only the kit
+ * selector's pre-load hook called that. A kit loaded any other way — the boot
+ * auto-load, a CDC KIT_LOAD, the sampler's own change — left it null, and with
+ * a null mutex every add() and find() answered "no" without a word: the loader
+ * read all sixteen files and cached none of them. The lock is created on first
+ * use, whichever function that is. */
+static SemaphoreHandle_t lock() {
+    if (!s_mutex) s_mutex = xSemaphoreCreateMutex();
+    return s_mutex;
+}
+
+// ---------------------------------------------------------------------------
 // LRU helper
 // ---------------------------------------------------------------------------
 
@@ -88,10 +103,7 @@ static bool get_cache_path(const char* kitJsonPath, char* out, int maxLen) {
 // ---------------------------------------------------------------------------
 
 void waveform_cache_init() {
-    if (!s_mutex) {
-        s_mutex = xSemaphoreCreateMutex();
-        if (!s_mutex) return;
-    }
+    if (!lock()) return;
 
     if (xSemaphoreTake(s_mutex, portMAX_DELAY)) {
         for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {
@@ -137,8 +149,10 @@ WaveformCacheEntry* waveform_cache_find(const char* filename) {
     if (!filename) return nullptr;
     WaveformCacheEntry* result = nullptr;
 
-    // Non-blocking try-lock to avoid stalling UI
-    if (s_mutex && xSemaphoreTake(s_mutex, 0)) {
+    /* A short wait, not a try-lock: the loader holds the mutex only for a
+     * memcpy of 1.2 kB, but a try-lock that met it reported "not cached" and
+     * the panel drew an empty box for a waveform that was there. */
+    if (lock() && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(20))) {
         for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {
             if (s_cache[i].valid && strcmp(s_cache[i].filename, filename) == 0) {
                 s_cache[i].lastUsed = ++s_timestamp;
@@ -155,7 +169,7 @@ bool waveform_cache_add(const char* filename, int16_t* waveform, uint32_t sample
     if (!filename || !waveform || sampleCount == 0) return false;
     bool ok = false;
 
-    if (s_mutex && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100))) {
+    if (lock() && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100))) {
         // Already cached?
         WaveformCacheEntry* entry = nullptr;
         for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {
@@ -197,7 +211,7 @@ void waveform_cache_get_stats(int* loaded, int* total) {
     if (!loaded || !total) return;
     *total = WAVEFORM_CACHE_SIZE;
     *loaded = 0;
-    if (s_mutex && xSemaphoreTake(s_mutex, 0)) {
+    if (lock() && xSemaphoreTake(s_mutex, 0)) {
         for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {
             if (s_cache[i].valid) (*loaded)++;
         }

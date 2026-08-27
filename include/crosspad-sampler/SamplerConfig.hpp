@@ -42,7 +42,9 @@ constexpr const char* DEFAULT_KIT_PATH = "/crosspad/kits";
 constexpr uint32_t SAMPLE_END_MAX = 0xFFFFFFFF;
 
 // Waveform cache
-constexpr int WAVEFORM_CACHE_SIZE = 17;  // 16 pads + 1 preview
+// Every layer of every pad is cached, not only the first: a velocity-split or
+// round-robin pad shows the layer that fired. 600 samples × 2 B each, in PSRAM.
+constexpr int WAVEFORM_CACHE_SIZE = 64;
 constexpr uint32_t TARGET_CACHE_SAMPLES = 600; // Fixed target cache sample count
 
 // Waveform loader (FreeRTOS task)

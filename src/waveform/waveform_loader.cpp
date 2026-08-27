@@ -28,9 +28,17 @@ struct WaveformLoadRequest {
     char     filename[128];
     uint8_t  priority;
     uint8_t  padIndex;
+    uint8_t  attempt;
     uint32_t sampleStart;
     uint32_t sampleEnd;
 };
+
+/* A read fails for reasons that pass: the card's FAT descriptor pool is
+ * shared with the sample streamer, and under playback an fopen() can simply
+ * lose that race. A request that failed goes to the back of the queue and is
+ * tried again after a pause; only after this many attempts is it given up. */
+constexpr uint8_t  kMaxAttempts  = 4;
+constexpr uint32_t kRetryDelayMs = 150;
 
 // ---------------------------------------------------------------------------
 // FreeRTOS state
@@ -39,6 +47,20 @@ struct WaveformLoadRequest {
 static TaskHandle_t   s_task    = nullptr;
 static QueueHandle_t  s_queue   = nullptr;
 static volatile bool  s_running = false;
+static WaveformLoaderStats s_stats;
+
+static void requeue_or_fail(WaveformLoadRequest& req, uint32_t& failCounter) {
+    if (req.attempt + 1 < kMaxAttempts) {
+        req.attempt++;
+        if (xQueueSend(s_queue, &req, 0) == pdTRUE) {
+            s_stats.retried++;
+            vTaskDelay(pdMS_TO_TICKS(kRetryDelayMs));
+            return;
+        }
+        s_stats.dropped++;
+    }
+    failCounter++;
+}
 
 // ---------------------------------------------------------------------------
 // Loader task
@@ -66,7 +88,9 @@ static void loader_task(void* /*param*/) {
 
         AudioFileInfo info = {};
         if (!wf.getFileInfo(req.filename, &info) || info.sampleCount == 0) {
-            printf("[WFLoader] Failed to get info: %s\n", req.filename);
+            printf("[WFLoader] Failed to get info (attempt %u): %s\n",
+                   (unsigned)req.attempt + 1, req.filename);
+            requeue_or_fail(req, s_stats.failedInfo);
             continue;
         }
 
@@ -88,6 +112,7 @@ static void loader_task(void* /*param*/) {
 
         if (!buf) {
             printf("[WFLoader] Alloc failed for %s\n", req.filename);
+            requeue_or_fail(req, s_stats.allocFail);
             continue;
         }
 
@@ -102,10 +127,15 @@ static void loader_task(void* /*param*/) {
             break;
         }
 
-        if (ok) {
-            waveform_cache_add(req.filename, buf, samplesToRead);
+        if (ok && waveform_cache_add(req.filename, buf, samplesToRead)) {
+            s_stats.loaded++;
         } else {
-            printf("[WFLoader] Failed to load: %s\n", req.filename);
+            printf("[WFLoader] Failed to load (attempt %u): %s\n",
+                   (unsigned)req.attempt + 1, req.filename);
+            if (cbs.freeWaveformMem) cbs.freeWaveformMem(buf); else free(buf);
+            buf = nullptr;
+            requeue_or_fail(req, s_stats.failedRead);
+            continue;
         }
 
         if (cbs.freeWaveformMem) cbs.freeWaveformMem(buf); else free(buf);
@@ -161,41 +191,45 @@ void waveform_loader_request(const char* filename, bool highPriority,
     strncpy(req.filename, filename, sizeof(req.filename) - 1);
     req.priority    = highPriority ? 1 : 0;
     req.padIndex    = padIndex;
+    req.attempt     = 0;
     req.sampleStart = sampleStart;
     req.sampleEnd   = sampleEnd;
 
-    if (highPriority)
-        xQueueSendToFront(s_queue, &req, 0);
-    else
-        xQueueSend(s_queue, &req, 0);
+    const BaseType_t sent = highPriority
+        ? xQueueSendToFront(s_queue, &req, 0)
+        : xQueueSend(s_queue, &req, 0);
+    if (sent == pdTRUE) s_stats.requested++;
+    else                s_stats.dropped++;
 }
 
-void waveform_loader_preload_kit(int maxPads) {
-    if (!s_queue) return;
+int waveform_loader_preload_kit(int maxPads) {
+    if (!s_queue) return 0;
 
     auto* mgr = crosspad::getPlatformServices().kitManager;
-    if (!mgr) return;
+    if (!mgr) return 0;
     auto* kit = mgr->getCurrentKit();
-    if (!kit) return;
+    if (!kit) return 0;
 
     if (maxPads > 16) maxPads = 16;
 
+    int queued = 0;
     for (int i = 0; i < maxPads; i++) {
-        if (kit->pads[i].samples.empty()) continue;
+        for (const auto& sample : kit->pads[i].samples) {
+            // Resolve full path from kit directory + relative sample name
+            std::string resolvedPath = crosspad::resolveKitSamplePath(kit->path, sample.sample);
+            if (resolvedPath.empty()) continue;
+            if (waveform_cache_find(resolvedPath.c_str())) continue;
 
-        // Resolve full path from kit directory + relative sample name
-        std::string resolvedPath = crosspad::resolveKitSamplePath(kit->path, kit->pads[i].samples[0].sample);
-        if (resolvedPath.empty()) continue;
-        const char* fullPath = resolvedPath.c_str();
-
-        if (waveform_cache_find(fullPath)) continue;
-
-        // Cache the full-file envelope (start=0, end=0). Crop in/out is
-        // expressed via start/end markers on top of the rendered view,
-        // not by trimming the cache, so that the markers stay aligned
-        // with the displayed waveform.
-        waveform_loader_request(fullPath, false, i, 0, 0);
+            // Cache the full-file envelope (start=0, end=0). Crop in/out is
+            // expressed via start/end markers on top of the rendered view,
+            // not by trimming the cache, so that the markers stay aligned
+            // with the displayed waveform.
+            const uint32_t before = s_stats.requested;
+            waveform_loader_request(resolvedPath.c_str(), false, (uint8_t)i, 0, 0);
+            if (s_stats.requested != before) ++queued;
+        }
     }
+    return queued;
 }
 
 bool waveform_loader_is_running() {
@@ -204,6 +238,12 @@ bool waveform_loader_is_running() {
 
 void waveform_loader_clear_queue() {
     if (s_queue) xQueueReset(s_queue);
+}
+
+void waveform_loader_get_stats(WaveformLoaderStats* out) {
+    if (!out) return;
+    *out = s_stats;
+    out->queued = s_queue ? (uint32_t)uxQueueMessagesWaiting(s_queue) : 0;
 }
 
 } // namespace crosspad_sampler

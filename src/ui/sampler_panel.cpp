@@ -9,6 +9,7 @@
 #include "crosspad-sampler/ui/waveform_view.hpp"
 #include "crosspad-sampler/ui/pad_editor.hpp"
 #include "crosspad-sampler/waveform/waveform_cache.hpp"
+#include "crosspad-sampler/waveform/waveform_loader.hpp"
 
 // crosspad-gui
 #include "crosspad-gui/crosspad_gui.h"   // styles, widgets, App class
@@ -58,6 +59,10 @@ static lv_subject_t s_pWaveform; // subject for the waveform display pointer
 static lv_obj_t * buttonFrame = NULL; // frame for the sampler buttons
 static lv_obj_t * pickKitBtn = NULL; // pick kit button
 static lv_obj_t * waveformCanvas = NULL; // waveform display canvas
+/* The provider found nothing in the cache for the pad on screen and asked the
+ * loader for it; the pad timer redraws once it lands instead of leaving the
+ * box empty until the next pad change. */
+static bool waveformPending = false;
 static lv_obj_t * waveformPlayhead = NULL; // overlay line showing playback position
 static lv_obj_t * waveformStartMarker = NULL; // green marker for start position
 static lv_obj_t * waveformEndMarker = NULL; // red marker for end position
@@ -173,6 +178,24 @@ static bool padModeIndicatorsInitialized = false;
 static SampleInfo currentSampleInfo = {};
 static bool sampleInfoValid = false;
 static char infoPath[128] = {0};
+
+/* Header info per sample file, fetched once. Reading it means an fopen and a
+ * header parse on the LVGL thread under the sample-player file guard, and
+ * every such read makes audio_bg stand aside from its refill: fetching it on
+ * every hit of a round-robin doubled the engine's buffer underruns at 8 hits/s
+ * (10 in 20 s with the panel open, 4 without). Cleared with the kit. */
+struct SampleInfoEntry { std::string path; SampleInfo info; };
+static std::vector<SampleInfoEntry> s_sampleInfoCache;
+
+static bool cached_sample_info(const char* path, SampleInfo* out) {
+    for (const auto& e : s_sampleInfoCache) {
+        if (e.path == path) { *out = e.info; return true; }
+    }
+    auto& cb = sampler_get_platform_callbacks();
+    if (!cb.player.getSampleInfo || !cb.player.getSampleInfo(path, out)) return false;
+    s_sampleInfoCache.push_back(SampleInfoEntry{path, *out});
+    return true;
+}
 
 // ── Engine callbacks (called from platform's audio engine NoteOn/NoteOff) ───
 // These update GUI state only. PadManager/EventBus calls are done in
@@ -420,6 +443,7 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
         return;
     }
     if (lastKit != kit) { // kit changed
+        s_sampleInfoCache.clear();
         LV_LOG_INFO("Kit changed: %s (previous: %s)", kit->name.c_str(),
                     lastKit ? lastKit->name.c_str() : "NULL");
         lv_subject_copy_string(&s_kit_name, kit->name.c_str());
@@ -521,6 +545,13 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
     static uint8_t lastDisplayedPad = 0; // Track which pad was last displayed
     static uint8_t lastDisplayedSampleIdx = 255; // Track last sample index displayed
 
+    // A waveform the loader was asked for: redraw as soon as it is cached.
+    if (waveformPending && waveformCanvas && lastDisplayedPad > 0
+        && lastDisplayedSampleIdx != 255) {
+        waveformPending = false;   // the provider sets it again on a miss
+        waveform_view_load(waveformCanvas, lastDisplayedPad - 1, lastDisplayedSampleIdx);
+    }
+
     if (pad > 0) {
         crosspad::KitInfo* kit2 = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
         if (kit2 != nullptr && (pad - 1) < KIT_PADS && !kit2->pads[pad - 1].samples.empty()) {
@@ -593,7 +624,6 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
     if (waveformCanvas) {
         if (padIdxTime < 16 && crosspad::getPadManager().isPadPlaying(padIdxTime)) {
             // If info not valid or filename changed, fetch file info (sample rate, length)
-            auto& cb = sampler_get_platform_callbacks();
             if (infoPath[0] == '\0' || (lastDisplayedPad > 0)) {
                 crosspad::KitInfo* kitP2 = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
                 if (kitP2 && padIdxTime < KIT_PADS && !kitP2->pads[padIdxTime].samples.empty()) {
@@ -602,10 +632,7 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
                     std::string resolvedP = crosspad::resolveKitSamplePath(kitP2->path, kitP2->pads[padIdxTime].samples[sIdx].sample);
                     const char* fullPath = resolvedP.empty() ? nullptr : resolvedP.c_str();
                     if (fullPath && (infoPath[0] == '\0' || strcmp(infoPath, fullPath) != 0)) {
-                        sampleInfoValid = false;
-                        if (cb.player.getSampleInfo) {
-                            sampleInfoValid = cb.player.getSampleInfo(fullPath, &currentSampleInfo);
-                        }
+                        sampleInfoValid = cached_sample_info(fullPath, &currentSampleInfo);
                         if (sampleInfoValid) {
                             strncpy(infoPath, fullPath, sizeof(infoPath) - 1);
                             infoPath[sizeof(infoPath) - 1] = '\0';
@@ -680,9 +707,14 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         if (resolvedSample.empty()) return;
         const char* fullPath = resolvedSample.c_str();
 
-        // Look up in waveform cache
+        // Look up in waveform cache; a miss is a request, not a blank
         WaveformCacheEntry* entry = waveform_cache_find(fullPath);
-        if (!entry || !entry->valid || !entry->waveformData || entry->sampleCount == 0) return;
+        if (!entry || !entry->valid || !entry->waveformData || entry->sampleCount == 0) {
+            waveform_loader_start();
+            waveform_loader_request(fullPath, true, padIdx, 0, 0);
+            waveformPending = true;
+            return;
+        }
 
         // Copy from cache, downsampling if cache has more samples than requested
         uint32_t count = entry->sampleCount < maxSamples ? entry->sampleCount : maxSamples;
