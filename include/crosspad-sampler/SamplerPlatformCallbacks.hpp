@@ -130,6 +130,11 @@ struct KitSelectorAppCallbacks {
     void (*onBeforeKitLoad)(int kitId)  = nullptr;
     /// Called after a kit has loaded (e.g. signal orchestrator).
     void (*onKitLoaded)()               = nullptr;
+    /// Called once the selector app has been torn down, whether it closed
+    /// because a kit finished loading or because the user backed out. The
+    /// platform that opened it as a gate in front of another app launches
+    /// that app from here.
+    void (*onClosed)()                  = nullptr;
 };
 
 // ---------------------------------------------------------------------------

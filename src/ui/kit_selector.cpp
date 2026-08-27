@@ -1,4 +1,12 @@
 // SPDX-License-Identifier: MIT
+//
+// Kit browser — cover on the left, one row per kit on the right.
+//
+// Layout 6C from the kit_browser_split mockup. Everything the screen shows
+// comes from IKitManager: the rows are its kit list, the artwork is whatever a
+// kit ships beside its JSON (cover.png 122x122, thumb.png 20x20), and a kit
+// without artwork gets a lettered chip instead of a blank box. Loading goes
+// through the same platform callback as every other way into a kit change.
 
 #ifdef USE_LVGL
 
@@ -7,283 +15,509 @@
 #include <crosspad-sampler/logic/kit_load_task.hpp>
 
 #include <crosspad/kit/IKitManager.hpp>
+#include <crosspad/kit/KitPathUtils.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
 #include <crosspad-gui/crosspad_gui.h>
 
+#include <cstdio>
+#include <string>
+#include <vector>
+
 namespace crosspad_sampler {
 
-// ── Static state ─────────────────────────────────────────────────────────────
+namespace {
 
-static KitSelectedFn s_onSelected  = nullptr;
-static KitLoadedFn   s_onLoaded    = nullptr;
-static KitClosedFn   s_onClose     = nullptr;
-static void*         s_userData    = nullptr;
-static bool          s_showCacheDots = true;
+constexpr int32_t kStatusH   = 24;
+constexpr int32_t kRowH      = 30;
+constexpr int32_t kCoverSize = 122;
+constexpr int32_t kThumbSize = 20;
 
-static lv_group_t*   s_mainGroup   = nullptr;
-static lv_group_t*   s_listGroup   = nullptr;
-static lv_group_t*   s_prevGroup   = nullptr;
-static lv_obj_t*     s_loadBtn     = nullptr;
-static lv_obj_t*     s_overlay     = nullptr;
-static int           s_selectedKitId = -1;
-static lv_obj_t*     s_lastFocused = nullptr;
-static bool          s_loadingStarted = false;
-static lv_timer_t*   s_loadPollTimer = nullptr;
+/* The cover is a PNG read off the card and decoded on the LVGL thread. Doing
+ * that once per encoder detent turns a flick through the list into a burst of
+ * card reads, and while the device is a USB audio interface that burst is
+ * audible. Nobody looks at a cover they are scrolling past, so it waits until
+ * the selection has been still for this long. */
+constexpr uint32_t kCoverDelayMs = 220;
 
-static lv_indev_t* getEncoder() {
+struct Row {
+    lv_obj_t* obj    = nullptr;
+    lv_obj_t* name   = nullptr;
+    lv_obj_t* author = nullptr;
+};
+
+KitSelectedFn s_onSelected = nullptr;
+KitLoadedFn   s_onLoaded   = nullptr;
+KitClosedFn   s_onClose    = nullptr;
+void*         s_userData   = nullptr;
+
+lv_obj_t*    s_overlay     = nullptr;
+lv_obj_t*    s_list        = nullptr;
+lv_obj_t*    s_coverBox    = nullptr;
+lv_obj_t*    s_coverImg    = nullptr;
+lv_obj_t*    s_coverLetter = nullptr;
+lv_obj_t*    s_coverName   = nullptr;
+lv_obj_t*    s_coverAuthor = nullptr;
+lv_obj_t*    s_statusLabel = nullptr;
+lv_obj_t*    s_backBtn     = nullptr;
+lv_obj_t*    s_busy        = nullptr;
+
+lv_group_t*  s_group       = nullptr;
+lv_group_t*  s_prevGroup   = nullptr;
+
+std::vector<Row> s_rows;
+int  s_selected  = -1;   ///< row under the highlight
+int  s_loaded    = -1;   ///< row carrying the "this one is playing" edge
+int  s_coverWanted = -1;
+int  s_coverShown  = -1;
+
+/* lv_group_add_obj() fires LV_EVENT_FOCUSED synchronously for the first object
+ * it receives, which lands in row_focused_cb() while the row is still being
+ * assembled. Selection is applied explicitly once the list is complete, so
+ * focus callbacks are ignored until then — and again during teardown. */
+bool s_building = false;
+bool s_loadingStarted = false;
+
+lv_timer_t* s_coverTimer = nullptr;
+lv_timer_t* s_loadTimer  = nullptr;
+
+lv_indev_t* encoder() {
     return crosspad_gui::getGuiPlatform().getNavigationEncoder();
 }
 
-// ── Internal callbacks ───────────────────────────────────────────────────────
+bool fileExists(const std::string& path) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
 
-static void on_back_clicked(lv_event_t* e) {
-    (void)e;
+/// First character of the kit name — the whole UTF-8 sequence, so a name that
+/// starts with a multibyte glyph does not become a broken byte on the chip.
+const char* initialOf(const crosspad::KitInfo& kit) {
+    static char buf[5];
+    size_t n = 0;
+    if (!kit.name.empty()) {
+        buf[n++] = kit.name[0];
+        while (n < 4 && n < kit.name.size() && (kit.name[n] & 0xC0) == 0x80) {
+            buf[n] = kit.name[n];
+            ++n;
+        }
+    } else {
+        buf[n++] = '?';
+    }
+    buf[n] = '\0';
+    return buf;
+}
+
+// ── Cover pane ───────────────────────────────────────────────────────────────
+
+void cover_show(int idx) {
+    auto* mgr = crosspad::getKitManager();
+    auto* kit = mgr ? mgr->getKit(idx) : nullptr;
+    if (!kit || !s_coverImg || !s_coverLetter) return;
+
+    const std::string path = crosspad::kitAssetPath(kit->path, "cover.png");
+    if (fileExists(path)) {
+        lv_image_set_src(s_coverImg, path.c_str());
+        lv_obj_remove_flag(s_coverImg, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_coverLetter, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_label_set_text(s_coverLetter, initialOf(*kit));
+        lv_obj_add_flag(s_coverImg, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_coverLetter, LV_OBJ_FLAG_HIDDEN);
+    }
+    s_coverShown = idx;
+}
+
+void cover_timer_cb(lv_timer_t*) {
+    lv_timer_pause(s_coverTimer);
+    if (s_coverWanted < 0 || s_coverWanted == s_coverShown) return;
+    cover_show(s_coverWanted);
+}
+
+void cover_request(int idx) {
+    s_coverWanted = idx;
+    if (!s_coverTimer) s_coverTimer = lv_timer_create(cover_timer_cb, kCoverDelayMs, nullptr);
+    /* Restart the countdown: while the encoder keeps turning this keeps
+     * pushing the decode out instead of queueing one per step. */
+    lv_timer_reset(s_coverTimer);
+    lv_timer_resume(s_coverTimer);
+}
+
+// ── Selection ────────────────────────────────────────────────────────────────
+
+void row_set_selected(int idx, bool selected) {
+    if (idx < 0 || idx >= (int)s_rows.size() || !s_rows[idx].obj) return;
+    Row& r = s_rows[idx];
+    if (selected) {
+        lv_obj_add_style(r.obj, &styleKitBrowserRowSelected, 0);
+        lv_obj_set_style_text_opa(r.author, LV_OPA_COVER, 0);
+    } else {
+        lv_obj_remove_style(r.obj, &styleKitBrowserRowSelected, 0);
+        lv_obj_set_style_text_opa(r.author, LV_OPA_50, 0);
+    }
+}
+
+/// The loaded kit keeps a primary-coloured edge, so it stays readable while
+/// the selection highlight moves elsewhere.
+void row_mark_loaded(int idx) {
+    if (s_loaded >= 0 && s_loaded < (int)s_rows.size() && s_rows[s_loaded].obj) {
+        lv_obj_set_style_border_width(s_rows[s_loaded].obj, 0, 0);
+    }
+    s_loaded = idx;
+    if (idx < 0 || idx >= (int)s_rows.size() || !s_rows[idx].obj) return;
+    lv_obj_t* row = s_rows[idx].obj;
+    lv_obj_set_style_border_color(row, CROSSPAD_THEME_PRIMARY, 0);
+    lv_obj_set_style_border_opa(row, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_LEFT, 0);
+    lv_obj_set_style_border_width(row, 3, 0);
+}
+
+void select_row(int idx) {
+    if (s_building || idx < 0 || idx >= (int)s_rows.size()) return;
+
+    row_set_selected(s_selected, false);
+    s_selected = idx;
+    row_set_selected(s_selected, true);
+
+    auto* mgr = crosspad::getKitManager();
+    auto* kit = mgr ? mgr->getKit(idx) : nullptr;
+    if (kit) {
+        lv_label_set_text(s_coverName, kit->name.c_str());
+        lv_label_set_text(s_coverAuthor, kit->author.c_str());
+    }
+    lv_obj_scroll_to_view(s_rows[idx].obj, LV_ANIM_OFF);
+    cover_request(idx);
+}
+
+// ── Loading ──────────────────────────────────────────────────────────────────
+
+/* The overlay is hidden rather than deleted between loads: deleting it would
+ * race the app teardown, which drops the whole tree with
+ * lv_obj_delete_async(). One hidden widget for the life of the screen. */
+void busy_show() {
+    if (!s_coverBox) return;
+    if (!s_busy) {
+        s_busy = lv_obj_create(s_coverBox);
+        lv_obj_remove_style_all(s_busy);
+        lv_obj_set_size(s_busy, LV_PCT(100), LV_PCT(100));
+        lv_obj_set_style_bg_color(s_busy, CROSSPAD_THEME_BG_DEEP, 0);
+        lv_obj_set_style_bg_opa(s_busy, LV_OPA_70, 0);
+        lv_obj_remove_flag(s_busy, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(s_busy, LV_OBJ_FLAG_CLICKABLE);
+
+        lv_obj_t* sp = lv_spinner_create(s_busy);
+        lv_obj_set_size(sp, 44, 44);
+        lv_obj_center(sp);
+        lv_obj_set_style_arc_color(sp, CROSSPAD_THEME_CARD_DEEP, 0);
+        lv_obj_set_style_arc_color(sp, CROSSPAD_THEME_PRIMARY, LV_PART_INDICATOR);
+    }
+    lv_obj_remove_flag(s_busy, LV_OBJ_FLAG_HIDDEN);
+}
+
+void busy_hide() {
+    if (s_busy) lv_obj_add_flag(s_busy, LV_OBJ_FLAG_HIDDEN);
+}
+
+void load_kit(int kitId) {
+    auto* mgr = crosspad::getKitManager();
+    auto* kit = mgr ? mgr->getKit(kitId) : nullptr;
+    if (!kit) return;
+
+    const auto& cb = sampler_get_platform_callbacks();
+    if (!cb.audio.startLoadKit) return;
+
+    // Platform pre-load work (stop the sequencer, drop the old waveform cache)
+    if (s_onSelected) s_onSelected(kitId, s_userData);
+
+    cb.audio.startLoadKit(kitId, false);
+    s_loadingStarted = true;
+    busy_show();
+    row_mark_loaded(kitId);
+    if (s_statusLabel) lv_label_set_text(s_statusLabel, kit->name.c_str());
+}
+
+void load_poll_cb(lv_timer_t*) {
+    if (!s_loadingStarted || kit_load_task_is_loading()) return;
+    s_loadingStarted = false;
+    busy_hide();
+    // The host owns teardown from here (KitSelectorApp destroys the App).
+    if (s_onLoaded) s_onLoaded(s_userData);
+}
+
+// ── Events ───────────────────────────────────────────────────────────────────
+
+void row_focused_cb(lv_event_t* e) {
+    select_row((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+/* Encoder press and touch both land here. Loading on the first click keeps
+ * the two input paths identical — asking for a second press on an already
+ * selected row made touch feel like the first tap did nothing. */
+void row_clicked_cb(lv_event_t* e) {
+    const int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    select_row(idx);
+    load_kit(idx);
+}
+
+void back_clicked_cb(lv_event_t*) {
     if (s_onClose) {
         s_onClose(s_userData);
         return;
     }
-    lv_obj_t* overlay = s_overlay;
-    if (overlay) kit_selector_destroy(overlay);
+    if (s_overlay) kit_selector_destroy(s_overlay);
 }
 
-static void on_list_item_clicked(lv_event_t* e) {
-    lv_obj_t* list = (lv_obj_t*)lv_event_get_user_data(e);
-    lv_obj_t* obj = (lv_obj_t*)lv_event_get_target_obj(e);
-    const char* kitName = lv_list_get_button_text(list, obj);
+// ── Building ─────────────────────────────────────────────────────────────────
 
-    if (s_lastFocused && s_lastFocused != obj && lv_obj_is_valid(s_lastFocused)) {
-        lv_obj_set_state(s_lastFocused, LV_STATE_PRESSED, false);
-    }
+void build_row(int idx, const crosspad::KitInfo& kit) {
+    void* tag = (void*)(intptr_t)idx;
 
-    bool confirmed = (s_lastFocused == obj);
-    s_lastFocused = obj;
+    lv_obj_t* row = lv_obj_create(s_list);
+    lv_obj_remove_style_all(row);
+    lv_obj_add_style(row, &styleKitBrowserRow, 0);
+    lv_obj_set_size(row, LV_PCT(100), kRowH);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(row, row_clicked_cb, LV_EVENT_CLICKED, tag);
+    lv_obj_add_event_cb(row, row_focused_cb, LV_EVENT_FOCUSED, tag);
+    if (s_group) lv_group_add_obj(s_group, row);
 
-    // Find kit ID by name
-    auto* mgr = crosspad::getKitManager();
-    if (mgr) {
-        for (int i = 0; i < mgr->getKitCount(); i++) {
-            auto* kit = mgr->getKit(i);
-            if (kit && kit->name == kitName) {
-                s_selectedKitId = i;
-                break;
-            }
-        }
-    }
+    lv_obj_t* thumbBox = lv_obj_create(row);
+    lv_obj_remove_style_all(thumbBox);
+    lv_obj_add_style(thumbBox, &styleKitBrowserThumb, 0);
+    lv_obj_set_size(thumbBox, kThumbSize, kThumbSize);
+    lv_obj_remove_flag(thumbBox, LV_OBJ_FLAG_SCROLLABLE);
 
-    // Encoder click = immediate confirm
-    if (getEncoder() && lv_indev_active() == getEncoder()) {
-        if (s_loadBtn) lv_obj_send_event(s_loadBtn, LV_EVENT_CLICKED, nullptr);
+    /* lv_image_set_src() copies the path, so the temporary is enough. A row
+     * is built once; unlike the cover this is not on the scroll path. */
+    const std::string thumb = crosspad::kitAssetPath(kit.path, "thumb.png");
+    if (fileExists(thumb)) {
+        lv_obj_t* img = lv_image_create(thumbBox);
+        lv_image_set_src(img, thumb.c_str());
+        lv_obj_center(img);
     } else {
-        lv_obj_set_state(obj, LV_STATE_PRESSED, true);
-        if (s_listGroup) {
-            lv_indev_t* enc = getEncoder();
-            if (enc) lv_indev_set_group(enc, s_listGroup);
-        }
-        lv_group_focus_obj(obj);
-        if (confirmed && s_loadBtn) {
-            lv_obj_send_event(s_loadBtn, LV_EVENT_CLICKED, nullptr);
-        }
+        lv_obj_t* letter = lv_label_create(thumbBox);
+        lv_label_set_text(letter, initialOf(kit));
+        lv_obj_center(letter);
     }
+
+    lv_obj_t* texts = lv_obj_create(row);
+    lv_obj_remove_style_all(texts);
+    lv_obj_set_flex_grow(texts, 1);
+    lv_obj_set_height(texts, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(texts, LV_FLEX_FLOW_COLUMN);
+    lv_obj_remove_flag(texts, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* name = lv_label_create(texts);
+    lv_obj_set_style_text_font(name, &lv_font_montserrat_10, 0);
+    lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(name, LV_PCT(100));
+    lv_label_set_text(name, kit.name.c_str());
+
+    lv_obj_t* author = lv_label_create(texts);
+    lv_obj_set_style_text_font(author, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_opa(author, LV_OPA_50, 0);
+    lv_label_set_long_mode(author, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(author, LV_PCT(100));
+    lv_label_set_text(author, kit.author.c_str());
+
+    s_rows.push_back(Row{row, name, author});
 }
 
-static void on_load_clicked(lv_event_t* e) {
-    (void)e;
-    if (s_selectedKitId < 0) return;
+void build_rows() {
+    auto* mgr = crosspad::getKitManager();
+    const int count = mgr ? mgr->getKitCount() : 0;
 
-    // Notify platform (sequencer stop etc happens in the callback)
-    if (s_onSelected) {
-        s_onSelected(s_selectedKitId, s_userData);
+    s_building = true;
+    s_rows.clear();
+    s_rows.reserve(count);
+    s_selected = -1;
+    s_loaded   = -1;
+    s_coverShown = -1;
+
+    for (int i = 0; i < count; ++i) {
+        if (auto* kit = mgr->getKit(i)) build_row(i, *kit);
+    }
+    s_building = false;
+
+    if (s_statusLabel) lv_label_set_text_fmt(s_statusLabel, "%d kits", (int)s_rows.size());
+
+    if (s_rows.empty()) {
+        lv_obj_t* msg = lv_label_create(s_list);
+        lv_label_set_text(msg, "No kits found\non the SD card");
+        lv_obj_set_style_text_opa(msg, LV_OPA_50, 0);
+        lv_obj_set_style_text_align(msg, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(msg);
+        return;
     }
 
-    // Start loading via platform callback
-    const auto& cb = sampler_get_platform_callbacks();
-    if (cb.audio.startLoadKit) {
-        cb.audio.startLoadKit(s_selectedKitId, false);
-        s_loadingStarted = true;
-        if (s_loadBtn) lv_obj_set_state(s_loadBtn, LV_STATE_PRESSED, true);
-    }
+    const int current = mgr->getCurrentKitId();
+    if (current >= 0 && current < (int)s_rows.size()) row_mark_loaded(current);
+
+    /* Back was added to the group first, so it holds focus by default. The
+     * list is what the user came for — focus it, which also puts Back exactly
+     * one notch counter-clockwise from the top entry. */
+    const int first = current >= 0 && current < (int)s_rows.size() ? current : 0;
+    lv_group_focus_obj(s_rows[first].obj);
+    select_row(first);
+    cover_show(first);
 }
 
-static void load_poll_timer_cb(lv_timer_t* timer) {
-    (void)timer;
-    if (!s_loadingStarted) return;
-
-    if (!kit_load_task_is_loading()) {
-        s_loadingStarted = false;
-        // Notify caller — caller is responsible for destroying the overlay
-        // (e.g. via thisApp->destroyApp() which calls kit_selector_destroy)
-        if (s_onLoaded) {
-            s_onLoaded(s_userData);
-        }
-    }
-}
+} // namespace
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
 lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     s_onSelected = config.onSelected;
-    s_onLoaded = config.onLoaded;
-    s_onClose = config.onClose;
-    s_userData = config.userData;
-    s_showCacheDots = config.showCacheDots;
-    s_selectedKitId = -1;
-    s_lastFocused = nullptr;
+    s_onLoaded   = config.onLoaded;
+    s_onClose    = config.onClose;
+    s_userData   = config.userData;
     s_loadingStarted = false;
+    s_coverWanted = s_coverShown = -1;
 
-    lv_obj_t* parent = config.parent;
+    lv_obj_t* scr = lv_obj_create(config.parent);
+    lv_obj_add_style(scr, &styleKitBrowserScreen, 0);
+    lv_obj_set_size(scr, LV_PCT(100), LV_PCT(100));
+    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    s_overlay = scr;
 
-    // Main container
-    lv_obj_t* cont = lv_obj_create(parent);
-    lv_obj_set_size(cont, lv_obj_get_width(parent), lv_obj_get_height(parent));
-    lv_obj_center(cont);
-    lv_obj_add_style(cont, &styleAppContainer, 0);
-    s_overlay = cont;
-
-    // Title
-    lv_obj_t* title = lv_label_create(cont);
-    lv_label_set_text(title, "Choose kit");
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
-
-    // Groups
-    s_mainGroup = lv_group_create();
-    s_listGroup = lv_group_create();
-
-    lv_indev_t* enc = getEncoder();
-    if (enc) {
+    s_group = lv_group_create();
+    if (lv_indev_t* enc = encoder()) {
         s_prevGroup = lv_indev_get_group(enc);
-        lv_indev_set_group(enc, s_listGroup);
+        lv_indev_set_group(enc, s_group);
     }
 
-    // Back button
-    lv_obj_t* backBtn = lv_CreateFooterButton(cont, "Back", -50, on_back_clicked);
-    lv_group_add_obj(s_mainGroup, backBtn);
+    // ── Status bar ──────────────────────────────────────────────────────────
+    lv_obj_t* status = lv_obj_create(scr);
+    lv_obj_add_style(status, &styleKitBrowserStatus, 0);
+    lv_obj_set_size(status, LV_PCT(100), kStatusH);
+    lv_obj_align(status, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_remove_flag(status, LV_OBJ_FLAG_SCROLLABLE);
 
-    // Load button
-    s_loadBtn = lv_CreateFooterButton(cont, "Load", 50, on_load_clicked);
-    lv_group_add_obj(s_mainGroup, s_loadBtn);
+    /* The title doubles as the way out. The browser takes the encoder for its
+     * list while it is open, so without a focusable control here the launcher
+     * is unreachable — the arrow says so. */
+    s_backBtn = lv_obj_create(status);
+    lv_obj_remove_style_all(s_backBtn);
+    lv_obj_set_size(s_backBtn, 78, kStatusH - 5);
+    lv_obj_align(s_backBtn, LV_ALIGN_LEFT_MID, -3, 0);
+    lv_obj_set_style_radius(s_backBtn, 5, 0);
+    lv_obj_add_style(s_backBtn, &styleKitBrowserRowSelected, LV_STATE_FOCUSED);
+    lv_obj_set_style_bg_opa(s_backBtn, LV_OPA_COVER, LV_STATE_FOCUSED);
+    lv_obj_remove_flag(s_backBtn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_backBtn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_backBtn, back_clicked_cb, LV_EVENT_CLICKED, nullptr);
+    lv_group_add_obj(s_group, s_backBtn);
 
-    // Kit list
-    kit_selector_refresh(cont);
+    lv_obj_t* backLabel = lv_label_create(s_backBtn);
+    lv_label_set_text(backLabel, LV_SYMBOL_LEFT "  KITS");
+    lv_obj_set_style_text_letter_space(backLabel, 1, 0);
+    lv_obj_center(backLabel);
 
-    // Poll timer for load completion
-    s_loadPollTimer = lv_timer_create(load_poll_timer_cb, 100, nullptr);
+    s_statusLabel = lv_label_create(status);
+    lv_obj_set_style_text_font(s_statusLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_opa(s_statusLabel, LV_OPA_50, 0);
+    lv_obj_align(s_statusLabel, LV_ALIGN_RIGHT_MID, 0, 0);
 
-    return cont;
+    // ── Body: cover | list ──────────────────────────────────────────────────
+    lv_obj_t* body = lv_obj_create(scr);
+    lv_obj_remove_style_all(body);
+    lv_obj_set_size(body, LV_PCT(100), CP_LCD_VER_RES - kStatusH);
+    lv_obj_align(body, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_remove_flag(body, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(body, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_all(body, 10, 0);
+    lv_obj_set_style_pad_column(body, 10, 0);
+
+    lv_obj_t* left = lv_obj_create(body);
+    lv_obj_remove_style_all(left);
+    lv_obj_set_size(left, kCoverSize, LV_PCT(100));
+    lv_obj_set_flex_flow(left, LV_FLEX_FLOW_COLUMN);
+    /* Cover plus two labels are shorter than the body: centre the stack on the
+     * main axis, keep the cross axis at START so the captions line up with the
+     * cover's left edge. */
+    lv_obj_set_flex_align(left, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(left, 7, 0);
+    lv_obj_remove_flag(left, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_coverBox = lv_obj_create(left);
+    lv_obj_remove_style_all(s_coverBox);
+    lv_obj_add_style(s_coverBox, &styleKitBrowserCover, 0);
+    lv_obj_set_size(s_coverBox, kCoverSize, kCoverSize);
+    lv_obj_remove_flag(s_coverBox, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_coverImg = lv_image_create(s_coverBox);
+    lv_obj_center(s_coverImg);
+    lv_obj_add_flag(s_coverImg, LV_OBJ_FLAG_HIDDEN);
+
+    s_coverLetter = lv_label_create(s_coverBox);
+    lv_label_set_text(s_coverLetter, "");
+    lv_obj_center(s_coverLetter);
+
+    s_coverName = lv_label_create(left);
+    lv_obj_set_style_text_font(s_coverName, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_coverName, lv_color_white(), 0);
+    lv_label_set_long_mode(s_coverName, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(s_coverName, kCoverSize);
+    lv_label_set_text(s_coverName, "");
+
+    s_coverAuthor = lv_label_create(left);
+    lv_obj_set_style_text_font(s_coverAuthor, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_coverAuthor, CROSSPAD_THEME_PRIMARY, 0);
+    lv_label_set_long_mode(s_coverAuthor, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(s_coverAuthor, kCoverSize);
+    lv_label_set_text(s_coverAuthor, "");
+
+    s_list = lv_obj_create(body);
+    lv_obj_remove_style_all(s_list);
+    lv_obj_set_flex_grow(s_list, 1);
+    lv_obj_set_height(s_list, LV_PCT(100));
+    lv_obj_set_flex_flow(s_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_list, 5, 0);
+    lv_obj_set_scroll_dir(s_list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_list, LV_SCROLLBAR_MODE_OFF);
+
+    build_rows();
+
+    s_loadTimer = lv_timer_create(load_poll_cb, 100, nullptr);
+    return scr;
 }
 
 void kit_selector_destroy(lv_obj_t* selector) {
-    s_selectedKitId = -1;
-    s_lastFocused = nullptr;
-    s_loadBtn = nullptr;
+    /* Stop answering focus events before anything comes down: deleting a
+     * focused row refocuses another one, and that handler would walk into
+     * widgets that are part of the same teardown. */
+    s_building = true;
     s_loadingStarted = false;
 
-    if (s_loadPollTimer) {
-        lv_timer_delete(s_loadPollTimer);
-        s_loadPollTimer = nullptr;
-    }
+    if (s_loadTimer)  { lv_timer_delete(s_loadTimer);  s_loadTimer = nullptr; }
+    if (s_coverTimer) { lv_timer_delete(s_coverTimer); s_coverTimer = nullptr; }
 
-    // Restore the previous encoder group (e.g. launcher) before deleting ours
-    lv_indev_t* enc = getEncoder();
-    if (enc) {
-        lv_group_t* cur = lv_indev_get_group(enc);
-        if (cur == s_mainGroup || cur == s_listGroup) {
-            lv_indev_set_group(enc, s_prevGroup);
-        }
+    // Restore the previous encoder group (the launcher's) before deleting ours
+    if (lv_indev_t* enc = encoder()) {
+        if (lv_indev_get_group(enc) == s_group) lv_indev_set_group(enc, s_prevGroup);
     }
     s_prevGroup = nullptr;
+    if (s_group) { lv_group_delete(s_group); s_group = nullptr; }
 
-    if (s_mainGroup) {
-        lv_group_delete(s_mainGroup);
-        s_mainGroup = nullptr;
-    }
-    if (s_listGroup) {
-        lv_group_delete(s_listGroup);
-        s_listGroup = nullptr;
-    }
+    s_rows.clear();
+    s_selected = s_loaded = -1;
+    s_coverWanted = s_coverShown = -1;
+    s_overlay = s_list = s_coverBox = s_coverImg = s_coverLetter = nullptr;
+    s_coverName = s_coverAuthor = s_statusLabel = s_backBtn = s_busy = nullptr;
 
-    s_overlay = nullptr;
     lv_obj_delete_async(selector);
 }
 
 void kit_selector_refresh(lv_obj_t* selector) {
-    static const int LIST_TAG = 0x4B4C; // "KL"
-
-    lv_obj_t* list = nullptr;
-    uint32_t childCount = lv_obj_get_child_count(selector);
-    for (uint32_t i = 0; i < childCount; i++) {
-        lv_obj_t* child = lv_obj_get_child(selector, (int32_t)i);
-        if (lv_obj_get_user_data(child) == (void*)(intptr_t)LIST_TAG) {
-            list = child;
-            uint32_t listChildren = lv_obj_get_child_count(list);
-            for (uint32_t j = listChildren; j > 0; --j) {
-                lv_obj_delete(lv_obj_get_child(list, (int32_t)(j - 1)));
-            }
-            break;
-        }
-    }
-
-    if (!list) {
-        list = lv_list_create(selector);
-        lv_obj_set_size(list, 230, 130);
-        lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 30);
-        lv_obj_add_style(list, &styleAppContainer, 0);
-        lv_obj_add_style(list, &styleKitListBox, LV_PART_MAIN);
-        lv_obj_add_style(list, &styleFileExplorerScrollbar, LV_PART_SCROLLBAR);
-        lv_obj_add_flag(list, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_flag(list, LV_OBJ_FLAG_CLICK_FOCUSABLE);
-        // Focused border
-        lv_obj_set_style_border_color(list, lv_color_white(), LV_STATE_FOCUSED);
-        lv_obj_set_style_border_width(list, 1, LV_STATE_FOCUSED);
-        lv_obj_set_user_data(list, (void*)(intptr_t)LIST_TAG);
-
-        if (s_mainGroup) lv_group_add_obj(s_mainGroup, list);
-        lv_obj_add_event_cb(list, [](lv_event_t* e) {
-            (void)e;
-            lv_indev_t* enc = getEncoder();
-            if (enc && s_listGroup) lv_indev_set_group(enc, s_listGroup);
-        }, LV_EVENT_CLICKED, nullptr);
-    }
-
-    auto* mgr = crosspad::getKitManager();
-    if (!mgr) return;
-
-    int kitCount = mgr->getKitCount();
-    int currentKitId = mgr->getCurrentKitId();
-    const auto& cb = sampler_get_platform_callbacks();
-
-    for (int i = 0; i < kitCount; i++) {
-        auto* kit = mgr->getKit(i);
-        if (!kit) continue;
-
-        lv_obj_t* btn = lv_list_add_button(list, LV_SYMBOL_FILE, kit->name.c_str());
-        lv_obj_add_style(btn, &styleKitListItem, 0);
-        lv_obj_add_style(btn, &styleKitListItemFocused,
-                         (lv_style_selector_t)LV_STATE_FOCUSED | LV_PART_SELECTED);
-        lv_obj_add_style(btn, &styleKitListItemSelected, LV_STATE_PRESSED);
-        lv_obj_add_event_cb(btn, on_list_item_clicked, LV_EVENT_CLICKED, list);
-        if (s_listGroup) lv_group_add_obj(s_listGroup, btn);
-
-        // Highlight loaded kit
-        if (i == currentKitId) {
-            lv_obj_set_style_bg_color(btn, lv_color_hex(0x08F020), 0);
-        }
-
-        // Cache status dot
-        if (s_showCacheDots && cb.audio.hasCacheFile) {
-            bool cached = cb.audio.hasCacheFile(i);
-            lv_obj_t* label = lv_obj_get_child(btn, 1);
-            if (label) lv_obj_set_flex_grow(label, 1);
-
-            lv_obj_t* dot = lv_obj_create(btn);
-            lv_obj_set_size(dot, 8, 8);
-            lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
-            lv_obj_set_style_bg_color(dot, cached ? lv_color_hex(0x00FF00) : lv_color_hex(0xFF0000), 0);
-            lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-            lv_obj_set_style_border_width(dot, 0, 0);
-            lv_obj_set_style_pad_all(dot, 0, 0);
-            lv_obj_clear_flag(dot, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
-        }
-    }
+    if (selector != s_overlay || !s_list) return;
+    s_building = true;
+    lv_obj_clean(s_list);
+    s_busy = nullptr;
+    build_rows();
 }
 
 void kit_selector_set_callback(KitSelectedFn fn, void* userData) {

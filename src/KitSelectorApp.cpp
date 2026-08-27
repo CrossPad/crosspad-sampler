@@ -33,23 +33,27 @@ static void on_kit_selected(int kitId, void* /*userData*/) {
     }
 }
 
-static void on_kit_loaded(void* /*userData*/) {
-    auto& cb = crosspad_sampler::sampler_get_platform_callbacks().kitSelector;
-    if (cb.onKitLoaded) cb.onKitLoaded();
-
+/* Both exits go through here, deferred: the caller is an LVGL callback on a
+ * widget the teardown deletes. onClosed fires after destroyApp() so whoever
+ * opened the selector as a gate can launch what was waiting behind it. */
+static void close_app_async() {
     lv_async_call([](void*) {
         if (s_thisApp && s_thisApp->isStarted()) {
             s_thisApp->destroyApp();
         }
+        auto& cb = crosspad_sampler::sampler_get_platform_callbacks().kitSelector;
+        if (cb.onClosed) cb.onClosed();
     }, nullptr);
 }
 
+static void on_kit_loaded(void* /*userData*/) {
+    auto& cb = crosspad_sampler::sampler_get_platform_callbacks().kitSelector;
+    if (cb.onKitLoaded) cb.onKitLoaded();
+    close_app_async();
+}
+
 static void on_kit_closed(void* /*userData*/) {
-    lv_async_call([](void*) {
-        if (s_thisApp && s_thisApp->isStarted()) {
-            s_thisApp->destroyApp();
-        }
-    }, nullptr);
+    close_app_async();
 }
 
 lv_obj_t* lv_CreateKitSelector(lv_obj_t* parent, App* app) {
@@ -60,7 +64,6 @@ lv_obj_t* lv_CreateKitSelector(lv_obj_t* parent, App* app) {
     config.onSelected    = on_kit_selected;
     config.onLoaded      = on_kit_loaded;
     config.onClose       = on_kit_closed;
-    config.showCacheDots = true;
     return crosspad_sampler::kit_selector_create(config);
 }
 

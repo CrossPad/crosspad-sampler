@@ -25,10 +25,12 @@ struct KitSelectorConfig {
     KitLoadedFn   onLoaded = nullptr;
     KitClosedFn   onClose = nullptr;
     void* userData = nullptr;
-    bool showCacheDots = true;
 };
 
-/// Create a full-screen kit selector overlay.
+/// Create the full-screen kit browser: cover art and author on the left, one
+/// row per kit (thumbnail, name, author) on the right, Back in the status bar.
+/// Kits come from IKitManager; artwork is `cover.png` / `thumb.png` beside the
+/// kit's JSON, with a lettered placeholder where a kit ships none.
 lv_obj_t* kit_selector_create(const KitSelectorConfig& config);
 
 /// Destroy the kit selector overlay and clean up LVGL groups.
