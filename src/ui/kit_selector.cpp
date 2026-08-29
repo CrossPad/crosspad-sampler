@@ -366,6 +366,9 @@ void build_rows() {
     cover_show(first);
 }
 
+void reset_state();
+void overlay_deleted_cb(lv_event_t* e);
+
 } // namespace
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -383,6 +386,7 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     lv_obj_set_size(scr, LV_PCT(100), LV_PCT(100));
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     s_overlay = scr;
+    lv_obj_add_event_cb(scr, overlay_deleted_cb, LV_EVENT_DELETE, nullptr);
 
     s_group = lv_group_create();
     if (lv_indev_t* enc = encoder()) {
@@ -486,7 +490,15 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     return scr;
 }
 
-void kit_selector_destroy(lv_obj_t* selector) {
+namespace {
+
+/* Everything that must not outlive the selector's widget tree: the two
+ * lv_timers and every static handle into the tree. Shared by the explicit
+ * destroy and the LV_EVENT_DELETE fallback below, so a host that deletes the
+ * tree without calling kit_selector_destroy (APP_STOP → LoadMainScreen wipes
+ * the screen while the pre-launch selector is up) cannot leave the cover
+ * timer firing lv_label_set_text into freed memory. */
+void reset_state() {
     /* Stop answering focus events before anything comes down: deleting a
      * focused row refocuses another one, and that handler would walk into
      * widgets that are part of the same teardown. */
@@ -508,7 +520,16 @@ void kit_selector_destroy(lv_obj_t* selector) {
     s_coverWanted = s_coverShown = -1;
     s_overlay = s_list = s_coverBox = s_coverImg = s_coverLetter = nullptr;
     s_coverName = s_coverAuthor = s_statusLabel = s_backBtn = s_busy = nullptr;
+}
 
+void overlay_deleted_cb(lv_event_t* e) {
+    if (lv_event_get_target_obj(e) == s_overlay) reset_state();
+}
+
+} // namespace
+
+void kit_selector_destroy(lv_obj_t* selector) {
+    reset_state();
     lv_obj_delete_async(selector);
 }
 

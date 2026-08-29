@@ -111,11 +111,10 @@ static std::shared_ptr<PadEditorLogicHandler> g_samplerPadEditorLogic; // shared
 static lv_obj_t * g_parentContainer = NULL; // parent container for overlays
 static bool g_prevNoteOffOnRelease = false; // store previous global setting to restore after destroy
 
-// Mapping from physical pad index (0-15) to displayed label number (1-16)
+// Button child index (row-major from top-left) -> displayed label number (1-16).
+// Physical pad p lives on child notes[p]-1, whose label is p+1 — so the label
+// is the pad number, and the button for pad p is child notes[p]-1.
 static const int notes[] = {13, 14, 15, 16, 9, 10, 11, 12, 5, 6, 7, 8, 1, 2, 3, 4};
-// Inverse mapping: displayed label number (1-16) -> physical pad index (0-15)
-static int inverseNotes[16];
-static bool inverseNotesInit = false;
 #define NOTES_MAX_QUEUE_LEN 100
 
 
@@ -126,10 +125,6 @@ static void (*s_on_back)() = nullptr; // back button callback (calls app->destro
 // callback for the sampler buttons to play the sample
 // Unified sampler pad event callback handling press, release and click based on playback mode
 static void Sampler_pad_event_cb(lv_event_t * e) {
-    if(!inverseNotesInit) {
-        for(int i=0;i<16;i++) inverseNotes[notes[i]-1] = i;
-        inverseNotesInit = true;
-    }
     lv_event_code_t code = lv_event_get_code(e);
     lv_obj_t * obj = (lv_obj_t * )lv_event_get_target(e);
     if (!obj) return;
@@ -137,7 +132,7 @@ static void Sampler_pad_event_cb(lv_event_t * e) {
     if (!label) return;
     int displayIdx = atoi(lv_label_get_text(label)); // shown label number
     if (displayIdx < 1 || displayIdx > 16) return;
-    int padIdx = inverseNotes[displayIdx - 1];
+    int padIdx = displayIdx - 1;
 
     // Update subject for UI
     lv_subject_set_int(&s_pad_sampler, padIdx + 1);
@@ -799,11 +794,6 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
 
     // Attach event callbacks for different interaction types to each pad button
     if (buttonFrame) {
-        // Ensure inverseNotes initialized
-        if(!inverseNotesInit) {
-            for(int i=0;i<16;i++) inverseNotes[notes[i]-1] = i;
-            inverseNotesInit = true;
-        }
         uint32_t cnt = lv_obj_get_child_cnt(buttonFrame);
         for (uint32_t i = 0; i < cnt; ++i) {
             lv_obj_t * btn = lv_obj_get_child(buttonFrame, i);
