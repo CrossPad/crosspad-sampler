@@ -7,7 +7,14 @@
 #include <crosspad/app/AppEntry.hpp>
 #include <crosspad-sampler/ui/sampler_panel.hpp>
 #include <crosspad-sampler/SamplerPadLogic.hpp>
-#include <crosspad-gui/app/App.hpp>
+// The App class differs by platform but not by shape: the PC one derives from
+// crosspad_gui::AppBase<App> just as the device one does, so isStarted() /
+// destroyApp() mean the same thing on both.
+#if __has_include("pc_stubs/PcApp.hpp")
+  #include "pc_stubs/PcApp.hpp"
+#else
+  #include <crosspad-gui/app/App.hpp>
+#endif
 #include <crosspad/pad/PadManager.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
 

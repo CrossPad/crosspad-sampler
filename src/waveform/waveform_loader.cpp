@@ -10,9 +10,7 @@
 #include <crosspad/kit/KitPathUtils.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
+#include "crosspad-sampler/port/SamplerRtos.hpp"
 
 #include <cstring>
 #include <cstdio>
@@ -37,19 +35,19 @@ struct WaveformLoadRequest {
 constexpr uint8_t  kMaxAttempts  = 4;
 constexpr uint32_t kRetryDelayMs = 150;
 
-// ── FreeRTOS state ──────────────────────────────────────────────────────
+// ── Worker state ─────────────────────────────────────────────────────────
 
-static TaskHandle_t   s_task    = nullptr;
-static QueueHandle_t  s_queue   = nullptr;
+static SamplerWorker  s_worker;
+static SamplerQueue<WaveformLoadRequest> s_queue;
 static volatile bool  s_running = false;
 static WaveformLoaderStats s_stats;
 
 static void requeue_or_fail(WaveformLoadRequest& req, uint32_t& failCounter) {
     if (req.attempt + 1 < kMaxAttempts) {
         req.attempt++;
-        if (xQueueSend(s_queue, &req, 0) == pdTRUE) {
+        if (s_queue.send(req)) {
             s_stats.retried++;
-            vTaskDelay(pdMS_TO_TICKS(kRetryDelayMs));
+            sampler_delay_ms(kRetryDelayMs);
             return;
         }
         s_stats.dropped++;
@@ -64,10 +62,14 @@ static void loader_task(void* /*param*/) {
 
     WaveformLoadRequest req;
 
-    while (s_running) {
-        if (!xQueueReceive(s_queue, &req, portMAX_DELAY)) continue;
+    // Parks between jobs and never returns. It used to end itself on the stop
+    // signal, which left waveform_loader_start() believing a worker existed
+    // and quietly never loading another waveform after the first stop.
+    for (;;) {
+        if (!s_queue.receive(req, kWaitForever)) continue;
 
-        if (!s_running || req.filename[0] == '\0') break;
+        // Stop signal, or a wake with nothing to do: go back to the queue.
+        if (!s_running || req.filename[0] == '\0') continue;
 
         if (waveform_cache_find(req.filename)) continue;
 
@@ -105,7 +107,7 @@ static void loader_task(void* /*param*/) {
             continue;
         }
 
-        if (!s_running) { free(buf); break; }
+        if (!s_running) { free(buf); continue; }
 
         // Load via platform callback (handles SD mutex, compression, etc.)
         bool ok = wf.getWaveformSamples(req.filename, buf, samplesToRead,
@@ -113,7 +115,7 @@ static void loader_task(void* /*param*/) {
 
         if (!s_running) {
             if (cbs.freeWaveformMem) cbs.freeWaveformMem(buf); else free(buf);
-            break;
+            continue;
         }
 
         if (ok && waveform_cache_add(req.filename, buf, samplesToRead)) {
@@ -129,12 +131,9 @@ static void loader_task(void* /*param*/) {
 
         if (cbs.freeWaveformMem) cbs.freeWaveformMem(buf); else free(buf);
 
-        vTaskDelay(pdMS_TO_TICKS(10));
+        // Yield between loads
+        sampler_delay_ms(10);
     }
-
-    s_running = false;
-    s_task = nullptr;
-    vTaskDelete(nullptr);
 }
 
 // ── Public API ──────────────────────────────────────────────────────────
@@ -142,35 +141,32 @@ static void loader_task(void* /*param*/) {
 bool waveform_loader_start() {
     if (s_running) return false;
 
-    if (!s_queue) {
-        s_queue = xQueueCreate(LOADER_QUEUE_SIZE, sizeof(WaveformLoadRequest));
-        if (!s_queue) return false;
+    if (!s_queue.create(LOADER_QUEUE_SIZE)) return false;
+
+    s_running = true;
+    if (s_worker.started()) return true;   // already parked on the queue
+    if (!s_worker.start(loader_task, nullptr, "WFLoader",
+                        LOADER_STACK_SIZE, LOADER_PRIORITY, LOADER_CORE)) {
+        s_running = false;
+        return false;
     }
-
-    BaseType_t r = xTaskCreatePinnedToCore(
-        loader_task, "WFLoader",
-        LOADER_STACK_SIZE, nullptr,
-        LOADER_PRIORITY, &s_task, LOADER_CORE);
-
-    if (r == pdPASS) { s_running = true; return true; }
-    return false;
+    return true;
 }
 
 void waveform_loader_stop() {
     if (!s_running) return;
     s_running = false;
 
+    // Wake the worker so it notices the flag; it parks on the queue again
+    // rather than ending, so its stack is paid for once per boot.
     WaveformLoadRequest term = {};
-    xQueueSend(s_queue, &term, 0);
-
-    for (int i = 0; i < 50 && s_task; i++) vTaskDelay(pdMS_TO_TICKS(10));
-    if (s_task) { vTaskDelete(s_task); s_task = nullptr; }
+    s_queue.send(term);
 }
 
 void waveform_loader_request(const char* filename, bool highPriority,
                               uint8_t padIndex,
                               uint32_t sampleStart, uint32_t sampleEnd) {
-    if (!filename || !s_queue) return;
+    if (!filename || !s_queue.valid()) return;
     if (waveform_cache_find(filename)) return;
 
     WaveformLoadRequest req = {};
@@ -181,15 +177,13 @@ void waveform_loader_request(const char* filename, bool highPriority,
     req.sampleStart = sampleStart;
     req.sampleEnd   = sampleEnd;
 
-    const BaseType_t sent = highPriority
-        ? xQueueSendToFront(s_queue, &req, 0)
-        : xQueueSend(s_queue, &req, 0);
-    if (sent == pdTRUE) s_stats.requested++;
+    const bool sent = highPriority ? s_queue.sendToFront(req) : s_queue.send(req);
+    if (sent) s_stats.requested++;
     else                s_stats.dropped++;
 }
 
 int waveform_loader_preload_kit(int maxPads) {
-    if (!s_queue) return 0;
+    if (!s_queue.valid()) return 0;
 
     auto* mgr = crosspad::getPlatformServices().kitManager;
     if (!mgr) return 0;
@@ -220,13 +214,13 @@ bool waveform_loader_is_running() {
 }
 
 void waveform_loader_clear_queue() {
-    if (s_queue) xQueueReset(s_queue);
+    s_queue.reset();
 }
 
 void waveform_loader_get_stats(WaveformLoaderStats* out) {
     if (!out) return;
     *out = s_stats;
-    out->queued = s_queue ? (uint32_t)uxQueueMessagesWaiting(s_queue) : 0;
+    out->queued = (uint32_t)s_queue.count();
 }
 
 } // namespace crosspad_sampler

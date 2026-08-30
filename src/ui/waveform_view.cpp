@@ -8,9 +8,7 @@
 #include <cstring>
 #include <lvgl.h>
 
-#ifdef ESP_PLATFORM
-#include <esp_heap_caps.h>
-#endif
+#include <crosspad-sampler/port/SamplerRtos.hpp>
 
 namespace crosspad_sampler {
 
@@ -53,12 +51,7 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
 
     // Canvas, child 0. Its buffer comes from PSRAM when there is any.
     if (!cbuf) {
-#ifdef ESP_PLATFORM
-        cbuf = static_cast<uint8_t*>(heap_caps_malloc(CBUF_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-#endif
-        if (!cbuf) {
-            cbuf = static_cast<uint8_t*>(malloc(CBUF_BYTES));
-        }
+        cbuf = static_cast<uint8_t*>(sampler_alloc_big(CBUF_BYTES));
     }
     lv_obj_t* canvas = lv_canvas_create(cont);
     lv_canvas_set_buffer(canvas, cbuf, WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT,

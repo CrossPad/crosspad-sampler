@@ -4,8 +4,7 @@
 #include "crosspad-sampler/SamplerConfig.hpp"
 #include "crosspad-sampler/SamplerPlatformCallbacks.hpp"
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
+#include "crosspad-sampler/port/SamplerRtos.hpp"
 
 #include <cstring>
 #include <cstdlib>
@@ -25,7 +24,7 @@ static uint32_t           s_timestamp        = 0;
 static void*              s_cachedKit        = nullptr;
 static char               s_cachedKitPath[256] = {};
 static bool               s_savedThisBatch   = false;
-static SemaphoreHandle_t  s_mutex            = nullptr;
+static SamplerMutex       s_mutex;
 
 // ── Memory helpers — route through platform callbacks if available ──────
 
@@ -43,14 +42,12 @@ static void cache_free(void* ptr) {
 
 // ── Lock ────────────────────────────────────────────────────────────────
 
-/* Created on first use, whichever function that is. It used to exist only
- * after waveform_cache_init(), which only the kit selector called — every
- * other way into a kit left it null, and a null mutex made add() and find()
- * answer "no" silently, so nothing was ever cached. */
-static SemaphoreHandle_t lock() {
-    if (!s_mutex) s_mutex = xSemaphoreCreateMutex();
-    return s_mutex;
-}
+/* The mutex used to exist only after waveform_cache_init(), and only the kit
+ * selector's pre-load hook called that. A kit loaded any other way — the boot
+ * auto-load, a CDC KIT_LOAD, the sampler's own change — left it null, and with
+ * a null mutex every add() and find() answered "no" without a word: the loader
+ * read all sixteen files and cached none of them. SamplerMutex creates itself
+ * on first take, whichever function that turns out to be. */
 
 // ── LRU helper ──────────────────────────────────────────────────────────
 
@@ -85,9 +82,7 @@ static bool get_cache_path(const char* kitJsonPath, char* out, int maxLen) {
 // ── Public API ──────────────────────────────────────────────────────────
 
 void waveform_cache_init() {
-    if (!lock()) return;
-
-    if (xSemaphoreTake(s_mutex, portMAX_DELAY)) {
+    if (s_mutex.take(kWaitForever)) {
         for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {
             if (s_cache[i].waveformData) {
                 cache_free(s_cache[i].waveformData);
@@ -98,7 +93,7 @@ void waveform_cache_init() {
         s_cachedKit = nullptr;
         s_cachedKitPath[0] = '\0';
         s_savedThisBatch = false;
-        xSemaphoreGive(s_mutex);
+        s_mutex.give();
     }
 
     totalWaveformsToCache = 0;
@@ -134,7 +129,7 @@ WaveformCacheEntry* waveform_cache_find(const char* filename) {
     /* A short wait, not a try-lock: the loader holds the mutex only for a
      * memcpy of 1.2 kB, but a try-lock that met it reported "not cached" and
      * the panel drew an empty box for a waveform that was there. */
-    if (lock() && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(20))) {
+    if (s_mutex.take(20)) {
         for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {
             if (s_cache[i].valid && strcmp(s_cache[i].filename, filename) == 0) {
                 s_cache[i].lastUsed = ++s_timestamp;
@@ -142,7 +137,7 @@ WaveformCacheEntry* waveform_cache_find(const char* filename) {
                 break;
             }
         }
-        xSemaphoreGive(s_mutex);
+        s_mutex.give();
     }
     return result;
 }
@@ -151,7 +146,8 @@ bool waveform_cache_add(const char* filename, int16_t* waveform, uint32_t sample
     if (!filename || !waveform || sampleCount == 0) return false;
     bool ok = false;
 
-    if (lock() && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100))) {
+    if (s_mutex.take(100)) {
+        // Already cached?
         WaveformCacheEntry* entry = nullptr;
         for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {
             if (s_cache[i].valid && strcmp(s_cache[i].filename, filename) == 0) {
@@ -179,7 +175,7 @@ bool waveform_cache_add(const char* filename, int16_t* waveform, uint32_t sample
             entry->lastUsed = ++s_timestamp;
             ok = true;
         }
-        xSemaphoreGive(s_mutex);
+        s_mutex.give();
     }
     // Outside the lock: notify can reach save_to_disk, which takes s_mutex
     // itself, and it is not recursive.
@@ -191,11 +187,11 @@ void waveform_cache_get_stats(int* loaded, int* total) {
     if (!loaded || !total) return;
     *total = WAVEFORM_CACHE_SIZE;
     *loaded = 0;
-    if (lock() && xSemaphoreTake(s_mutex, 0)) {
+    if (s_mutex.take(0)) {
         for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {
             if (s_cache[i].valid) (*loaded)++;
         }
-        xSemaphoreGive(s_mutex);
+        s_mutex.give();
     }
 }
 
@@ -227,11 +223,11 @@ bool waveform_cache_save_to_disk(const char* kitJsonPath) {
     if (!get_cache_path(kitJsonPath, cachePath, sizeof(cachePath))) return false;
 
     uint8_t validCount = 0;
-    if (s_mutex && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(500))) {
+    if (s_mutex.take(500)) {
         for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {
             if (s_cache[i].valid && s_cache[i].waveformData) validCount++;
         }
-        xSemaphoreGive(s_mutex);
+        s_mutex.give();
     }
     if (validCount == 0) return false;
 
@@ -254,7 +250,7 @@ bool waveform_cache_save_to_disk(const char* kitJsonPath) {
     uint16_t reserved = 0;
     memcpy(buf + pos, &reserved, 2); pos += 2;
 
-    if (s_mutex && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(500))) {
+    if (s_mutex.take(500)) {
         for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {
             if (!s_cache[i].valid || !s_cache[i].waveformData) continue;
             uint8_t fnLen = (uint8_t)strlen(s_cache[i].filename);
@@ -264,7 +260,7 @@ bool waveform_cache_save_to_disk(const char* kitJsonPath) {
             uint32_t dataBytes = s_cache[i].sampleCount * sizeof(int16_t);
             memcpy(buf + pos, s_cache[i].waveformData, dataBytes); pos += dataBytes;
         }
-        xSemaphoreGive(s_mutex);
+        s_mutex.give();
     }
 
     bool ok = wf.writeFile(cachePath, buf, pos);
@@ -318,7 +314,7 @@ bool waveform_cache_load_from_disk(const char* kitJsonPath) {
         memcpy(data, buf + pos, dataBytes); pos += dataBytes;
 
         // Direct insert: notify would move the progress counter.
-        if (s_mutex && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(500))) {
+        if (s_mutex.take(500)) {
             WaveformCacheEntry* entry = nullptr;
             for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {
                 if (!s_cache[i].valid) { entry = &s_cache[i]; break; }
@@ -333,7 +329,7 @@ bool waveform_cache_load_from_disk(const char* kitJsonPath) {
                 entry->lastUsed = ++s_timestamp;
                 loaded++;
             }
-            xSemaphoreGive(s_mutex);
+            s_mutex.give();
         } else {
             cache_free(data);
         }

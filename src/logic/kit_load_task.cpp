@@ -30,11 +30,12 @@
 #include <crosspad-gui/components/status_bar.h>
 #include <lvgl.h>
 
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include <freertos/semphr.h>
-#include <freertos/idf_additions.h>
-#include <esp_heap_caps.h>
+#include <crosspad-sampler/port/SamplerRtos.hpp>
+
+#if defined(ARDUINO)
+  #include <freertos/FreeRTOS.h>
+  #include <freertos/task.h>
+#endif
 
 #include <atomic>
 #include <cstring>
@@ -49,11 +50,17 @@ static constexpr size_t LOAD_TASK_STACK = 8096;
 // Above core 0's housekeeping, below the audio tasks. At priority 1 the loader
 // round-robined with the console-blocking CDC loop and a ~3 s load stretched
 // past 20 s; it is blocked on SD reads anyway, so it cannot hog the CPU here.
-static constexpr UBaseType_t LOAD_TASK_PRIORITY = 5;
+static constexpr int LOAD_TASK_PRIORITY = 5;
 
 // ── The worker, created once ────────────────────────────────────────────────
-static TaskHandle_t      s_worker      = nullptr;
-static SemaphoreHandle_t s_workPending = nullptr;
+// A task per load leaks: xTaskCreatePinnedToCoreWithCaps() builds a *static*
+// task and only vTaskDeleteWithCaps() frees its buffers, so vTaskDelete() left
+// 8196 B of PSRAM and 372 B of internal RAM behind on every swap. SamplerWorker
+// / SamplerSignal hide the ESP/Arduino/PC-specific calls behind one worker
+// that parks on a signal between loads and pays that cost once.
+static SamplerWorker  s_worker;
+static SamplerSignal  s_workPending;
+static bool           s_workerUp = false;
 
 // The request the worker picks up. Written before the semaphore is given,
 // read after it is taken; a second load waits in the pending slot below.
@@ -140,7 +147,7 @@ static void run_one_load(bool onlyModified, int kitId) {
 
     // Let the streaming background release the storage bus and its file
     // handles before the reload reopens them.
-    vTaskDelay(pdMS_TO_TICKS(150));
+    sampler_delay_ms(150);
 
     for (uint8_t padIdx = 0; padIdx < PAD_COUNT; ++padIdx) {
         if (onlyModified && !kit->pads[padIdx].IsModified()) continue;
@@ -159,7 +166,7 @@ static void run_one_load(bool onlyModified, int kitId) {
 // Parks between loads; its stack and TCB are allocated once.
 static void load_fn(void* /*param*/) {
     for (;;) {
-        if (xSemaphoreTake(s_workPending, portMAX_DELAY) != pdTRUE) continue;
+        if (!s_workPending.take(kWaitForever)) continue;
         run_one_load(s_reqOnlyModified, s_reqKitId);
     }
 }
@@ -176,33 +183,27 @@ void kit_load_task_poll() {
 
 // Worker and doorbell, on the first load only.
 static bool ensure_worker() {
-    if (s_worker) return true;
+    if (s_workerUp) return true;
+    if (!s_workPending.create()) return false;
 
-    if (!s_workPending) {
-        s_workPending = xSemaphoreCreateBinary();
-        if (!s_workPending) return false;
-    }
-
-    // Stack from PSRAM. xTaskCreatePinnedToCoreWithCaps is ESP-IDF v5 only;
-    // the Arduino build uses a static BSS stack, its largest internal free
-    // block (~7 kB) being under LOAD_TASK_STACK.
 #if defined(ARDUINO)
-    // 4 kB, as the Arduino loader task ran the same LoadPad work on.
+    // The Arduino build has no xTaskCreatePinnedToCoreWithCaps and cannot
+    // allocate this stack dynamically either: its internal heap's largest
+    // free block (~7 kB at runtime) is smaller than LOAD_TASK_STACK. A static
+    // BSS stack is the only shape that works there, so this one case stays
+    // out of SamplerRtos. 4 kB matches the legacy Arduino loader task's stack
+    // for the same work.
     constexpr size_t kArduinoLoadStack = 4096;
     static StaticTask_t s_loadTcb;
     static StackType_t  s_loadStack[kArduinoLoadStack / sizeof(StackType_t)];
-    s_worker = xTaskCreateStaticPinnedToCore(load_fn, "kit_load", kArduinoLoadStack,
-                                             nullptr, LOAD_TASK_PRIORITY, s_loadStack, &s_loadTcb, 0);
-    return s_worker != nullptr;
+    s_workerUp = xTaskCreateStaticPinnedToCore(load_fn, "kit_load", kArduinoLoadStack,
+                                               nullptr, LOAD_TASK_PRIORITY,
+                                               s_loadStack, &s_loadTcb, 0) != nullptr;
 #else
-    if (xTaskCreatePinnedToCoreWithCaps(load_fn, "kit_load", LOAD_TASK_STACK,
-                                        nullptr, LOAD_TASK_PRIORITY, &s_worker, 0,
-                                        MALLOC_CAP_SPIRAM) != pdPASS) {
-        s_worker = nullptr;
-        return false;
-    }
-    return true;
+    s_workerUp = s_worker.start(load_fn, nullptr, "kit_load",
+                                LOAD_TASK_STACK, LOAD_TASK_PRIORITY, /*core=*/0);
 #endif
+    return s_workerUp;
 }
 
 void kit_load_task_start(bool onlyModified, int kitId) {
@@ -234,8 +235,9 @@ void kit_load_task_start(bool onlyModified, int kitId) {
 
     lv_timer_create(progress_poll_timer_cb, 100, nullptr);
 
-    // Last: the worker runs as soon as this is given.
-    xSemaphoreGive(s_workPending);
+    // Last: the worker runs as soon as this is given, and it must not start
+    // ahead of the request it is meant to pick up.
+    s_workPending.give();
 }
 
 bool kit_load_task_is_loading() {
