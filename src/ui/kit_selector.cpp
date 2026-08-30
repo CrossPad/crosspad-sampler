@@ -2,11 +2,10 @@
 //
 // Kit browser — cover on the left, one row per kit on the right.
 //
-// Layout 6C from the kit_browser_split mockup. Everything the screen shows
-// comes from IKitManager: the rows are its kit list, the artwork is whatever a
-// kit ships beside its JSON (cover.png 122x122, thumb.png 20x20), and a kit
-// without artwork gets a lettered chip instead of a blank box. Loading goes
-// through the same platform callback as every other way into a kit change.
+// Everything shown comes from IKitManager: the rows are its kit list, the
+// artwork is what a kit ships beside its JSON (cover.png 122x122, thumb.png
+// 20x20), and a kit without any gets a lettered chip. Loading goes through the
+// same platform callback as every other way into a kit change.
 
 #ifdef USE_LVGL
 
@@ -32,11 +31,9 @@ constexpr int32_t kRowH      = 30;
 constexpr int32_t kCoverSize = 122;
 constexpr int32_t kThumbSize = 20;
 
-/* The cover is a PNG read off the card and decoded on the LVGL thread. Doing
- * that once per encoder detent turns a flick through the list into a burst of
- * card reads, and while the device is a USB audio interface that burst is
- * audible. Nobody looks at a cover they are scrolling past, so it waits until
- * the selection has been still for this long. */
+/* The cover is a PNG read off the card and decoded on the LVGL thread, so one
+ * per encoder detent turns a flick through the list into an audible burst of
+ * card reads. It waits until the selection has been still this long. */
 constexpr uint32_t kCoverDelayMs = 220;
 
 struct Row {
@@ -70,10 +67,9 @@ int  s_loaded    = -1;   ///< row carrying the "this one is playing" edge
 int  s_coverWanted = -1;
 int  s_coverShown  = -1;
 
-/* lv_group_add_obj() fires LV_EVENT_FOCUSED synchronously for the first object
- * it receives, which lands in row_focused_cb() while the row is still being
- * assembled. Selection is applied explicitly once the list is complete, so
- * focus callbacks are ignored until then — and again during teardown. */
+/* lv_group_add_obj() fires LV_EVENT_FOCUSED synchronously for its first
+ * object, landing in row_focused_cb() mid-assembly. Focus callbacks are
+ * ignored until the list is complete, and again during teardown. */
 bool s_building = false;
 bool s_loadingStarted = false;
 
@@ -192,9 +188,8 @@ void select_row(int idx) {
 
 // ── Loading ──────────────────────────────────────────────────────────────────
 
-/* The overlay is hidden rather than deleted between loads: deleting it would
- * race the app teardown, which drops the whole tree with
- * lv_obj_delete_async(). One hidden widget for the life of the screen. */
+/* Hidden rather than deleted between loads: deleting would race the app
+ * teardown, which drops the whole tree asynchronously. */
 void busy_show() {
     if (!s_coverBox) return;
     if (!s_busy) {
@@ -227,7 +222,7 @@ void load_kit(int kitId) {
     const auto& cb = sampler_get_platform_callbacks();
     if (!cb.audio.startLoadKit) return;
 
-    // Platform pre-load work (stop the sequencer, drop the old waveform cache)
+    // Platform pre-load: stop the sequencer, drop the old waveform cache.
     if (s_onSelected) s_onSelected(kitId, s_userData);
 
     cb.audio.startLoadKit(kitId, false);
@@ -251,9 +246,8 @@ void row_focused_cb(lv_event_t* e) {
     select_row((int)(intptr_t)lv_event_get_user_data(e));
 }
 
-/* Encoder press and touch both land here. Loading on the first click keeps
- * the two input paths identical — asking for a second press on an already
- * selected row made touch feel like the first tap did nothing. */
+/* Encoder press and touch both land here, and both load on the first click:
+ * requiring a second press made touch feel like the first tap did nothing. */
 void row_clicked_cb(lv_event_t* e) {
     const int idx = (int)(intptr_t)lv_event_get_user_data(e);
     select_row(idx);
@@ -357,9 +351,8 @@ void build_rows() {
     const int current = mgr->getCurrentKitId();
     if (current >= 0 && current < (int)s_rows.size()) row_mark_loaded(current);
 
-    /* Back was added to the group first, so it holds focus by default. The
-     * list is what the user came for — focus it, which also puts Back exactly
-     * one notch counter-clockwise from the top entry. */
+    /* Back holds focus by default, having been added first. Focus the list
+     * instead, which also puts Back one notch counter-clockwise of the top. */
     const int first = current >= 0 && current < (int)s_rows.size() ? current : 0;
     lv_group_focus_obj(s_rows[first].obj);
     select_row(first);
@@ -401,9 +394,8 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     lv_obj_align(status, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_remove_flag(status, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* The title doubles as the way out. The browser takes the encoder for its
-     * list while it is open, so without a focusable control here the launcher
-     * is unreachable — the arrow says so. */
+    /* The title doubles as the way out: the browser owns the encoder while it
+     * is open, so without a focusable control here nothing leaves. */
     s_backBtn = lv_obj_create(status);
     lv_obj_remove_style_all(s_backBtn);
     lv_obj_set_size(s_backBtn, 78, kStatusH - 5);
@@ -440,9 +432,8 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     lv_obj_remove_style_all(left);
     lv_obj_set_size(left, kCoverSize, LV_PCT(100));
     lv_obj_set_flex_flow(left, LV_FLEX_FLOW_COLUMN);
-    /* Cover plus two labels are shorter than the body: centre the stack on the
-     * main axis, keep the cross axis at START so the captions line up with the
-     * cover's left edge. */
+    /* Centre the stack on the main axis; the cross axis stays at START so the
+     * captions line up with the cover's left edge. */
     lv_obj_set_flex_align(left, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(left, 7, 0);
     lv_obj_remove_flag(left, LV_OBJ_FLAG_SCROLLABLE);
@@ -492,16 +483,13 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
 
 namespace {
 
-/* Everything that must not outlive the selector's widget tree: the two
- * lv_timers and every static handle into the tree. Shared by the explicit
- * destroy and the LV_EVENT_DELETE fallback below, so a host that deletes the
- * tree without calling kit_selector_destroy (APP_STOP → LoadMainScreen wipes
- * the screen while the pre-launch selector is up) cannot leave the cover
- * timer firing lv_label_set_text into freed memory. */
+/* Everything that must not outlive the widget tree: both lv_timers and every
+ * static handle into it. Shared with the LV_EVENT_DELETE fallback below, so a
+ * host that drops the tree without calling kit_selector_destroy cannot leave
+ * the cover timer writing into freed memory. */
 void reset_state() {
-    /* Stop answering focus events before anything comes down: deleting a
-     * focused row refocuses another one, and that handler would walk into
-     * widgets that are part of the same teardown. */
+    /* Stop answering focus events first: deleting a focused row refocuses
+     * another, into widgets that are part of the same teardown. */
     s_building = true;
     s_loadingStarted = false;
 

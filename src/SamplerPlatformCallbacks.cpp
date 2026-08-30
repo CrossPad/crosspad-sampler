@@ -9,9 +9,6 @@
 
 namespace crosspad_sampler {
 
-// ---------------------------------------------------------------------------
-// Static storage
-// ---------------------------------------------------------------------------
 
 static SamplerPlatformCallbacks s_callbacks = {};
 
@@ -23,21 +20,15 @@ const SamplerPlatformCallbacks& sampler_get_platform_callbacks() {
     return s_callbacks;
 }
 
-// ---------------------------------------------------------------------------
-// Engine → Sampler callbacks (direct path for low-latency fingerdrumming)
-//
-// The platform wires these into SampleStreamPlayer_NoteOnCb / NoteOffCb.
-// They update PadManager state and post EventBus feedback so the GUI can
-// track playback (playhead, pad colors) with minimal latency.
-// ---------------------------------------------------------------------------
+// Engine → Sampler callbacks, wired into SampleStreamPlayer_NoteOnCb/NoteOffCb
+// by the platform. They update PadManager state and post EventBus feedback so
+// the GUI tracks playback with minimal latency.
 
 static void engine_note_on(uint8_t note, uint8_t wavIdx) {
     if (note >= PAD_COUNT) return;
 
-    // Update PadManager play state
     crosspad::getPadManager().handleSamplePlay(note, true, wavIdx);
 
-    // Post EventBus feedback for RGB and GUI synchronization
     crosspad::getEventBus().postSamplePlayback(
         note, wavIdx, true, crosspad::EventSource::SamplePlayback);
 }

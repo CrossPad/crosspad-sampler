@@ -13,16 +13,12 @@
 
 namespace crosspad_sampler {
 
-// ---------------------------------------------------------------------------
-// Progress tracking
-// ---------------------------------------------------------------------------
+// ── Progress tracking ───────────────────────────────────────────────────
 
 int totalWaveformsToCache = 0;
 int waveformsCached       = 0;
 
-// ---------------------------------------------------------------------------
-// Internal state
-// ---------------------------------------------------------------------------
+// ── Internal state ──────────────────────────────────────────────────────
 
 static WaveformCacheEntry s_cache[WAVEFORM_CACHE_SIZE] = {};
 static uint32_t           s_timestamp        = 0;
@@ -31,9 +27,7 @@ static char               s_cachedKitPath[256] = {};
 static bool               s_savedThisBatch   = false;
 static SemaphoreHandle_t  s_mutex            = nullptr;
 
-// ---------------------------------------------------------------------------
-// Memory helpers — route through platform callbacks if available
-// ---------------------------------------------------------------------------
+// ── Memory helpers — route through platform callbacks if available ──────
 
 static void* cache_alloc(uint32_t bytes) {
     auto& wf = sampler_get_platform_callbacks().waveform;
@@ -47,31 +41,23 @@ static void cache_free(void* ptr) {
     free(ptr);
 }
 
-// ---------------------------------------------------------------------------
-// Lock
-// ---------------------------------------------------------------------------
+// ── Lock ────────────────────────────────────────────────────────────────
 
-/* The mutex used to exist only after waveform_cache_init(), and only the kit
- * selector's pre-load hook called that. A kit loaded any other way — the boot
- * auto-load, a CDC KIT_LOAD, the sampler's own change — left it null, and with
- * a null mutex every add() and find() answered "no" without a word: the loader
- * read all sixteen files and cached none of them. The lock is created on first
- * use, whichever function that is. */
+/* Created on first use, whichever function that is. It used to exist only
+ * after waveform_cache_init(), which only the kit selector called — every
+ * other way into a kit left it null, and a null mutex made add() and find()
+ * answer "no" silently, so nothing was ever cached. */
 static SemaphoreHandle_t lock() {
     if (!s_mutex) s_mutex = xSemaphoreCreateMutex();
     return s_mutex;
 }
 
-// ---------------------------------------------------------------------------
-// LRU helper
-// ---------------------------------------------------------------------------
+// ── LRU helper ──────────────────────────────────────────────────────────
 
 static WaveformCacheEntry* find_lru_entry() {
-    // Prefer an invalid (empty) slot
     for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {
         if (!s_cache[i].valid) return &s_cache[i];
     }
-    // All valid — find least recently used
     uint32_t minTs = UINT32_MAX;
     int lru = 0;
     for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {
@@ -83,9 +69,7 @@ static WaveformCacheEntry* find_lru_entry() {
     return &s_cache[lru];
 }
 
-// ---------------------------------------------------------------------------
-// Disk cache path helper
-// ---------------------------------------------------------------------------
+// ── Disk cache path helper ──────────────────────────────────────────────
 
 static bool get_cache_path(const char* kitJsonPath, char* out, int maxLen) {
     if (!kitJsonPath || !out) return false;
@@ -98,9 +82,7 @@ static bool get_cache_path(const char* kitJsonPath, char* out, int maxLen) {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+// ── Public API ──────────────────────────────────────────────────────────
 
 void waveform_cache_init() {
     if (!lock()) return;
@@ -170,7 +152,6 @@ bool waveform_cache_add(const char* filename, int16_t* waveform, uint32_t sample
     bool ok = false;
 
     if (lock() && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100))) {
-        // Already cached?
         WaveformCacheEntry* entry = nullptr;
         for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {
             if (s_cache[i].valid && strcmp(s_cache[i].filename, filename) == 0) {
@@ -200,9 +181,8 @@ bool waveform_cache_add(const char* filename, int16_t* waveform, uint32_t sample
         }
         xSemaphoreGive(s_mutex);
     }
-    // Outside the lock: notify may trigger save_to_disk, which takes s_mutex
-    // itself — calling it while held deadlocks the (non-recursive) mutex and
-    // the save silently writes nothing.
+    // Outside the lock: notify can reach save_to_disk, which takes s_mutex
+    // itself, and it is not recursive.
     if (ok) waveform_cache_notify_cached();
     return ok;
 }
@@ -222,8 +202,7 @@ void waveform_cache_get_stats(int* loaded, int* total) {
 void waveform_cache_notify_cached() {
     if (totalWaveformsToCache > 0) waveformsCached++;
 
-    // Persist once when a top-up batch completes so the disk cache
-    // covers the newly added entries on next boot.
+    // Persist once per completed batch, so the next boot sees the additions.
     if (!s_savedThisBatch
         && totalWaveformsToCache > 0
         && waveformsCached >= totalWaveformsToCache
@@ -233,9 +212,7 @@ void waveform_cache_notify_cached() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Disk persistence — uses platform file callbacks
-// ---------------------------------------------------------------------------
+// ── Disk persistence — uses platform file callbacks ─────────────────────
 
 static const char CACHE_MAGIC[4] = {'W', 'F', 'C', 'A'};
 // v2: full-file envelope (preload uses start=0/end=0). v1 entries were
@@ -249,7 +226,6 @@ bool waveform_cache_save_to_disk(const char* kitJsonPath) {
     char cachePath[256];
     if (!get_cache_path(kitJsonPath, cachePath, sizeof(cachePath))) return false;
 
-    // Count valid entries
     uint8_t validCount = 0;
     if (s_mutex && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(500))) {
         for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {
@@ -259,9 +235,8 @@ bool waveform_cache_save_to_disk(const char* kitJsonPath) {
     }
     if (validCount == 0) return false;
 
-    // Build the blob in memory — entries are small (600 samples * 2 bytes each)
-    // Header: 4 magic + 1 version + 1 count + 2 reserved = 8 bytes
-    // Per entry: 1 fnLen + fn + 4 sampleCount + data
+    // Blob layout: 8-byte header (4 magic, version, count, 2 reserved), then
+    // per entry 1 fnLen + fn + 4 sampleCount + data.
     uint32_t maxSize = 8;
     for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {
         if (s_cache[i].valid && s_cache[i].waveformData) {
@@ -304,7 +279,6 @@ bool waveform_cache_load_from_disk(const char* kitJsonPath) {
     char cachePath[256];
     if (!get_cache_path(kitJsonPath, cachePath, sizeof(cachePath))) return false;
 
-    // Read entire file
     uint32_t maxFile = 256 * 1024;  // 256 KB max
     uint8_t* buf = (uint8_t*)malloc(maxFile);
     if (!buf) return false;
@@ -312,7 +286,6 @@ bool waveform_cache_load_from_disk(const char* kitJsonPath) {
     uint32_t bytesRead = wf.readFile(cachePath, buf, maxFile);
     if (bytesRead < 8) { free(buf); return false; }
 
-    // Verify header
     if (memcmp(buf, CACHE_MAGIC, 4) != 0 || buf[4] != CACHE_VERSION) {
         free(buf);
         return false;
@@ -344,7 +317,7 @@ bool waveform_cache_load_from_disk(const char* kitJsonPath) {
 
         memcpy(data, buf + pos, dataBytes); pos += dataBytes;
 
-        // Insert directly (bypassing notify to avoid progress counter increments)
+        // Direct insert: notify would move the progress counter.
         if (s_mutex && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(500))) {
             WaveformCacheEntry* entry = nullptr;
             for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {

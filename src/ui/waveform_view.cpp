@@ -14,9 +14,7 @@
 
 namespace crosspad_sampler {
 
-// ---------------------------------------------------------------------------
-// Internal state
-// ---------------------------------------------------------------------------
+// ── Internal state ──────────────────────────────────────────────────────
 
 static WaveformDataProvider s_provider  = nullptr;
 static void*                s_userData  = nullptr;
@@ -28,17 +26,13 @@ static int16_t s_waveformBuf[WAVEFORM_CANVAS_WIDTH];
 static uint8_t* cbuf = nullptr;
 static constexpr uint32_t CBUF_BYTES = LV_CANVAS_BUF_SIZE(WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT, 16, 1);
 
-// ---------------------------------------------------------------------------
-// Helper: convert uint32_t 0xRRGGBB to lv_color_t
-// ---------------------------------------------------------------------------
+// ── Helper: convert uint32_t 0xRRGGBB to lv_color_t ─────────────────────
 static lv_color_t color_from_hex(uint32_t hex)
 {
     return lv_color_make((hex >> 16) & 0xFF, (hex >> 8) & 0xFF, hex & 0xFF);
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+// ── Public API ──────────────────────────────────────────────────────────
 
 void waveform_view_set_provider(WaveformDataProvider fn, void* userData)
 {
@@ -48,7 +42,6 @@ void waveform_view_set_provider(WaveformDataProvider fn, void* userData)
 
 lv_obj_t* waveform_view_create(lv_obj_t* parent)
 {
-    // --- Container ---
     lv_obj_t* cont = lv_obj_create(parent);
     lv_obj_set_size(cont, WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT);
     lv_obj_set_style_bg_color(cont, lv_color_hex(0x111111), LV_PART_MAIN);
@@ -58,8 +51,7 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
     lv_obj_set_style_pad_all(cont, 0, LV_PART_MAIN);
     lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
 
-    // --- Canvas (child index 0) ---
-    // Allocate canvas buffer from PSRAM if available, else heap
+    // Canvas, child 0. Its buffer comes from PSRAM when there is any.
     if (!cbuf) {
 #ifdef ESP_PLATFORM
         cbuf = static_cast<uint8_t*>(heap_caps_malloc(CBUF_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -75,7 +67,7 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
     lv_obj_align(canvas, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_canvas_fill_bg(canvas, lv_color_hex(0x111111), LV_OPA_COVER);
 
-    // --- Playhead (child index 1) — 2 px wide red vertical line ---
+    // Playhead, child 1.
     lv_obj_t* playhead = lv_obj_create(cont);
     lv_obj_set_size(playhead, 2, WAVEFORM_CANVAS_HEIGHT);
     lv_obj_set_style_bg_color(playhead, color_from_hex(WAVEFORM_HEAD_COLOR), LV_PART_MAIN);
@@ -85,7 +77,7 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
     lv_obj_align(playhead, LV_ALIGN_LEFT_MID, 0, 0);
     lv_obj_add_flag(playhead, LV_OBJ_FLAG_HIDDEN);
 
-    // --- Start marker (child index 2) — 2 px wide green vertical line ---
+    // Start marker, child 2.
     lv_obj_t* startMarker = lv_obj_create(cont);
     lv_obj_set_size(startMarker, 2, WAVEFORM_CANVAS_HEIGHT);
     lv_obj_set_style_bg_color(startMarker, color_from_hex(WAVEFORM_START_COLOR), LV_PART_MAIN);
@@ -95,7 +87,7 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
     lv_obj_align(startMarker, LV_ALIGN_LEFT_MID, 0, 0);
     lv_obj_add_flag(startMarker, LV_OBJ_FLAG_HIDDEN);
 
-    // --- End marker (child index 3) — 2 px wide red vertical line ---
+    // End marker, child 3.
     lv_obj_t* endMarker = lv_obj_create(cont);
     lv_obj_set_size(endMarker, 2, WAVEFORM_CANVAS_HEIGHT);
     lv_obj_set_style_bg_color(endMarker, color_from_hex(WAVEFORM_END_COLOR), LV_PART_MAIN);
@@ -121,12 +113,10 @@ void waveform_view_load(lv_obj_t* waveformView, uint8_t padIdx, uint8_t sampleSl
                s_waveformBuf, static_cast<uint32_t>(WAVEFORM_CANVAS_WIDTH),
                &actualSamples, s_userData);
 
-    // Clear background.
     lv_canvas_fill_bg(canvas, lv_color_hex(0x111111), LV_OPA_COVER);
 
     if (actualSamples < 2) return;
 
-    // Begin LVGL v9 draw layer.
     lv_layer_t layer;
     lv_canvas_init_layer(canvas, &layer);
 
@@ -139,11 +129,10 @@ void waveform_view_load(lv_obj_t* waveformView, uint8_t padIdx, uint8_t sampleSl
     const int32_t midY  = WAVEFORM_CANVAS_HEIGHT / 2;
     const float   scale = static_cast<float>(midY) / 32768.0f;
 
-    // One vertical bar per column from -|peak| to +|peak|. Each cached
-    // sample is the abs-max of its source bin, so |peak| is the bin's
-    // loudness; mirroring it gives the standard symmetric envelope. This
-    // keeps loud transients visible inside long high-compression bins
-    // where the prior point-to-point line would zigzag near midY.
+    // One bar per column, -|peak| to +|peak|. Each cached sample is its
+    // bin's abs-max, so mirroring it gives the usual symmetric envelope and
+    // keeps transients visible in long bins, where a point-to-point line
+    // only zigzagged near the midline.
     for (uint32_t i = 0; i < actualSamples; ++i) {
         int16_t v   = s_waveformBuf[i];
         int32_t mag = static_cast<int32_t>((v < 0 ? -v : v) * scale);

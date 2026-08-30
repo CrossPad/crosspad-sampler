@@ -14,9 +14,7 @@
 
 namespace crosspad_sampler {
 
-// ---------------------------------------------------------------------------
-// dB-like scaling (sqrt approximation)
-// ---------------------------------------------------------------------------
+// ── dB-like scaling (sqrt approximation) ────────────────────────────────
 
 static inline int fast_db_scale(int16_t amplitude, int channelHeight) {
     int abs_amp = abs(amplitude);
@@ -25,9 +23,7 @@ static inline int fast_db_scale(int16_t amplitude, int channelHeight) {
     return (int)(normalized * (channelHeight / 2));
 }
 
-// ---------------------------------------------------------------------------
-// Async draw state
-// ---------------------------------------------------------------------------
+// ── Async draw state ────────────────────────────────────────────────────
 
 struct AsyncDrawState {
     lv_obj_t*  canvas       = nullptr;
@@ -68,9 +64,7 @@ static void async_draw_timer_cb(lv_timer_t* timer) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+// ── Public API ──────────────────────────────────────────────────────────
 
 void waveform_draw_chunk(lv_obj_t* canvas, int16_t* waveform, uint32_t sampleCount,
                          int startX, int endX, int width, int height, bool clearFirst) {

@@ -1,10 +1,7 @@
 /**
  * @file SamplerPadLogic.cpp
- * @brief IPadLogicHandler implementation for the CrossPad sampler app.
- *
- * Handles pad press/release interactions for sample triggering, subscribes to
- * EventBus events for playback state feedback, and loads kit pad colors on
- * activation.
+ * @brief IPadLogicHandler for the sampler: sample triggering, EventBus
+ *        playback feedback, and kit pad colours on activation.
  */
 
 #include "crosspad-sampler/SamplerPadLogic.hpp"
@@ -33,11 +30,9 @@ static crosspad::RgbColor colorFromUint32(uint32_t rrggbb) {
     return crosspad::RgbColor(r, g, b);
 }
 
-/// The sampler is installed as the PadManager *base* pad logic, so an active
-/// handler exists from boot onwards and PadManager::handlePadPress() returns
-/// before its own MIDI branch ever runs. Pads would stop being a MIDI
-/// controller entirely, so the note is emitted here instead, under the same
-/// keypad gating PadManager applies. Routing to USB/STM32/BLE stays with
+/// The sampler is PadManager's *base* pad logic, so a handler exists from boot
+/// and handlePadPress() returns before its own MIDI branch runs. The note is
+/// emitted here instead, under the same keypad gating; routing stays with
 /// MidiInputHandler behind getMidiOutput().
 static bool padMidiEnabled() {
     auto* settings = crosspad::CrosspadSettings::getInstance();
@@ -74,7 +69,6 @@ void SamplerPadLogic::onNoteOff(const void* event_data,
 // ── IPadLogicHandler ─────────────────────────────────────────────────────────
 
 void SamplerPadLogic::onActivate(crosspad::PadManager& padManager) {
-    // Subscribe to EventBus events
     if (!subscribed_) {
         auto& bus = crosspad::getEventBus();
 
@@ -90,12 +84,10 @@ void SamplerPadLogic::onActivate(crosspad::PadManager& padManager) {
         subscribed_ = true;
     }
 
-    // Load pad colors from current kit
     loadKitColors(padManager);
 }
 
 void SamplerPadLogic::onDeactivate(crosspad::PadManager& padManager) {
-    // Unsubscribe from EventBus
     if (subscribed_) {
         auto& bus = crosspad::getEventBus();
 
@@ -106,7 +98,6 @@ void SamplerPadLogic::onDeactivate(crosspad::PadManager& padManager) {
         subscribed_ = false;
     }
 
-    // Reset all pad colors to neutral gray
     const crosspad::RgbColor neutral(50, 50, 50);
     for (int i = 0; i < PAD_COUNT; ++i) {
         padManager.setPadColor(i, neutral);
@@ -118,13 +109,11 @@ void SamplerPadLogic::onPadPress(crosspad::PadManager& padManager,
                                   uint8_t velocity) {
     if (padIdx >= PAD_COUNT) return;
 
-    // Trigger sample playback via EventBus. The velocity handed to us is
-    // already post-curve (the STM32 applies the per-pad response curve), so
-    // it goes through linearly.
+    // The velocity is already post-curve (the STM32 applies the per-pad
+    // response), so it passes through linearly.
     crosspad::getEventBus().postSamplePlayback(
         padIdx, /*wavIdx=*/0, /*isOn=*/true, crosspad::EventSource::App, velocity);
 
-    // Visual feedback — light the pad as pressed
     padManager.notifyNoteOn(padIdx, velocity, /*fromSampler=*/true);
 
     if (padMidiEnabled()) {
@@ -138,7 +127,6 @@ void SamplerPadLogic::onPadRelease(crosspad::PadManager& padManager,
                                     uint8_t padIdx) {
     if (padIdx >= PAD_COUNT) return;
 
-    // Visual feedback — return pad to resting state
     padManager.notifyNoteOff(padIdx, /*fromSampler=*/true);
 
     if (padMidiEnabled()) {
@@ -147,8 +135,7 @@ void SamplerPadLogic::onPadRelease(crosspad::PadManager& padManager,
                                               padManager.getPadChannel(padIdx));
     }
 
-    // For Hold mode (playbackMode == 1): send stop event so the audio engine
-    // cuts playback when the pad is released.
+    // Hold mode: the release has to tell the engine to cut playback.
     crosspad::IKitManager* kitMgr = crosspad::getKitManager();
     if (kitMgr) {
         crosspad::KitInfo* kit = kitMgr->getCurrentKit();
@@ -178,7 +165,7 @@ void SamplerPadLogic::loadKitColors(crosspad::PadManager& padManager) {
     for (int i = 0; i < PAD_COUNT; ++i) {
         ledCtrl.setPadColor(i, colorFromUint32(kit->pads[i].color));
         ledCtrl.setPadPressedColor(i, colorFromUint32(kit->pads[i].color_pressed));
-        // Playing color: dimmed version of the pad's default color
+        // Playing: the pad's default colour, dimmed.
         ledCtrl.setPadPlayingColor(i, colorFromUint32(kit->pads[i].color).Dim(127));
     }
 }

@@ -9,9 +9,7 @@
 
 namespace crosspad_sampler {
 
-// ---------------------------------------------------------------------------
-// Static state
-// ---------------------------------------------------------------------------
+// ── Static state ────────────────────────────────────────────────────────
 
 static FileListProvider s_provider    = nullptr;
 static FileSelectedFn   s_callback    = nullptr;
@@ -19,9 +17,7 @@ static void*            s_userData    = nullptr;
 static lv_obj_t*        s_fileList    = nullptr;
 static char             s_currentPath[256] = "/crosspad/kits";
 
-// ---------------------------------------------------------------------------
-// Internal callbacks
-// ---------------------------------------------------------------------------
+// ── Internal callbacks ──────────────────────────────────────────────────
 
 static void on_file_clicked(lv_event_t* e)
 {
@@ -51,9 +47,7 @@ static void on_file_list_result(const char** entries, uint32_t count, void* ctx)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+// ── Public API ──────────────────────────────────────────────────────────
 
 void file_explorer_set_provider(FileListProvider fn)
 {
@@ -73,7 +67,6 @@ lv_obj_t* file_explorer_create(lv_obj_t* parent, const char* initialPath)
         s_currentPath[sizeof(s_currentPath) - 1] = '\0';
     }
 
-    // Root overlay — full screen, dark background
     lv_obj_t* explorer = lv_obj_create(parent);
     lv_obj_set_size(explorer, LV_PCT(100), LV_PCT(100));
     lv_obj_set_style_bg_color(explorer, lv_color_hex(0x111111), LV_PART_MAIN);
@@ -81,12 +74,10 @@ lv_obj_t* file_explorer_create(lv_obj_t* parent, const char* initialPath)
     lv_obj_set_style_pad_all(explorer, 4, LV_PART_MAIN);
     lv_obj_set_flex_flow(explorer, LV_FLEX_FLOW_COLUMN);
 
-    // Path label
     lv_obj_t* pathLabel = lv_label_create(explorer);
     lv_obj_set_style_text_color(pathLabel, lv_color_hex(0x888888), LV_PART_MAIN);
     lv_label_set_text(pathLabel, s_currentPath);
 
-    // File list
     s_fileList = lv_list_create(explorer);
     lv_obj_set_width(s_fileList, LV_PCT(100));
     lv_obj_set_flex_grow(s_fileList, 1);

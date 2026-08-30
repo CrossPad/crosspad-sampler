@@ -19,9 +19,7 @@
 
 namespace crosspad_sampler {
 
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
+// ── State ───────────────────────────────────────────────────────────────
 
 bool userAskedAboutCache = false;
 bool userWantsCaching    = false;
@@ -35,9 +33,7 @@ static lv_obj_t*   s_progressBar     = nullptr;
 static lv_obj_t*   s_progressLabel   = nullptr;
 static lv_timer_t* s_progressTimer   = nullptr;
 
-// ---------------------------------------------------------------------------
-// Focus helpers — uses crosspad-gui's encoder input device
-// ---------------------------------------------------------------------------
+// ── Focus helpers — uses crosspad-gui's encoder input device ────────────
 
 static void restore_focus_after_prompt() {
     if (s_promptGroup) { lv_group_delete(s_promptGroup); s_promptGroup = nullptr; }
@@ -48,9 +44,7 @@ static void restore_focus_after_prompt() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+// ── Public API ──────────────────────────────────────────────────────────
 
 void waveform_ui_draw_empty(lv_obj_t* canvas) {
     waveform_draw_empty(canvas);

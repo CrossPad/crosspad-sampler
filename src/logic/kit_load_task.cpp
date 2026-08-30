@@ -1,4 +1,22 @@
 // SPDX-License-Identifier: MIT
+//
+// Kit loading, off the LVGL thread. Four things about this file are
+// load-bearing, and each replaced a defect:
+//
+//  * One long-lived worker, not a task per load. Tasks made with
+//    xTaskCreatePinnedToCoreWithCaps() are *static*, and only
+//    vTaskDeleteWithCaps() frees their buffers — so a task per load leaked
+//    8196 B of PSRAM and 372 B of internal RAM every time. Ten swaps left too
+//    little internal RAM for an SD DMA buffer, and reads simply stopped.
+//  * The worker never touches LVGL. lv_async_call() mutates the timer list and
+//    is not thread-safe without LV_USE_OS. The task writes atomics; an LVGL
+//    timer polls them.
+//  * A request made mid-load is held, not dropped, and only the newest one —
+//    so a second tap does something, and spinning the selector lands on the
+//    kit you stopped at.
+//  * The outgoing kit is released on the LVGL thread between timer callbacks:
+//    the panel reads getCurrentKit()->pads across a waveform draw that blocks
+//    on the SD card.
 
 #include <crosspad-sampler/logic/kit_load_task.hpp>
 #include <crosspad-sampler/SamplerPlatformCallbacks.hpp>
@@ -28,53 +46,26 @@ static volatile bool s_loading = false;
 
 static constexpr size_t LOAD_TASK_STACK = 8096;
 
-// Above the housekeeping that shares core 0, below the audio tasks.
-// At priority 1 the loader sat level with the main CDC loop, which
-// hex-dumps every command it receives and blocks on the console UART
-// while doing it: two prio-1 tasks round-robining, one of them holding
-// the CPU in printf. Under a heavy pad stream that stretched a ~3 s kit
-// load past 20 s. The loader spends nearly all its time blocked on SD
-// reads, so it cannot hog the CPU at this level.
+// Above core 0's housekeeping, below the audio tasks. At priority 1 the loader
+// round-robined with the console-blocking CDC loop and a ~3 s load stretched
+// past 20 s; it is blocked on SD reads anyway, so it cannot hog the CPU here.
 static constexpr UBaseType_t LOAD_TASK_PRIORITY = 5;
 
-// ── The worker is created once and never dies ───────────────────────────────
-// It used to be spawned per load and ended with vTaskDelete(). That leaks:
-// xTaskCreatePinnedToCoreWithCaps() builds a *static* task — the stack comes
-// from heap_caps_malloc(MALLOC_CAP_SPIRAM) and the TCB from pvPortMalloc(),
-// which is internal RAM — and FreeRTOS never frees a static task's buffers.
-// Only vTaskDeleteWithCaps() does, and calling that on yourself spawns yet
-// another temporary task to do the freeing. Measured cost of the old shape:
-// 8196 B of PSRAM and 372 B of internal RAM gone per kit load, for good. Ten
-// swaps took internal RAM from 18.7 kB to 5.7 kB free, at which point
-// sdmmc_cmd could no longer allocate a DMA buffer, every SD read failed, and
-// the load that was in flight never finished.
-//
-// A worker that parks on a semaphore between loads costs those buffers once.
-// It is also what makes back-to-back swaps cheap: no allocation stands
-// between the request and the work, so a swap cannot fail for want of memory.
+// ── The worker, created once ────────────────────────────────────────────────
 static TaskHandle_t      s_worker      = nullptr;
 static SemaphoreHandle_t s_workPending = nullptr;
 
-// The request the worker picks up. Written before the semaphore is given and
-// read after it is taken; a second load cannot start while one is running (it
-// waits in the pending slot below instead), so this one needs no lock.
+// The request the worker picks up. Written before the semaphore is given,
+// read after it is taken; a second load waits in the pending slot below.
 static bool s_reqOnlyModified = false;
 static int  s_reqKitId        = -1;
 
 // ── Cross-thread progress hand-off ──────────────────────────────────────────
-// The load task must NOT touch LVGL: lv_async_call() itself mutates the timer
-// list and is not thread-safe without LV_USE_OS — concurrent calls from the
-// load task corrupted the list and crashed the LVGL task on a garbage
-// callback pointer (intermittent InstrFetchProhibited/LoadProhibited).
-// The task only writes these atomics; an LVGL timer created on the LVGL
-// thread in kit_load_task_start() polls them and drives the status bar.
-
 static std::atomic<int> s_progress{0};        // 0..100
 static std::atomic<int> s_outcome{0};         // 0 = running, 1 = done, -1 = error
 
-// Why the load failed, for the status bar. Written before s_outcome is stored
-// with release ordering and read after it is loaded with acquire, so that pair
-// publishes it — no extra lock needed.
+// Why it failed, for the status bar. Published by s_outcome's release/acquire
+// pair, so it needs no lock.
 static char s_error[48] = {0};
 
 static void set_error(const char* msg) {
@@ -82,16 +73,7 @@ static void set_error(const char* msg) {
              (msg && *msg) ? msg : "Kit load failed");
 }
 
-// A kit change asked for while one is already running. It used to be dropped
-// on the floor — kit_load_task_start() simply returned if s_loading was set —
-// so picking a kit while the previous one was still loading did nothing at
-// all: no sound change, no error, and a status bar that kept showing the load
-// it was already doing. Two taps in the selector inside the ~2.5 s a load
-// takes was enough, and driving swaps from a script hit it every time.
-//
-// The latest request wins rather than queueing them all: someone spinning
-// through the selector wants the kit they stopped on, not to sit through every
-// kit they passed over on the way there.
+// A kit change asked for while one is running; newest wins.
 static bool s_pendingValid        = false;
 static bool s_pendingOnlyModified = false;
 static int  s_pendingKitId        = -1;
@@ -110,27 +92,20 @@ static void progress_poll_timer_cb(lv_timer_t* timer) {
     s_loading = false;
     lv_timer_delete(timer);
 
-    // Then, and on this thread: the platform's follow-up may touch UI or
-    // storage state the load task must not. Ordered after s_loading is cleared
-    // so a handler is free to start another load.
+    // On this thread, and after s_loading is cleared: the follow-up may touch
+    // UI or storage, and may start another load.
     auto& cb = sampler_get_platform_callbacks();
     if (cb.audio.onKitLoadFinished) {
         cb.audio.onKitLoadFinished(outcome > 0);
     }
 
-    // Now that the load is over and no GUI callback is in flight, let the
-    // outgoing kit go. This has to happen on the LVGL thread: the panel
-    // reads getCurrentKit()->pads[i].samples across a waveform draw, which
-    // blocks on the SD card, and freeing those vectors from the loader
-    // thread crashed the reader when it resumed (LoadProhibited on a null
-    // samples[] base). Between timer callbacks there is no such reader.
+    // Release the outgoing kit — here, where no panel reader is in flight.
     if (crosspad::getKitManager()) {
         crosspad::getKitManager()->releaseRetiredKit();
     }
 
-    // Last: whatever the user asked for while this one was busy. This runs on
-    // the LVGL thread, which is where kit_load_task_start() must be called
-    // from, and s_loading is already clear so the request is accepted.
+    // Last: whatever was asked for while this one was busy. This is the LVGL
+    // thread and s_loading is clear, so the request is accepted.
     if (s_pendingValid) {
         s_pendingValid = false;
         kit_load_task_start(s_pendingOnlyModified, s_pendingKitId);
@@ -142,9 +117,8 @@ static void progress_poll_timer_cb(lv_timer_t* timer) {
 // One kit load, start to finish. Returns with s_outcome published; the LVGL
 // timer picks it up from there.
 static void run_one_load(bool onlyModified, int kitId) {
-    // The kit change belongs here, not on the caller's thread: it parses the
-    // kit JSON off storage, which is what made the UI thread miss the task
-    // watchdog when the selector drove it directly.
+    // Here, not on the caller's thread: parsing the kit JSON off storage is
+    // what made the UI thread miss the task watchdog.
     if (kitId >= 0) {
         auto result = getKitOrchestrator().changeKit(kitId);
         if (!result.success) {
@@ -164,8 +138,8 @@ static void run_one_load(bool onlyModified, int kitId) {
     auto* kit = kitMgr->getCurrentKit();
     auto& cb = sampler_get_platform_callbacks();
 
-    // Let the audio/streaming background settle so it releases the storage
-    // bus and its file handles before the reload reopens files.
+    // Let the streaming background release the storage bus and its file
+    // handles before the reload reopens them.
     vTaskDelay(pdMS_TO_TICKS(150));
 
     for (uint8_t padIdx = 0; padIdx < PAD_COUNT; ++padIdx) {
@@ -182,8 +156,7 @@ static void run_one_load(bool onlyModified, int kitId) {
     s_outcome.store(1, std::memory_order_release);
 }
 
-// Parks between loads instead of dying after one, so its stack and TCB are
-// allocated exactly once for the life of the firmware.
+// Parks between loads; its stack and TCB are allocated once.
 static void load_fn(void* /*param*/) {
     for (;;) {
         if (xSemaphoreTake(s_workPending, portMAX_DELAY) != pdTRUE) continue;
@@ -201,8 +174,7 @@ void kit_load_task_poll() {
     // No-op — lv_async_call is drained by LVGL's own task handler.
 }
 
-// Bring up the worker and its doorbell. Runs on the first load and never
-// again — everything here is a once-per-boot cost.
+// Worker and doorbell, on the first load only.
 static bool ensure_worker() {
     if (s_worker) return true;
 
@@ -211,14 +183,11 @@ static bool ensure_worker() {
         if (!s_workPending) return false;
     }
 
-    // Allocate the task stack from PSRAM to avoid exhausting scarce internal
-    // SRAM. xTaskCreatePinnedToCoreWithCaps is ESP-IDF v5 only — the Arduino
-    // build (IDF v4.x) uses a static BSS stack instead: its internal heap's
-    // largest free block (~7 kB at runtime) is smaller than LOAD_TASK_STACK,
-    // so a dynamically allocated stack fails outright.
+    // Stack from PSRAM. xTaskCreatePinnedToCoreWithCaps is ESP-IDF v5 only;
+    // the Arduino build uses a static BSS stack, its largest internal free
+    // block (~7 kB) being under LOAD_TASK_STACK.
 #if defined(ARDUINO)
-    // 4 kB matches the stack the legacy Arduino loader task ran the same
-    // LoadPad work on; internal RAM is too scarce for the PSRAM-sized figure.
+    // 4 kB, as the Arduino loader task ran the same LoadPad work on.
     constexpr size_t kArduinoLoadStack = 4096;
     static StaticTask_t s_loadTcb;
     static StackType_t  s_loadStack[kArduinoLoadStack / sizeof(StackType_t)];
@@ -239,8 +208,8 @@ static bool ensure_worker() {
 void kit_load_task_start(bool onlyModified, int kitId) {
     // Must be called from the LVGL thread (creates an lv_timer).
     if (s_loading) {
-        // Don't drop it — hand it to the timer that is watching the running
-        // load, which will start it as soon as that one reports.
+        // Hand it to the timer watching the running load, to start once that
+        // one reports.
         s_pendingOnlyModified = onlyModified;
         s_pendingKitId        = kitId;
         s_pendingValid        = true;
@@ -265,8 +234,7 @@ void kit_load_task_start(bool onlyModified, int kitId) {
 
     lv_timer_create(progress_poll_timer_cb, 100, nullptr);
 
-    // Last: the worker runs as soon as this is given, and it must not start
-    // ahead of the request it is meant to pick up.
+    // Last: the worker runs as soon as this is given.
     xSemaphoreGive(s_workPending);
 }
 

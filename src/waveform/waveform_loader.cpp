@@ -20,9 +20,7 @@
 
 namespace crosspad_sampler {
 
-// ---------------------------------------------------------------------------
-// Load request
-// ---------------------------------------------------------------------------
+// ── Load request ────────────────────────────────────────────────────────
 
 struct WaveformLoadRequest {
     char     filename[128];
@@ -33,16 +31,13 @@ struct WaveformLoadRequest {
     uint32_t sampleEnd;
 };
 
-/* A read fails for reasons that pass: the card's FAT descriptor pool is
- * shared with the sample streamer, and under playback an fopen() can simply
- * lose that race. A request that failed goes to the back of the queue and is
- * tried again after a pause; only after this many attempts is it given up. */
+/* A read can fail for a passing reason: the FAT descriptor pool is shared
+ * with the sample streamer, so an fopen() under playback can lose the race.
+ * A failed request goes back on the queue until this many attempts. */
 constexpr uint8_t  kMaxAttempts  = 4;
 constexpr uint32_t kRetryDelayMs = 150;
 
-// ---------------------------------------------------------------------------
-// FreeRTOS state
-// ---------------------------------------------------------------------------
+// ── FreeRTOS state ──────────────────────────────────────────────────────
 
 static TaskHandle_t   s_task    = nullptr;
 static QueueHandle_t  s_queue   = nullptr;
@@ -62,9 +57,7 @@ static void requeue_or_fail(WaveformLoadRequest& req, uint32_t& failCounter) {
     failCounter++;
 }
 
-// ---------------------------------------------------------------------------
-// Loader task
-// ---------------------------------------------------------------------------
+// ── Loader task ─────────────────────────────────────────────────────────
 
 static void loader_task(void* /*param*/) {
     auto& wf = sampler_get_platform_callbacks().waveform;
@@ -74,13 +67,10 @@ static void loader_task(void* /*param*/) {
     while (s_running) {
         if (!xQueueReceive(s_queue, &req, portMAX_DELAY)) continue;
 
-        // Termination signal
         if (!s_running || req.filename[0] == '\0') break;
 
-        // Already cached?
         if (waveform_cache_find(req.filename)) continue;
 
-        // Get file info via platform callback
         if (!wf.getFileInfo || !wf.getWaveformSamples) {
             printf("[WFLoader] No platform waveform callbacks\n");
             continue;
@@ -102,7 +92,6 @@ static void loader_task(void* /*param*/) {
         uint32_t samplesToRead = (rangeLength < TARGET_CACHE_SAMPLES)
                                   ? rangeLength : TARGET_CACHE_SAMPLES;
 
-        // Allocate temp buffer via platform allocator
         auto& cbs = sampler_get_platform_callbacks().waveform;
         int16_t* buf = nullptr;
         if (cbs.allocWaveformMem)
@@ -140,7 +129,6 @@ static void loader_task(void* /*param*/) {
 
         if (cbs.freeWaveformMem) cbs.freeWaveformMem(buf); else free(buf);
 
-        // Yield between loads
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
@@ -149,9 +137,7 @@ static void loader_task(void* /*param*/) {
     vTaskDelete(nullptr);
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+// ── Public API ──────────────────────────────────────────────────────────
 
 bool waveform_loader_start() {
     if (s_running) return false;
@@ -215,15 +201,12 @@ int waveform_loader_preload_kit(int maxPads) {
     int queued = 0;
     for (int i = 0; i < maxPads; i++) {
         for (const auto& sample : kit->pads[i].samples) {
-            // Resolve full path from kit directory + relative sample name
             std::string resolvedPath = crosspad::resolveKitSamplePath(kit->path, sample.sample);
             if (resolvedPath.empty()) continue;
             if (waveform_cache_find(resolvedPath.c_str())) continue;
 
-            // Cache the full-file envelope (start=0, end=0). Crop in/out is
-            // expressed via start/end markers on top of the rendered view,
-            // not by trimming the cache, so that the markers stay aligned
-            // with the displayed waveform.
+            // The full-file envelope: crop in/out is drawn as markers over
+            // the rendered view, so trimming the cache would misalign them.
             const uint32_t before = s_stats.requested;
             waveform_loader_request(resolvedPath.c_str(), false, (uint8_t)i, 0, 0);
             if (s_stats.requested != before) ++queued;
