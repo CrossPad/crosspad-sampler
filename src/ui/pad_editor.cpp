@@ -608,7 +608,7 @@ static lv_obj_t * lv_CreatePadEditorContext(lv_obj_t *parent)
         if (kit == NULL) return;
         int padId = lv_subject_get_int(&s_pad_sampler) - 1;
         Pad * pad = &kit->pads[padId];
-        pad->pan = value + 64; // convert to 0-127
+        pad->pan = value;
         pad->dirtyModified = true; // modified (instant-apply, no reload needed)
         auto & cbs = sampler_get_platform_callbacks();
         if (cbs.player.setPan) cbs.player.setPan(padId, pad->pan);
@@ -1006,7 +1006,7 @@ static void UpdatePadEditor(lv_timer_t * e) {
     lv_spinbox_set_value(volumeSpinbox, pad->volume);
 
     // pan
-    lv_spinbox_set_value(panSpinbox, pad->pan - 64); // convert to -64 to +63
+    lv_spinbox_set_value(panSpinbox, pad->pan);
     // start offset
     if (startSpinbox) lv_spinbox_set_value(startSpinbox, pad->GetSampleCount() ? pad->samples[0].start : 0);
     // end offset
