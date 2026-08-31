@@ -59,6 +59,7 @@ static bool dontUpdateSettings = false;
 
 
 
+static uint32_t s_backToken = 0;   // power-button back registration
 lv_group_t * pad_editor_group; // single flat group: settings widgets, list items, then bottom buttons
 static lv_group_t * s_priorEncoderGroup = nullptr; // restored on destroy so encoder doesn't dangle
 
@@ -188,6 +189,14 @@ static void ShowDuplicateConfirmation(int sourcePadIdx, int targetPadIdx)
     }, LV_EVENT_CLICKED, NULL);
 }
 
+/* The power button's short click inside the pad editor closes the editor and
+ * goes back to the sampler panel — one level, not the whole app. */
+static bool padEditorBack_cb(void *) {
+    if (!s_padEditorCont) return false;
+    lv_obj_delete_async(s_padEditorCont);   // DestroyPadEditor runs from DELETE
+    return true;
+}
+
 lv_obj_t * pad_editor_create(lv_obj_t *parent, crosspad_gui::ILvglApp * a) {
     thisApp = a;
 
@@ -307,6 +316,7 @@ lv_obj_t * pad_editor_create(lv_obj_t *parent, crosspad_gui::ILvglApp * a) {
     if (chokeSpinbox) lv_group_focus_obj(chokeSpinbox);
 
     t_padUpdate = lv_timer_create(UpdatePadEditor, 200, list);
+    s_backToken = crosspad_gui::ui_back_push(padEditorBack_cb, nullptr);
     return cont;
 }
 
@@ -334,6 +344,9 @@ static void UpdateWaveformMarkers() {
 }
 
 static void DestroyPadEditor(lv_event_t * e) {
+    crosspad_gui::ui_back_remove(s_backToken);
+    s_backToken = 0;
+
     lv_timer_delete(t_padUpdate);
 
     lv_subject_deinit(&s_Color);
@@ -345,8 +358,11 @@ static void DestroyPadEditor(lv_event_t * e) {
     lv_subject_deinit(&s_Pan);
 
     // Before deleting our groups, or the indev dereferences freed memory on
-    // its next read.
-    lv_indev_set_group(getEncoder(), s_priorEncoderGroup);
+    // its next read. Guarded, because this teardown is also reached from the
+    // app's own destruction, which deletes the sampler panel's group first:
+    // restoring it unguarded put a freed pointer on the encoder and the next
+    // read panicked in lv_group_get_focused().
+    lv_indev_restore_group(getEncoder(), s_priorEncoderGroup);
     s_priorEncoderGroup = nullptr;
 
     lv_group_remove_all_objs(pad_editor_group);
