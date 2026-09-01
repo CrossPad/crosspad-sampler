@@ -305,17 +305,19 @@ void build_row(int idx, const crosspad::KitInfo& kit) {
     lv_obj_set_flex_flow(texts, LV_FLEX_FLOW_COLUMN);
     lv_obj_remove_flag(texts, LV_OBJ_FLAG_SCROLLABLE);
 
+    /* One-line fixed height each: DOT only truncates when the height cannot
+     * grow, and a wrapped name would overflow the 30 px row. */
     lv_obj_t* name = lv_label_create(texts);
     lv_obj_set_style_text_font(name, &lv_font_montserrat_10, 0);
     lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(name, LV_PCT(100));
+    lv_obj_set_size(name, LV_PCT(100), lv_font_get_line_height(&lv_font_montserrat_10));
     lv_label_set_text(name, kit.name.c_str());
 
     lv_obj_t* author = lv_label_create(texts);
     lv_obj_set_style_text_font(author, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_opa(author, LV_OPA_50, 0);
     lv_label_set_long_mode(author, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(author, LV_PCT(100));
+    lv_obj_set_size(author, LV_PCT(100), lv_font_get_line_height(&lv_font_montserrat_10));
     lv_label_set_text(author, kit.author.c_str());
 
     s_rows.push_back(Row{row, name, author});
@@ -378,6 +380,11 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     lv_obj_add_style(scr, &styleKitBrowserScreen, 0);
     lv_obj_set_size(scr, LV_PCT(100), LV_PCT(100));
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    /* Status bar on top, body filling whatever height the host container
+     * actually has — hardcoding CP_LCD_VER_RES here overflowed the app
+     * container, which sits below the system status bar. */
+    lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(scr, 0, 0);
     s_overlay = scr;
     lv_obj_add_event_cb(scr, overlay_deleted_cb, LV_EVENT_DELETE, nullptr);
 
@@ -391,7 +398,6 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     lv_obj_t* status = lv_obj_create(scr);
     lv_obj_add_style(status, &styleKitBrowserStatus, 0);
     lv_obj_set_size(status, LV_PCT(100), kStatusH);
-    lv_obj_align(status, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_remove_flag(status, LV_OBJ_FLAG_SCROLLABLE);
 
     /* The title doubles as the way out: the browser owns the encoder while it
@@ -421,8 +427,8 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     // ── Body: cover | list ──────────────────────────────────────────────────
     lv_obj_t* body = lv_obj_create(scr);
     lv_obj_remove_style_all(body);
-    lv_obj_set_size(body, LV_PCT(100), CP_LCD_VER_RES - kStatusH);
-    lv_obj_align(body, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_width(body, LV_PCT(100));
+    lv_obj_set_flex_grow(body, 1);
     lv_obj_remove_flag(body, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(body, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_all(body, 10, 0);
@@ -452,18 +458,20 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     lv_label_set_text(s_coverLetter, "");
     lv_obj_center(s_coverLetter);
 
+    /* Fixed one-line height: with LV_SIZE_CONTENT a long name wraps instead
+     * of truncating, growing the column and pushing the cover off the top. */
     s_coverName = lv_label_create(left);
     lv_obj_set_style_text_font(s_coverName, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(s_coverName, lv_color_white(), 0);
     lv_label_set_long_mode(s_coverName, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(s_coverName, kCoverSize);
+    lv_obj_set_size(s_coverName, kCoverSize, lv_font_get_line_height(&lv_font_montserrat_14));
     lv_label_set_text(s_coverName, "");
 
     s_coverAuthor = lv_label_create(left);
     lv_obj_set_style_text_font(s_coverAuthor, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(s_coverAuthor, CROSSPAD_THEME_PRIMARY, 0);
     lv_label_set_long_mode(s_coverAuthor, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(s_coverAuthor, kCoverSize);
+    lv_obj_set_size(s_coverAuthor, kCoverSize, lv_font_get_line_height(&lv_font_montserrat_10));
     lv_label_set_text(s_coverAuthor, "");
 
     s_list = lv_obj_create(body);
