@@ -213,10 +213,16 @@ lv_obj_t * pad_editor_create(lv_obj_t *parent, crosspad_gui::ILvglApp * a) {
         lv_indev_set_group(getEncoder(), pad_editor_group);
     }, LV_EVENT_CLICKED, NULL); // consume the click event
 
-    lv_style_init(&stylePadEditorContSel);
-    lv_style_set_border_color(&stylePadEditorContSel, lv_color_white());
-    lv_style_set_border_width(&stylePadEditorContSel, 3);
-    lv_style_set_border_opa(&stylePadEditorContSel, LV_OPA_COVER);
+    // Once: lv_style_init() on an initialised style orphans its property
+    // array, and the editor is opened on every pad visit.
+    static bool s_contSelStyleReady = false;
+    if (!s_contSelStyleReady) {
+        lv_style_init(&stylePadEditorContSel);
+        lv_style_set_border_color(&stylePadEditorContSel, lv_color_white());
+        lv_style_set_border_width(&stylePadEditorContSel, 3);
+        lv_style_set_border_opa(&stylePadEditorContSel, LV_OPA_COVER);
+        s_contSelStyleReady = true;
+    }
 
     pad_editor_group = lv_group_create();
     lv_group_set_wrap(pad_editor_group, true);
@@ -501,10 +507,14 @@ static lv_obj_t * lv_CreatePadEditorContext(lv_obj_t *parent)
     const int entryXoffset = 5; // offset from the wall
     static lv_style_t styleSelectedColor;
     static lv_style_t styleSelectedColorPressed;
-    lv_style_init(&styleSelectedColor);
-    lv_style_init(&styleSelectedColorPressed);
-    lv_style_set_text_color(&styleSelectedColor, lv_color_white());
-    lv_style_set_text_color(&styleSelectedColorPressed, lv_color_white());
+    static bool s_selectedStylesReady = false;
+    if (!s_selectedStylesReady) {
+        lv_style_init(&styleSelectedColor);
+        lv_style_init(&styleSelectedColorPressed);
+        lv_style_set_text_color(&styleSelectedColor, lv_color_white());
+        lv_style_set_text_color(&styleSelectedColorPressed, lv_color_white());
+        s_selectedStylesReady = true;
+    }
 
     lv_obj_t * color = lv_label_create(cont);
     lv_obj_align(color, LV_ALIGN_TOP_LEFT, entryXoffset, entryYoffset/2);
