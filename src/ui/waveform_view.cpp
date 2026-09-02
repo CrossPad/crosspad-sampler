@@ -5,6 +5,7 @@
 #include "crosspad-sampler/ui/waveform_view.hpp"
 #include "crosspad-sampler/SamplerConfig.hpp"
 
+#include <cstdlib>
 #include <cstring>
 #include <lvgl.h>
 
