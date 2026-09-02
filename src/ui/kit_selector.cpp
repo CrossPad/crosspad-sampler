@@ -17,6 +17,7 @@
 #include <crosspad/kit/KitPathUtils.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
 #include <crosspad-gui/crosspad_gui.h>
+#include <lvgl_private.h>   // lv_image_decoder_dsc_t, for warming the image cache
 
 #include <cstdio>
 #include <string>
@@ -31,15 +32,24 @@ constexpr int32_t kRowH      = 30;
 constexpr int32_t kCoverSize = 122;
 constexpr int32_t kThumbSize = 20;
 
-/* The cover is a PNG read off the card and decoded on the LVGL thread, so one
- * per encoder detent turns a flick through the list into an audible burst of
- * card reads. It waits until the selection has been still this long. */
-constexpr uint32_t kCoverDelayMs = 220;
+/* The cover is a 122x122 PNG read off the card and decoded on the LVGL
+ * thread. It is loaded only once the encoder has been still for this long: a
+ * flick through the list never pays for covers it scrolled past. */
+constexpr uint32_t kCoverDelayMs = 750;
+/* Row thumbnails are decoded into LVGL's image cache one per tick by a timer,
+ * nearest to the focused row first, and a row shows its initial until its
+ * thumbnail is cached. Decoding at draw time -- the old way -- put an SD read
+ * and a PNG decode on every row that scrolled into view. */
+constexpr uint32_t kThumbTickMs = 10;
 
 struct Row {
     lv_obj_t* obj    = nullptr;
     lv_obj_t* name   = nullptr;
     lv_obj_t* author = nullptr;
+    lv_obj_t* thumb  = nullptr;   ///< image, hidden until its PNG is in the cache
+    lv_obj_t* letter = nullptr;   ///< the initial, shown until then (or for good)
+    std::string thumbPath;
+    bool thumbTried = false;
 };
 
 KitSelectedFn s_onSelected = nullptr;
@@ -75,6 +85,7 @@ bool s_loadingStarted = false;
 
 lv_timer_t* s_coverTimer = nullptr;
 lv_timer_t* s_loadTimer  = nullptr;
+lv_timer_t* s_thumbTimer = nullptr;
 
 lv_indev_t* encoder() {
     return crosspad_gui::getGuiPlatform().getNavigationEncoder();
@@ -103,6 +114,47 @@ const char* initialOf(const crosspad::KitInfo& kit) {
     }
     buf[n] = '\0';
     return buf;
+}
+
+// ── Thumbnails ───────────────────────────────────────────────────────────────
+
+/// The pending row closest to the highlight, or -1 when every row is done.
+int thumb_next_pending() {
+    const int n = (int)s_rows.size();
+    if (n == 0) return -1;
+    const int centre = (s_selected >= 0 && s_selected < n) ? s_selected : 0;
+    for (int d = 0; d < n; ++d) {
+        const int below = centre + d;
+        const int above = centre - d;
+        if (below < n && !s_rows[below].thumbTried) return below;
+        if (above >= 0 && !s_rows[above].thumbTried) return above;
+    }
+    return -1;
+}
+
+void thumb_timer_cb(lv_timer_t*) {
+    const int idx = thumb_next_pending();
+    if (idx < 0) {
+        lv_timer_pause(s_thumbTimer);
+        return;
+    }
+    Row& row = s_rows[idx];
+    row.thumbTried = true;
+    if (!row.thumb || row.thumbPath.empty()) return;
+    /* open+close leaves the decoded bitmap in the image cache, so the draw
+     * that follows is a blit. A missing or broken file keeps the initial. */
+    lv_image_decoder_dsc_t dsc;
+    if (lv_image_decoder_open(&dsc, row.thumbPath.c_str(), nullptr) != LV_RESULT_OK) return;
+    lv_image_decoder_close(&dsc);
+    lv_image_set_src(row.thumb, row.thumbPath.c_str());
+    lv_obj_remove_flag(row.thumb, LV_OBJ_FLAG_HIDDEN);
+    if (row.letter) lv_obj_add_flag(row.letter, LV_OBJ_FLAG_HIDDEN);
+}
+
+/// Keep the warmer running; it pauses itself once nothing is pending.
+void thumb_warm() {
+    if (!s_thumbTimer) s_thumbTimer = lv_timer_create(thumb_timer_cb, kThumbTickMs, nullptr);
+    lv_timer_resume(s_thumbTimer);
 }
 
 // ── Cover pane ───────────────────────────────────────────────────────────────
@@ -145,11 +197,14 @@ void cover_request(int idx) {
 void row_set_selected(int idx, bool selected) {
     if (idx < 0 || idx >= (int)s_rows.size() || !s_rows[idx].obj) return;
     Row& r = s_rows[idx];
+    /* A state flip, not lv_obj_add_style(): adding or removing a style
+     * refreshes every property and marks the flex column's layout dirty,
+     * which re-measured all rows (two DOT labels each) on every detent. */
     if (selected) {
-        lv_obj_add_style(r.obj, &styleKitBrowserRowSelected, 0);
+        lv_obj_add_state(r.obj, LV_STATE_CHECKED);
         lv_obj_set_style_text_opa(r.author, LV_OPA_COVER, 0);
     } else {
-        lv_obj_remove_style(r.obj, &styleKitBrowserRowSelected, 0);
+        lv_obj_remove_state(r.obj, LV_STATE_CHECKED);
         lv_obj_set_style_text_opa(r.author, LV_OPA_50, 0);
     }
 }
@@ -184,6 +239,7 @@ void select_row(int idx) {
     }
     lv_obj_scroll_to_view(s_rows[idx].obj, LV_ANIM_OFF);
     cover_request(idx);
+    thumb_warm();
 }
 
 // ── Loading ──────────────────────────────────────────────────────────────────
@@ -270,6 +326,7 @@ void build_row(int idx, const crosspad::KitInfo& kit) {
     lv_obj_t* row = lv_obj_create(s_list);
     lv_obj_remove_style_all(row);
     lv_obj_add_style(row, &styleKitBrowserRow, 0);
+    lv_obj_add_style(row, &styleKitBrowserRowSelected, LV_STATE_CHECKED);
     lv_obj_set_size(row, LV_PCT(100), kRowH);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -285,18 +342,14 @@ void build_row(int idx, const crosspad::KitInfo& kit) {
     lv_obj_set_size(thumbBox, kThumbSize, kThumbSize);
     lv_obj_remove_flag(thumbBox, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* lv_image_set_src() copies the path, so the temporary is enough. A row
-     * is built once; unlike the cover this is not on the scroll path. */
-    const std::string thumb = crosspad::kitAssetPath(kit.path, "thumb.png");
-    if (fileExists(thumb)) {
-        lv_obj_t* img = lv_image_create(thumbBox);
-        lv_image_set_src(img, thumb.c_str());
-        lv_obj_center(img);
-    } else {
-        lv_obj_t* letter = lv_label_create(thumbBox);
-        lv_label_set_text(letter, initialOf(kit));
-        lv_obj_center(letter);
-    }
+    /* No file access here: the initial goes up now, the thumbnail once the
+     * warmer has it cached. Building 80 rows used to cost 80 fopen()s. */
+    lv_obj_t* letter = lv_label_create(thumbBox);
+    lv_label_set_text(letter, initialOf(kit));
+    lv_obj_center(letter);
+    lv_obj_t* img = lv_image_create(thumbBox);
+    lv_obj_add_flag(img, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_center(img);
 
     lv_obj_t* texts = lv_obj_create(row);
     lv_obj_remove_style_all(texts);
@@ -320,7 +373,11 @@ void build_row(int idx, const crosspad::KitInfo& kit) {
     lv_obj_set_size(author, LV_PCT(100), lv_font_get_line_height(&lv_font_montserrat_10));
     lv_label_set_text(author, kit.author.c_str());
 
-    s_rows.push_back(Row{row, name, author});
+    Row r;
+    r.obj = row; r.name = name; r.author = author;
+    r.thumb = img; r.letter = letter;
+    r.thumbPath = crosspad::kitAssetPath(kit.path, "thumb.png");
+    s_rows.push_back(std::move(r));
 }
 
 void build_rows() {
@@ -359,6 +416,7 @@ void build_rows() {
     lv_group_focus_obj(s_rows[first].obj);
     select_row(first);
     cover_show(first);
+    thumb_warm();
 }
 
 void reset_state();
@@ -503,6 +561,7 @@ void reset_state() {
 
     if (s_loadTimer)  { lv_timer_delete(s_loadTimer);  s_loadTimer = nullptr; }
     if (s_coverTimer) { lv_timer_delete(s_coverTimer); s_coverTimer = nullptr; }
+    if (s_thumbTimer) { lv_timer_delete(s_thumbTimer); s_thumbTimer = nullptr; }
 
     // Restore the previous encoder group (the launcher's) before deleting ours
     if (lv_indev_t* enc = encoder()) {
