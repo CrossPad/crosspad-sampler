@@ -13,6 +13,7 @@
 // crosspad-gui
 #include "crosspad-gui/crosspad_gui.h"   // styles, widgets, App class
 #include "crosspad-gui/components/app_orchestrator.h"
+#include "crosspad-gui/components/scope_view.h"
 
 // crosspad-core
 #include <crosspad/pad/PadManager.hpp>
@@ -27,6 +28,7 @@
 #include <crosspad/status/CrosspadStatus.hpp>
 #include <crosspad/led/RgbColor.hpp>
 #include <crosspad/led/HtmlColor.hpp>
+#include <crosspad/instrument/PitchedInstrument.hpp>
 
 #include <string>
 #include <cstdio>
@@ -67,6 +69,13 @@ static lv_obj_t * waveformStartMarker = NULL; // green marker for start position
 static lv_obj_t * waveformEndMarker = NULL; // red marker for end position
 static lv_obj_t * waveformDimLeft = NULL; // dimming overlay before start
 static lv_obj_t * waveformDimRight = NULL; // dimming overlay after end
+static lv_obj_t * waveformFileLabel = NULL; // sample filename under the waveform
+static lv_obj_t * waveformTimeLabel = NULL; // playback time under the waveform
+/* A pitched kit has no per-pad file to draw an envelope of — every pad is the
+ * same recording transposed — so the box shows the engine's live output
+ * instead. -1 until the first sync, so the first kit always applies. */
+static lv_obj_t * scopeView = NULL;
+static int scopeShown = -1;
 
 class PadEditorLogicHandler : public IPadLogicHandler {
 public:
@@ -341,12 +350,48 @@ static void PickKit_button_cb(lv_event_t * e) {
     // Placeholder: kit selection goes through KitOrchestrator here.
 }
 
+static uint32_t scope_pull_engine(void* ctx, float* out, uint32_t n,
+                                  float* hz, uint32_t* sampleRate) {
+    auto* inst = static_cast<crosspad::PitchedInstrument*>(ctx);
+    *hz         = inst->lastNoteHz();
+    *sampleRate = inst->scopeTap().sampleRate();
+    return inst->scopeTap().snapshot(out, n);
+}
+
+/// Swap the file waveform for the scope, or back, when the kit's engine changes.
+static void sync_engine_view() {
+    if (!scopeView || !waveformCanvas) return;
+
+    auto* mgr  = crosspad::getKitManager();
+    auto* kit  = mgr ? mgr->getCurrentKit() : nullptr;
+    auto* inst = crosspad::getPlatformServices().pitchedInstrument;
+    const int pitched = (kit && kit->engine == crosspad::KitEngine::Pitched && inst) ? 1 : 0;
+    if (pitched == scopeShown) return;
+    scopeShown = pitched;
+
+    if (pitched) {
+        scope_view_set_source(scopeView, scope_pull_engine, inst);
+        lv_obj_clear_flag(scopeView, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(waveformCanvas, LV_OBJ_FLAG_HIDDEN);
+        if (waveformFileLabel) lv_obj_add_flag(waveformFileLabel, LV_OBJ_FLAG_HIDDEN);
+        if (waveformTimeLabel) lv_obj_add_flag(waveformTimeLabel, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        scope_view_clear_source(scopeView);
+        lv_obj_add_flag(scopeView, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(waveformCanvas, LV_OBJ_FLAG_HIDDEN);
+        if (waveformFileLabel) lv_obj_clear_flag(waveformFileLabel, LV_OBJ_FLAG_HIDDEN);
+        if (waveformTimeLabel) lv_obj_clear_flag(waveformTimeLabel, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 // Timer-based pad state monitoring.
 
 static void check_pad_timer_cb(lv_timer_t * timer) {
     // Skip everything while the app is being destroyed: the LVGL objects and
     // styles are already freed.
     if (appIsDestroying) return;
+
+    sync_engine_view();
 
     static long lastTime = 0;
     static char time_str[24]; // Increased buffer for "M:SS:T / M:SS:T" format
@@ -776,6 +821,13 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     waveformCanvas = waveform_view_create(cont);
     lv_obj_align(waveformCanvas, LV_ALIGN_RIGHT_MID, -25, -10);
 
+    scopeView = create_scope_view(cont, WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT);
+    if (scopeView) {
+        lv_obj_align(scopeView, LV_ALIGN_RIGHT_MID, -25, -10);
+        lv_obj_add_flag(scopeView, LV_OBJ_FLAG_HIDDEN);
+    }
+    scopeShown = -1;
+
     lv_obj_t * fileLabel = lv_label_create(cont);
     static char audio_name[32];
     static char audio_name_prev[32];
@@ -783,6 +835,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_subject_init_string(&s_audio_name, audio_name, audio_name_prev, 32, "Press any pad");
     lv_label_bind_text(fileLabel, &s_audio_name, NULL);
     lv_obj_align_to(fileLabel, waveformCanvas, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 0);
+    waveformFileLabel = fileLabel;
 
     lv_obj_t * timeLabel = lv_label_create(cont);
     static char audio_time[10];
@@ -790,6 +843,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_subject_init_string(&s_audio_time, audio_time, audio_time_prev, 10, "0:00:0");
     lv_label_bind_text(timeLabel, &s_audio_time, NULL);
     lv_obj_align_to(timeLabel, waveformCanvas, LV_ALIGN_OUT_BOTTOM_RIGHT, 0, 0);
+    waveformTimeLabel = timeLabel;
 
     timerPad = lv_timer_create(check_pad_timer_cb, 50, NULL); // 50ms = 20fps
     lv_timer_ready(timerPad);
@@ -853,6 +907,11 @@ void sampler_panel_destroy(lv_obj_t * panel)
     waveformEndMarker = nullptr;
     waveformDimLeft = nullptr;
     waveformDimRight = nullptr;
+    waveformFileLabel = nullptr;
+    waveformTimeLabel = nullptr;
+    if (scopeView) scope_view_clear_source(scopeView);
+    scopeView = nullptr;
+    scopeShown = -1;
     timerPad = nullptr;
     g_sampler = nullptr;
     g_saveConfirmMsgbox = nullptr; // Clear msgbox reference
