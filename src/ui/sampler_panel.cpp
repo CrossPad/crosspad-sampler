@@ -7,6 +7,7 @@
 #include "crosspad-sampler/ui/sampler_panel.hpp"
 #include "crosspad-sampler/ui/waveform_view.hpp"
 #include "crosspad-sampler/ui/pad_editor.hpp"
+#include "crosspad-sampler/ui/pitched_editor.hpp"
 #include "crosspad-sampler/waveform/waveform_cache.hpp"
 #include "crosspad-sampler/waveform/waveform_loader.hpp"
 
@@ -228,7 +229,9 @@ static bool HasDirtyPads(std::vector<uint8_t>& dirtyPadNumbers) {
             dirtyPadNumbers.push_back(i + 1); // Store 1-based pad numbers for display
         }
     }
-    return !dirtyPadNumbers.empty();
+    // A pitched kit's edits are the instrument's, not any pad's; without this
+    // the leave-app prompt never appeared for them.
+    return !dirtyPadNumbers.empty() || kit->instrument.dirty;
 }
 
 static std::string FormatDirtyPadsList(const std::vector<uint8_t>& dirtyPadNumbers) {
@@ -293,6 +296,7 @@ static void ShowSaveConfirmationDialog(lv_obj_t * panel) {
 
         crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
         if (kit != NULL) {
+            kit->instrument.dirty = false;
             for (uint8_t i = 0; i < KIT_PADS; i++) {
                 kit->pads[i].dirty = false;
                 kit->pads[i].dirtyModified = false;
@@ -312,6 +316,7 @@ static void ShowSaveConfirmationDialog(lv_obj_t * panel) {
 
         crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
         if (kit != NULL) {
+                kit->instrument.dirty = false;
                 for (uint8_t i = 0; i < KIT_PADS; i++) {
                 kit->pads[i].dirty = false;
                 kit->pads[i].dirtyModified = false;
@@ -743,7 +748,11 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_obj_add_event_cb(editBtn, [](lv_event_t * e) {
         LV_LOG_INFO("Opening pad editor");
         lv_obj_t * cont = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
-        if (cont) {
+        if (!cont) return;
+        crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
+        if (kit && kit->engine == crosspad::KitEngine::Pitched) {
+            pitched_editor_create(cont);
+        } else {
             pad_editor_create(cont, nullptr);
         }
     }, LV_EVENT_CLICKED, cont);
