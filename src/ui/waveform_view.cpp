@@ -16,6 +16,8 @@ namespace crosspad_sampler {
 
 static WaveformDataProvider s_provider  = nullptr;
 static void*                s_userData  = nullptr;
+static WaveformFileProvider s_fileProvider = nullptr;
+static void*                s_fileUserData = nullptr;
 
 /// PCM buffer used during waveform_view_load() — one sample per canvas pixel column.
 static int16_t s_waveformBuf[WAVEFORM_CANVAS_WIDTH];
@@ -36,6 +38,12 @@ void waveform_view_set_provider(WaveformDataProvider fn, void* userData)
 {
     s_provider = fn;
     s_userData = userData;
+}
+
+void waveform_view_set_file_provider(WaveformFileProvider fn, void* userData)
+{
+    s_fileProvider = fn;
+    s_fileUserData = userData;
 }
 
 lv_obj_t* waveform_view_create(lv_obj_t* parent)
@@ -93,18 +101,11 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
     return cont;
 }
 
-void waveform_view_load(lv_obj_t* waveformView, uint8_t padIdx, uint8_t sampleSlot)
+// Redraw the canvas from the first @p actualSamples entries of s_waveformBuf.
+static void draw_from_buffer(lv_obj_t* waveformView, uint32_t actualSamples)
 {
-    if (!s_provider) { LV_LOG_WARN("waveform_view_load: no provider!"); return; }
-
     lv_obj_t* canvas = lv_obj_get_child(waveformView, 0);
     if (!canvas) return;
-
-    // Fetch sample data downsampled to WAVEFORM_CANVAS_WIDTH columns.
-    uint32_t actualSamples = 0;
-    s_provider(padIdx, sampleSlot,
-               s_waveformBuf, static_cast<uint32_t>(WAVEFORM_CANVAS_WIDTH),
-               &actualSamples, s_userData);
 
     lv_canvas_fill_bg(canvas, lv_color_hex(0x111111), LV_OPA_COVER);
 
@@ -144,6 +145,32 @@ void waveform_view_load(lv_obj_t* waveformView, uint8_t padIdx, uint8_t sampleSl
     }
 
     lv_canvas_finish_layer(canvas, &layer);
+}
+
+void waveform_view_load(lv_obj_t* waveformView, uint8_t padIdx, uint8_t sampleSlot)
+{
+    if (!s_provider) { LV_LOG_WARN("waveform_view_load: no provider!"); return; }
+    if (!lv_obj_get_child(waveformView, 0)) return;
+
+    // Fetch sample data downsampled to WAVEFORM_CANVAS_WIDTH columns.
+    uint32_t actualSamples = 0;
+    s_provider(padIdx, sampleSlot,
+               s_waveformBuf, static_cast<uint32_t>(WAVEFORM_CANVAS_WIDTH),
+               &actualSamples, s_userData);
+
+    draw_from_buffer(waveformView, actualSamples);
+}
+
+void waveform_view_load_file(lv_obj_t* waveformView, const char* path)
+{
+    if (!s_fileProvider || !path || !path[0]) return;
+    if (!lv_obj_get_child(waveformView, 0)) return;
+
+    uint32_t actualSamples = 0;
+    s_fileProvider(path, s_waveformBuf, static_cast<uint32_t>(WAVEFORM_CANVAS_WIDTH),
+                   &actualSamples, s_fileUserData);
+
+    draw_from_buffer(waveformView, actualSamples);
 }
 
 void waveform_view_clear(lv_obj_t* waveformView)

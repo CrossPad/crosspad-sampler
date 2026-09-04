@@ -25,6 +25,23 @@ using WaveformDataProvider = void (*)(uint8_t padIdx, uint8_t sampleSlot,
 /// @param userData Opaque pointer forwarded to fn on each call.
 void waveform_view_set_provider(WaveformDataProvider fn, void* userData);
 
+/// Callback used to fill a buffer with PCM data for a file named by path.
+/// The counterpart of WaveformDataProvider for views that are not showing a
+/// pad: a pitched kit's zones are files of the kit, not slots of a pad.
+/// @param path          Resolved path of the audio file.
+/// @param outData       Output buffer to fill with 16-bit signed PCM samples.
+/// @param maxSamples    Capacity of outData (number of int16_t elements).
+/// @param actualSamples Set to the number of samples written into outData.
+/// @param userData      Opaque pointer passed to waveform_view_set_file_provider().
+using WaveformFileProvider = void (*)(const char* path, int16_t* outData,
+                                      uint32_t maxSamples, uint32_t* actualSamples,
+                                      void* userData);
+
+/// Register the provider used by waveform_view_load_file().
+/// @param fn       Provider callback (may be nullptr to disable loading).
+/// @param userData Opaque pointer forwarded to fn on each call.
+void waveform_view_set_file_provider(WaveformFileProvider fn, void* userData);
+
 /// Create a waveform view widget inside @p parent.
 /// The view is WAVEFORM_CANVAS_WIDTH × WAVEFORM_CANVAS_HEIGHT pixels and
 /// contains (by child index):
@@ -38,6 +55,10 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent);
 /// Load and render the waveform for the given pad/slot.
 /// Calls the registered WaveformDataProvider and redraws the canvas.
 void waveform_view_load(lv_obj_t* waveformView, uint8_t padIdx, uint8_t sampleSlot);
+
+/// Load and render the waveform of @p path via the registered
+/// WaveformFileProvider. Does nothing without one.
+void waveform_view_load_file(lv_obj_t* waveformView, const char* path);
 
 /// Clear the canvas to the background color and hide all markers.
 void waveform_view_clear(lv_obj_t* waveformView);
