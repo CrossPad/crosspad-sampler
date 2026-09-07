@@ -103,6 +103,12 @@ struct EngineLoadStats {
 struct SamplerAudioCallbacks {
     /// Reload a single pad in the audio engine (after sample assignment changes).
     void (*reloadPad)(uint8_t padIdx)                                                  = nullptr;
+    /// Like reloadPad, but only if the pad has no voice by the time the engine
+    /// would be restructured — the platform prepares the files first, and a
+    /// hit that lands meanwhile plays the old sample to its end. Returns false
+    /// when it did not reload; the load task comes back for that pad later.
+    /// Null: reloadPad is used unconditionally.
+    bool (*reloadPadIfIdle)(uint8_t padIdx)                                            = nullptr;
     /// Fill the engine counters above; see kit_load_task_swap_log().
     void (*engineLoadStats)(EngineLoadStats* out)                                      = nullptr;
     /// True while any voice of this pad is still rendering. The kit load task

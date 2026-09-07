@@ -542,6 +542,12 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     s_loadingStarted = false;
     s_coverWanted = s_coverShown = -1;
 
+    /* Whatever the last screen decoded — launcher icons, a previous kit's
+     * thumbnails — goes now, so the covers and thumbnails about to be decoded
+     * get one contiguous run of PSRAM instead of the gaps between them. The
+     * launcher re-decodes its icons from the assets partition on the way back. */
+    lv_image_cache_drop(NULL);
+
     lv_obj_t* scr = lv_obj_create(config.parent);
     lv_obj_add_style(scr, &styleKitBrowserScreen, 0);
     lv_obj_set_size(scr, LV_PCT(100), LV_PCT(100));
@@ -646,7 +652,9 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     lv_obj_set_height(s_list, LV_PCT(100));
     lv_obj_set_scroll_dir(s_list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(s_list, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_add_event_cb(s_list, list_scrolled_cb, LV_EVENT_SCROLL_END, nullptr);
+    /* On every scroll step, not only at the end: a flick must find rows
+     * where it lands. ensure_window() returns at once while the window holds. */
+    lv_obj_add_event_cb(s_list, list_scrolled_cb, LV_EVENT_SCROLL, nullptr);
 
     build_rows();
 

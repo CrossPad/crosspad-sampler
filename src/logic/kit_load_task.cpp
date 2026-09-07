@@ -117,10 +117,17 @@ static bool pad_sounding(uint8_t pad) {
     return crosspad::getPadManager().isPadPlaying(pad);
 }
 
-static void reload_pad(uint8_t pad, KitSwapRecord& rec) {
+/// False when the platform found a voice on the pad at the last moment and
+/// left it alone; the caller keeps the pad on its list.
+static bool reload_pad(uint8_t pad, KitSwapRecord& rec, bool onlyIfIdle) {
     auto& cb = sampler_get_platform_callbacks();
-    if (cb.audio.reloadPad) cb.audio.reloadPad(pad);
+    if (onlyIfIdle && cb.audio.reloadPadIfIdle) {
+        if (!cb.audio.reloadPadIfIdle(pad)) return false;
+    } else if (cb.audio.reloadPad) {
+        cb.audio.reloadPad(pad);
+    }
     rec.padDoneMs[pad] = static_cast<int32_t>(since_req_ms());
+    return true;
 }
 
 // Stop the pad's voices and give them a moment to go: the reload after this
@@ -243,7 +250,12 @@ static void run_one_load(bool onlyModified, int kitId) {
                 rec.deferred |= bit;
                 continue;
             }
-            reload_pad(padIdx, rec);
+            if (!reload_pad(padIdx, rec, seamless)) {
+                // A hit landed while the files were being prepared: the old
+                // sample plays out, and this pad is looked at again.
+                rec.deferred |= bit;
+                continue;
+            }
             todo &= static_cast<uint16_t>(~bit);
             progressed = true;
             s_progress.store((++done * 100) / (total ? total : 1), std::memory_order_relaxed);
@@ -259,7 +271,7 @@ static void run_one_load(bool onlyModified, int kitId) {
             const uint16_t bit = static_cast<uint16_t>(1u << padIdx);
             force_quiet(padIdx);
             rec.forced |= bit;
-            reload_pad(padIdx, rec);
+            reload_pad(padIdx, rec, false);
             todo &= static_cast<uint16_t>(~bit);
             s_progress.store((++done * 100) / (total ? total : 1), std::memory_order_relaxed);
             continue;

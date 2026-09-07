@@ -4,6 +4,7 @@
 #include "crosspad-sampler/waveform/waveform_cache.hpp"
 #include "crosspad-sampler/SamplerConfig.hpp"
 #include "crosspad-sampler/SamplerPlatformCallbacks.hpp"
+#include "crosspad-sampler/logic/kit_load_task.hpp"
 
 #include <crosspad/kit/IKitManager.hpp>
 #include <crosspad/kit/KitInfo.hpp>
@@ -105,6 +106,15 @@ static void loader_task(void* /*param*/) {
             continue;
         }
 
+        if (!s_running) { free(buf); break; }
+
+        /* Cosmetic, and the card is what a kit swap is short of: every hit on
+         * a pad of a freshly changed kit asked for its waveform, a whole-file
+         * read per hit beside the loader and the streamer. Wait here, where a
+         * stop is still seen — waiting inside the platform read left this task
+         * to be killed mid-fopen by waveform_loader_stop(), a handle and a
+         * buffer of internal RAM gone each time. */
+        while (s_running && kit_load_task_is_loading()) vTaskDelay(pdMS_TO_TICKS(50));
         if (!s_running) { free(buf); break; }
 
         // Load via platform callback (handles SD mutex, compression, etc.)
