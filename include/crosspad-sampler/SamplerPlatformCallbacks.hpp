@@ -78,9 +78,38 @@ struct SamplerEngineCallbacks {
 // Kit metadata is accessed via PlatformServices (IKitManager).
 // ---------------------------------------------------------------------------
 
+/// Engine-side counters a kit load is judged by. The load task reads them
+/// before and after the pad loop and stores the difference in its swap log
+/// (kit_load_task_swap_log()), so a swap's audible cost is on the record.
+/// Cumulative unless said otherwise; a platform without an engine leaves the
+/// hook null.
+struct EngineLoadStats {
+    uint32_t gatedBlocks = 0;   ///< render blocks the engine had to skip (silence)
+    uint32_t gateMaxUs   = 0;   ///< longest single render-gate hold since the previous call
+    uint32_t gateTotalUs = 0;
+    uint32_t gateCount   = 0;
+    uint32_t underruns   = 0;   ///< streamer refills that came too late
+    uint32_t noFreeBlock = 0;   ///< voices refused a stream block
+    uint32_t droppedHits = 0;   ///< pad hits refused because their pad was mid-reload
+    uint32_t rtGapMaxUs  = 0;   ///< longest wait between two render passes since the previous call
+    uint32_t lateHits    = 0;   ///< hits held during their pad's reload and played after it
+    uint32_t streamFopens = 0;  ///< file opens the streamer could not serve from its handle cache
+    uint32_t bgPassMaxUs = 0;   ///< longest single streamer refill pass since the previous call
+    uint32_t fopenMaxUs  = 0;   ///< slowest file open on the card since the previous call
+    uint32_t streamKb    = 0;   ///< kilobytes the streamer read off the card
+    uint32_t loaderKb    = 0;   ///< kilobytes the loader read off the card
+};
+
 struct SamplerAudioCallbacks {
     /// Reload a single pad in the audio engine (after sample assignment changes).
     void (*reloadPad)(uint8_t padIdx)                                                  = nullptr;
+    /// Fill the engine counters above; see kit_load_task_swap_log().
+    void (*engineLoadStats)(EngineLoadStats* out)                                      = nullptr;
+    /// True while any voice of this pad is still rendering. The kit load task
+    /// reloads a pad only once this is false (or forces it, last of all), so
+    /// the engine is never restructured under a voice it is playing. Null =
+    /// fall back to PadManager::isPadPlaying().
+    bool (*padSounding)(uint8_t padIdx)                                                = nullptr;
     /// Reload all pads in the audio engine.
     void (*reloadPads)()                                                               = nullptr;
     /// Check if a waveform cache file exists for the given kit.

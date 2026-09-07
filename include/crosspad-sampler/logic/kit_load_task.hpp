@@ -3,6 +3,8 @@
 
 #include <cstdint>
 
+#include <crosspad-sampler/SamplerPlatformCallbacks.hpp>
+
 namespace crosspad_sampler {
 
 /// Initialize kit load task resources. Call once at startup.
@@ -34,5 +36,27 @@ bool kit_load_task_is_loading();
 
 /// Kit id held back until the running load finishes, or -1 if none is waiting.
 int kit_load_task_pending_kit();
+
+/// What one kit load did and what it cost. Kept for the last few loads so a
+/// bench run can read them back after the fact (CDC KIT_SWAP_LOG): a swap
+/// that sounded wrong is then a row with numbers, not a memory.
+struct KitSwapRecord {
+    uint32_t seq       = 0;      ///< 1-based, counts every load since boot
+    int      kitId     = -1;     ///< -1 when only the pads were reloaded
+    bool     ok        = false;
+    uint32_t reqMs     = 0;      ///< uptime at the request
+    uint32_t parseMs   = 0;      ///< request → kit parsed and current
+    uint32_t doneMs    = 0;      ///< request → every pad reloaded
+    int32_t  padDoneMs[16] = {}; ///< request → that pad reloaded; -1 = untouched
+    uint16_t deferred  = 0;      ///< pads that waited for their voice to end
+    uint16_t forced    = 0;      ///< pads reloaded while still sounding
+    EngineLoadStats engine;      ///< deltas over the pad loop (gateMaxUs: peak)
+};
+
+/// How many loads the log holds (≤ 8, oldest first).
+int kit_load_task_swap_log_count();
+/// Copy the i-th (0 = oldest) record of the log; false when out of range.
+bool kit_load_task_swap_log(int i, KitSwapRecord* out);
+
 
 } // namespace crosspad_sampler

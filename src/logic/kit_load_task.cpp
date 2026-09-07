@@ -26,6 +26,9 @@
 
 #include <crosspad/kit/IKitManager.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
+#include <crosspad/platform/IClock.hpp>
+#include <crosspad/pad/PadManager.hpp>
+#include <crosspad/event/IEventBus.hpp>
 
 #include <crosspad-gui/components/status_bar.h>
 #include <lvgl.h>
@@ -78,6 +81,60 @@ static bool s_pendingValid        = false;
 static bool s_pendingOnlyModified = false;
 static int  s_pendingKitId        = -1;
 
+// ── Swap log ────────────────────────────────────────────────────────────────
+// Written by the worker while a load runs, read over CDC afterwards. The
+// slot being written is s_swapCount % kSwapLog; a reader that arrives mid-load
+// sees a row with doneMs still 0, which is the honest state.
+static constexpr int kSwapLog = 8;
+static KitSwapRecord* s_swaps = nullptr;   // kSwapLog records, PSRAM, on the first load
+static uint32_t s_swapCount = 0;
+static int64_t  s_reqUs     = 0;    // stamped at kit_load_task_start()
+
+static uint32_t since_req_ms() {
+    return static_cast<uint32_t>((crosspad::getClock().getTimeUs() - s_reqUs) / 1000);
+}
+
+static void engine_stats(EngineLoadStats& out) {
+    auto& cb = sampler_get_platform_callbacks();
+    if (cb.audio.engineLoadStats) cb.audio.engineLoadStats(&out);
+}
+
+// ── Reloading pads under a performance ──────────────────────────────────────
+// A pad whose voice is still sounding keeps sounding: its reload waits for
+// the voice to end, and the pads that are idle go first. Only when nothing
+// but sounding pads is left is one forced — the last one, or all of them
+// once the deadline passes (a looped pad never ends on its own).
+static bool s_engineWasPitched = false;   // what the previous load left running
+
+static constexpr uint32_t kDeferPollMs      = 5;
+static constexpr uint32_t kDeferDeadlineMs  = 4000;   // after the parse
+static constexpr uint32_t kLastPadGraceMs   = 1000;   // the last sounding pad may finish on its own
+static constexpr uint32_t kForceQuietWaitMs = 200;    // NoteOff → voice gone
+
+static bool pad_sounding(uint8_t pad) {
+    auto& cb = sampler_get_platform_callbacks();
+    if (cb.audio.padSounding) return cb.audio.padSounding(pad);
+    return crosspad::getPadManager().isPadPlaying(pad);
+}
+
+static void reload_pad(uint8_t pad, KitSwapRecord& rec) {
+    auto& cb = sampler_get_platform_callbacks();
+    if (cb.audio.reloadPad) cb.audio.reloadPad(pad);
+    rec.padDoneMs[pad] = static_cast<int32_t>(since_req_ms());
+}
+
+// Stop the pad's voices and give them a moment to go: the reload after this
+// then finds an idle pad like any other. A voice that is still there after
+// the wait is reloaded regardless — the platform gates the renderer for that.
+static void force_quiet(uint8_t pad) {
+    crosspad::getEventBus().postSamplePlayback(pad, /*wavIdx=*/0, /*isOn=*/false,
+                                               crosspad::EventSource::App);
+    for (uint32_t waited = 0; waited < kForceQuietWaitMs && pad_sounding(pad);
+         waited += kDeferPollMs) {
+        vTaskDelay(pdMS_TO_TICKS(kDeferPollMs));
+    }
+}
+
 static void progress_poll_timer_cb(lv_timer_t* timer) {
     int outcome = s_outcome.load(std::memory_order_acquire);
     if (outcome == 0) {
@@ -116,42 +173,119 @@ static void progress_poll_timer_cb(lv_timer_t* timer) {
 
 // One kit load, start to finish. Returns with s_outcome published; the LVGL
 // timer picks it up from there.
+static KitSwapRecord s_noRecord;   // when the ring could not be allocated
+
 static void run_one_load(bool onlyModified, int kitId) {
+    if (!s_swaps) {
+        s_swaps = static_cast<KitSwapRecord*>(
+            heap_caps_calloc(kSwapLog, sizeof(KitSwapRecord), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+    KitSwapRecord& rec = s_swaps ? s_swaps[s_swapCount % kSwapLog] : s_noRecord;
+    rec = KitSwapRecord{};
+    rec.seq   = ++s_swapCount;
+    rec.kitId = kitId;
+    rec.reqMs = static_cast<uint32_t>(s_reqUs / 1000);
+    for (auto& t : rec.padDoneMs) t = -1;
+
     // Here, not on the caller's thread: parsing the kit JSON off storage is
     // what made the UI thread miss the task watchdog.
     if (kitId >= 0) {
         auto result = getKitOrchestrator().changeKit(kitId);
         if (!result.success) {
             set_error(result.error.c_str());
+            rec.doneMs = since_req_ms();
             s_outcome.store(-1, std::memory_order_release);
             return;
         }
     }
+    rec.parseMs = since_req_ms();
 
     auto* kitMgr = crosspad::getKitManager();
     if (!kitMgr || !kitMgr->getCurrentKit()) {
         set_error("No kit loaded");
+        rec.doneMs = since_req_ms();
         s_outcome.store(-1, std::memory_order_release);
         return;
     }
 
     auto* kit = kitMgr->getCurrentKit();
-    auto& cb = sampler_get_platform_callbacks();
 
     // Let the streaming background release the storage bus and its file
     // handles before the reload reopens them.
     vTaskDelay(pdMS_TO_TICKS(150));
 
+    EngineLoadStats before;
+    engine_stats(before);
+
+    // A pitched kit is not reloaded pad by pad — its bank replaces the whole
+    // engine — and what it replaces cannot keep sounding. Same for the way
+    // back. Only a sampler kit following a sampler kit is swapped underneath
+    // the performance.
+    const bool seamless = kit->engine == crosspad::KitEngine::Sampler && !s_engineWasPitched;
+    s_engineWasPitched = kit->engine == crosspad::KitEngine::Pitched;
+
+    uint16_t todo = 0;
     for (uint8_t padIdx = 0; padIdx < PAD_COUNT; ++padIdx) {
         if (onlyModified && !kit->pads[padIdx].IsModified()) continue;
-
-        if (cb.audio.reloadPad) {
-            cb.audio.reloadPad(padIdx);
-        }
-
-        s_progress.store(((padIdx + 1) * 100) / PAD_COUNT,
-                         std::memory_order_relaxed);
+        todo |= static_cast<uint16_t>(1u << padIdx);
     }
+    const int total = __builtin_popcount(todo);
+    int done = 0;
+    uint32_t waitedMs = 0;
+    uint32_t lastAloneMs = 0;
+
+    while (todo) {
+        bool progressed = false;
+        for (uint8_t padIdx = 0; padIdx < PAD_COUNT; ++padIdx) {
+            const uint16_t bit = static_cast<uint16_t>(1u << padIdx);
+            if (!(todo & bit)) continue;
+            if (seamless && pad_sounding(padIdx)) {
+                rec.deferred |= bit;
+                continue;
+            }
+            reload_pad(padIdx, rec);
+            todo &= static_cast<uint16_t>(~bit);
+            progressed = true;
+            s_progress.store((++done * 100) / (total ? total : 1), std::memory_order_relaxed);
+        }
+        if (!todo || progressed) continue;
+
+        // Only sounding pads are left. The last one gets a moment to end on
+        // its own — most samples are shorter than that — but not to hold the
+        // whole kit hostage; nor does anything past the deadline.
+        if (__builtin_popcount(todo) == 1) lastAloneMs += kDeferPollMs;
+        if (lastAloneMs >= kLastPadGraceMs || waitedMs >= kDeferDeadlineMs) {
+            const uint8_t padIdx = static_cast<uint8_t>(__builtin_ctz(todo));
+            const uint16_t bit = static_cast<uint16_t>(1u << padIdx);
+            force_quiet(padIdx);
+            rec.forced |= bit;
+            reload_pad(padIdx, rec);
+            todo &= static_cast<uint16_t>(~bit);
+            s_progress.store((++done * 100) / (total ? total : 1), std::memory_order_relaxed);
+            continue;
+        }
+        vTaskDelay(pdMS_TO_TICKS(kDeferPollMs));
+        waitedMs += kDeferPollMs;
+    }
+
+    EngineLoadStats after;
+    engine_stats(after);
+    rec.engine.gatedBlocks = after.gatedBlocks - before.gatedBlocks;
+    rec.engine.gateMaxUs   = after.gateMaxUs;
+    rec.engine.gateTotalUs = after.gateTotalUs - before.gateTotalUs;
+    rec.engine.gateCount   = after.gateCount - before.gateCount;
+    rec.engine.underruns   = after.underruns - before.underruns;
+    rec.engine.noFreeBlock = after.noFreeBlock - before.noFreeBlock;
+    rec.engine.droppedHits = after.droppedHits - before.droppedHits;
+    rec.engine.rtGapMaxUs  = after.rtGapMaxUs;
+    rec.engine.lateHits    = after.lateHits - before.lateHits;
+    rec.engine.streamFopens = after.streamFopens - before.streamFopens;
+    rec.engine.bgPassMaxUs = after.bgPassMaxUs;
+    rec.engine.fopenMaxUs  = after.fopenMaxUs;
+    rec.engine.streamKb    = after.streamKb - before.streamKb;
+    rec.engine.loaderKb    = after.loaderKb - before.loaderKb;
+    rec.doneMs = since_req_ms();
+    rec.ok = true;
 
     s_outcome.store(1, std::memory_order_release);
 }
@@ -231,6 +365,7 @@ void kit_load_task_start(bool onlyModified, int kitId) {
 
     s_reqOnlyModified = onlyModified;
     s_reqKitId        = kitId;
+    s_reqUs           = crosspad::getClock().getTimeUs();
 
     lv_timer_create(progress_poll_timer_cb, 100, nullptr);
 
@@ -244,6 +379,19 @@ bool kit_load_task_is_loading() {
 
 int kit_load_task_pending_kit() {
     return s_pendingValid ? s_pendingKitId : -1;
+}
+
+int kit_load_task_swap_log_count() {
+    if (!s_swaps) return 0;
+    return s_swapCount < static_cast<uint32_t>(kSwapLog) ? static_cast<int>(s_swapCount) : kSwapLog;
+}
+
+bool kit_load_task_swap_log(int i, KitSwapRecord* out) {
+    const int n = kit_load_task_swap_log_count();
+    if (i < 0 || i >= n || !out) return false;
+    const uint32_t seq = s_swapCount - n + i;          // 0-based index of the row
+    *out = s_swaps[seq % kSwapLog];
+    return true;
 }
 
 } // namespace crosspad_sampler

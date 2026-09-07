@@ -39,15 +39,11 @@ crosspad::KitLoadResult KitOrchestrator::changeKit(int kitId)
 
     loading_ = true;
 
-    // Stop everything that is still sounding.
+    // Nothing is stopped here. What is sounding keeps sounding: the load task
+    // reloads each pad once its voice has ended (kit_load_task.cpp), and an
+    // engine that has to go wholesale — the pitched bank — stops its own
+    // voices on the platform side.
     crosspad::IEventBus& bus = crosspad::getEventBus();
-    for (int pad = 0; pad < PAD_COUNT; ++pad) {
-        bus.postSamplePlayback(
-            static_cast<uint8_t>(pad),
-            /*wavIdx=*/0,
-            /*isOn=*/false,
-            crosspad::EventSource::App);
-    }
 
     result = kitManager->loadKit(*kit);
     if (result.success) {
