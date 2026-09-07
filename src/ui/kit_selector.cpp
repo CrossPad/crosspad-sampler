@@ -29,8 +29,19 @@ namespace {
 
 constexpr int32_t kStatusH   = 24;
 constexpr int32_t kRowH      = 30;
+constexpr int32_t kRowGap    = 5;
+constexpr int32_t kRowPitch  = kRowH + kRowGap;
 constexpr int32_t kCoverSize = 122;
 constexpr int32_t kThumbSize = 20;
+
+/* The list is virtual: every kit has a Row entry, but only the rows within
+ * this many of the highlight have LVGL objects. A row is ~3 kB of PSRAM and
+ * ~50 allocations (seven widgets, their styles, texts and event lists); 79
+ * of them were 237 kB, most of what the launcher leaves outside the sample
+ * engine's arena, and the kit load that followed had no room for its FFT.
+ * Rows are placed at idx * kRowPitch, so the scroll extent, the thumbnail
+ * warmer and the encoder order never depend on which rows exist. */
+constexpr int kRowWindow = 8;
 
 /* The cover is a 122x122 PNG read off the card and decoded on the LVGL
  * thread. It is loaded only once the encoder has been still for this long: a
@@ -43,13 +54,13 @@ constexpr uint32_t kCoverDelayMs = 750;
 constexpr uint32_t kThumbTickMs = 10;
 
 struct Row {
-    lv_obj_t* obj    = nullptr;
+    lv_obj_t* obj    = nullptr;   ///< null while the row is outside the window
     lv_obj_t* name   = nullptr;
     lv_obj_t* author = nullptr;
     lv_obj_t* thumb  = nullptr;   ///< image, hidden until its PNG is in the cache
     lv_obj_t* letter = nullptr;   ///< the initial, shown until then (or for good)
     std::string thumbPath;
-    bool thumbTried = false;
+    bool thumbTried = false;      ///< for the built row; reset when it is rebuilt
 };
 
 KitSelectedFn s_onSelected = nullptr;
@@ -67,11 +78,14 @@ lv_obj_t*    s_coverAuthor = nullptr;
 lv_obj_t*    s_statusLabel = nullptr;
 lv_obj_t*    s_backBtn     = nullptr;
 lv_obj_t*    s_busy        = nullptr;
+lv_obj_t*    s_spacer      = nullptr;   ///< sits under the last row: the scroll extent
 
 lv_group_t*  s_group       = nullptr;
 lv_group_t*  s_prevGroup   = nullptr;
 
 std::vector<Row> s_rows;
+int  s_winFirst  = 0;    ///< rows [s_winFirst, s_winLast] have objects
+int  s_winLast   = -1;
 int  s_selected  = -1;   ///< row under the highlight
 int  s_loaded    = -1;   ///< row carrying the "this one is playing" edge
 int  s_coverWanted = -1;
@@ -126,8 +140,8 @@ int thumb_next_pending() {
     for (int d = 0; d < n; ++d) {
         const int below = centre + d;
         const int above = centre - d;
-        if (below < n && !s_rows[below].thumbTried) return below;
-        if (above >= 0 && !s_rows[above].thumbTried) return above;
+        if (below < n && s_rows[below].obj && !s_rows[below].thumbTried) return below;
+        if (above >= 0 && s_rows[above].obj && !s_rows[above].thumbTried) return above;
     }
     return -1;
 }
@@ -202,11 +216,18 @@ void row_set_selected(int idx, bool selected) {
      * which re-measured all rows (two DOT labels each) on every detent. */
     if (selected) {
         lv_obj_add_state(r.obj, LV_STATE_CHECKED);
-        lv_obj_set_style_text_opa(r.author, LV_OPA_COVER, 0);
+        if (r.author) lv_obj_set_style_text_opa(r.author, LV_OPA_COVER, 0);
     } else {
         lv_obj_remove_state(r.obj, LV_STATE_CHECKED);
-        lv_obj_set_style_text_opa(r.author, LV_OPA_50, 0);
+        if (r.author) lv_obj_set_style_text_opa(r.author, LV_OPA_50, 0);
     }
+}
+
+void row_apply_loaded_edge(lv_obj_t* row) {
+    lv_obj_set_style_border_color(row, CROSSPAD_THEME_PRIMARY, 0);
+    lv_obj_set_style_border_opa(row, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_LEFT, 0);
+    lv_obj_set_style_border_width(row, 3, 0);
 }
 
 /// The loaded kit keeps a primary-coloured edge, so it stays readable while
@@ -217,11 +238,41 @@ void row_mark_loaded(int idx) {
     }
     s_loaded = idx;
     if (idx < 0 || idx >= (int)s_rows.size() || !s_rows[idx].obj) return;
-    lv_obj_t* row = s_rows[idx].obj;
-    lv_obj_set_style_border_color(row, CROSSPAD_THEME_PRIMARY, 0);
-    lv_obj_set_style_border_opa(row, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_LEFT, 0);
-    lv_obj_set_style_border_width(row, 3, 0);
+    row_apply_loaded_edge(s_rows[idx].obj);
+}
+
+void build_row(int idx);
+void destroy_row(int idx);
+void group_reorder();
+
+/// Give rows [centre - kRowWindow, centre + kRowWindow] objects and take them
+/// from every other row. Focus callbacks are muted meanwhile: creating a row
+/// into the group and deleting a focused one both fire them.
+void ensure_window(int centre) {
+    const int n = (int)s_rows.size();
+    if (n == 0) return;
+    if (centre < 0) centre = 0;
+    if (centre >= n) centre = n - 1;
+    int first = centre - kRowWindow;
+    int last  = centre + kRowWindow;
+    if (first < 0) first = 0;
+    if (last >= n) last = n - 1;
+    if (first == s_winFirst && last == s_winLast) return;
+
+    const bool wasBuilding = s_building;
+    s_building = true;
+    for (int i = s_winFirst; i <= s_winLast; ++i) {
+        if (i < first || i > last) destroy_row(i);
+    }
+    bool added = false;
+    for (int i = first; i <= last; ++i) {
+        if (!s_rows[i].obj) { build_row(i); added = true; }
+    }
+    s_winFirst = first;
+    s_winLast  = last;
+    if (added) group_reorder();
+    s_building = wasBuilding;
+    thumb_warm();
 }
 
 void select_row(int idx) {
@@ -229,6 +280,7 @@ void select_row(int idx) {
 
     row_set_selected(s_selected, false);
     s_selected = idx;
+    ensure_window(idx);
     row_set_selected(s_selected, true);
 
     auto* mgr = crosspad::getKitManager();
@@ -310,6 +362,15 @@ void row_clicked_cb(lv_event_t* e) {
     load_kit(idx);
 }
 
+/* A touch flick lands wherever it lands; the rows there have to exist. */
+void list_scrolled_cb(lv_event_t*) {
+    if (s_building || !s_list || s_rows.empty()) return;
+    const int32_t y = lv_obj_get_scroll_y(s_list);
+    const int32_t h = lv_obj_get_height(s_list);
+    const int centre = (int)((y + h / 2) / kRowPitch);
+    ensure_window(centre);
+}
+
 void back_clicked_cb(lv_event_t*) {
     if (s_onClose) {
         s_onClose(s_userData);
@@ -320,7 +381,12 @@ void back_clicked_cb(lv_event_t*) {
 
 // ── Building ─────────────────────────────────────────────────────────────────
 
-void build_row(int idx, const crosspad::KitInfo& kit) {
+/// Widgets for row `idx`, placed at its slot. The entry in s_rows must exist.
+void build_row(int idx) {
+    auto* mgr = crosspad::getKitManager();
+    auto* kitp = mgr ? mgr->getKit(idx) : nullptr;
+    if (!kitp || idx < 0 || idx >= (int)s_rows.size() || s_rows[idx].obj) return;
+    const crosspad::KitInfo& kit = *kitp;
     void* tag = (void*)(intptr_t)idx;
 
     lv_obj_t* row = lv_obj_create(s_list);
@@ -328,6 +394,7 @@ void build_row(int idx, const crosspad::KitInfo& kit) {
     lv_obj_add_style(row, &styleKitBrowserRow, 0);
     lv_obj_add_style(row, &styleKitBrowserRowSelected, LV_STATE_CHECKED);
     lv_obj_set_size(row, LV_PCT(100), kRowH);
+    lv_obj_set_pos(row, 0, idx * kRowPitch);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
@@ -373,11 +440,36 @@ void build_row(int idx, const crosspad::KitInfo& kit) {
     lv_obj_set_size(author, LV_PCT(100), lv_font_get_line_height(&lv_font_montserrat_10));
     lv_label_set_text(author, kit.author.c_str());
 
-    Row r;
+    Row& r = s_rows[idx];
     r.obj = row; r.name = name; r.author = author;
     r.thumb = img; r.letter = letter;
-    r.thumbPath = crosspad::kitAssetPath(kit.path, "thumb.png");
-    s_rows.push_back(std::move(r));
+    r.thumbTried = false;
+    if (idx == s_selected) {
+        lv_obj_add_state(row, LV_STATE_CHECKED);
+        lv_obj_set_style_text_opa(author, LV_OPA_COVER, 0);
+    }
+    if (idx == s_loaded) row_apply_loaded_edge(row);
+}
+
+void destroy_row(int idx) {
+    if (idx < 0 || idx >= (int)s_rows.size()) return;
+    Row& r = s_rows[idx];
+    if (!r.obj) return;
+    lv_obj_delete(r.obj);   // takes it out of the group as well
+    r.obj = r.name = r.author = r.thumb = r.letter = nullptr;
+}
+
+/// The group walks its objects in insertion order; a row built ahead of an
+/// older one would come after it. Back first, then the window in row order.
+void group_reorder() {
+    if (!s_group) return;
+    lv_obj_t* focused = lv_group_get_focused(s_group);
+    lv_group_remove_all_objs(s_group);
+    if (s_backBtn) lv_group_add_obj(s_group, s_backBtn);
+    for (int i = s_winFirst; i <= s_winLast; ++i) {
+        if (s_rows[i].obj) lv_group_add_obj(s_group, s_rows[i].obj);
+    }
+    if (focused) lv_group_focus_obj(focused);
 }
 
 void build_rows() {
@@ -386,14 +478,31 @@ void build_rows() {
 
     s_building = true;
     s_rows.clear();
-    s_rows.reserve(count);
+    s_rows.resize(count);
+    s_winFirst = 0;
+    s_winLast  = -1;
     s_selected = -1;
     s_loaded   = -1;
     s_coverShown = -1;
+    s_spacer = nullptr;
 
     for (int i = 0; i < count; ++i) {
-        if (auto* kit = mgr->getKit(i)) build_row(i, *kit);
+        if (auto* kit = mgr->getKit(i)) {
+            s_rows[i].thumbPath = crosspad::kitAssetPath(kit->path, "thumb.png");
+        }
     }
+    if (count > 0) {
+        /* One pixel under the last slot: the list's scrollable extent comes
+         * from its children, and the rows themselves come and go. */
+        s_spacer = lv_obj_create(s_list);
+        lv_obj_remove_style_all(s_spacer);
+        lv_obj_set_size(s_spacer, 1, 1);
+        lv_obj_set_pos(s_spacer, 0, count * kRowPitch - kRowGap - 1);
+        lv_obj_remove_flag(s_spacer, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_remove_flag(s_spacer, LV_OBJ_FLAG_SCROLLABLE);
+    }
+    const int current = mgr->getCurrentKitId();
+    ensure_window(current >= 0 && current < count ? current : 0);
     s_building = false;
 
     if (s_statusLabel) lv_label_set_text_fmt(s_statusLabel, "%d kits", (int)s_rows.size());
@@ -407,7 +516,6 @@ void build_rows() {
         return;
     }
 
-    const int current = mgr->getCurrentKitId();
     if (current >= 0 && current < (int)s_rows.size()) row_mark_loaded(current);
 
     /* Back holds focus by default, having been added first. Focus the list
@@ -536,10 +644,9 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     lv_obj_remove_style_all(s_list);
     lv_obj_set_flex_grow(s_list, 1);
     lv_obj_set_height(s_list, LV_PCT(100));
-    lv_obj_set_flex_flow(s_list, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(s_list, 5, 0);
     lv_obj_set_scroll_dir(s_list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(s_list, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_add_event_cb(s_list, list_scrolled_cb, LV_EVENT_SCROLL_END, nullptr);
 
     build_rows();
 
@@ -571,10 +678,11 @@ void reset_state() {
     if (s_group) { lv_group_delete(s_group); s_group = nullptr; }
 
     s_rows.clear();
+    s_winFirst = 0; s_winLast = -1;
     s_selected = s_loaded = -1;
     s_coverWanted = s_coverShown = -1;
     s_overlay = s_list = s_coverBox = s_coverImg = s_coverLetter = nullptr;
-    s_coverName = s_coverAuthor = s_statusLabel = s_backBtn = s_busy = nullptr;
+    s_coverName = s_coverAuthor = s_statusLabel = s_backBtn = s_busy = s_spacer = nullptr;
 }
 
 void overlay_deleted_cb(lv_event_t* e) {
@@ -593,6 +701,7 @@ void kit_selector_refresh(lv_obj_t* selector) {
     s_building = true;
     lv_obj_clean(s_list);
     s_busy = nullptr;
+    s_winFirst = 0; s_winLast = -1;
     build_rows();
 }
 
