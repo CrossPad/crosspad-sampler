@@ -72,11 +72,14 @@ static lv_obj_t * waveformDimLeft = NULL; // dimming overlay before start
 static lv_obj_t * waveformDimRight = NULL; // dimming overlay after end
 static lv_obj_t * waveformFileLabel = NULL; // sample filename under the waveform
 static lv_obj_t * waveformTimeLabel = NULL; // playback time under the waveform
-/* A pitched kit has no per-pad file to draw an envelope of — every pad is the
- * same recording transposed — so the box shows the engine's live output
- * instead. -1 until the first sync, so the first kit always applies. */
 static lv_obj_t * scopeView = NULL;
-static int scopeShown = -1;
+static lv_obj_t * waveformModeLabel = NULL;
+
+enum class WaveformDisplayMode : uint8_t { File, Live, HistoryRms };
+static WaveformDisplayMode waveformDisplayMode = WaveformDisplayMode::File;
+/* -2 until first sync, -1 without a source, 0 for the 16-pad sampler and 1
+ * for the pitched engine. A source change also resets the RMS history. */
+static int scopeSourceKind = -2;
 
 class PadEditorLogicHandler : public IPadLogicHandler {
 public:
@@ -363,30 +366,106 @@ static uint32_t scope_pull_engine(void* ctx, float* out, uint32_t n,
     return inst->scopeTap().snapshot(out, n);
 }
 
-/// Swap the file waveform for the scope, or back, when the kit's engine changes.
+static uint32_t scope_pull_sampler(void*, float* out, uint32_t n,
+                                   float* hz, uint32_t* sampleRate) {
+    const auto& cb = sampler_get_platform_callbacks().player;
+    if (!cb.getLiveScopeData) return 0;
+    return cb.getLiveScopeData(out, n, hz, sampleRate);
+}
+
+static void set_live_scope_capture(bool enabled) {
+    if (scopeSourceKind == 1) {
+        auto* inst = crosspad::getPlatformServices().pitchedInstrument;
+        if (!inst) return;
+        auto& tap = inst->scopeTap();
+        if (enabled && !tap.enabled()) {
+            tap.clear();
+            tap.setEnabled(true);
+        } else if (!enabled) {
+            tap.setEnabled(false);
+        }
+    } else if (scopeSourceKind == 0) {
+        const auto fn = sampler_get_platform_callbacks().player.setLiveScopeEnabled;
+        if (fn) fn(enabled);
+    }
+}
+
+static void apply_waveform_display_mode() {
+    if (!scopeView || !waveformCanvas) return;
+
+    const bool showScope = waveformDisplayMode != WaveformDisplayMode::File
+                        && scopeSourceKind >= 0;
+    scope_view_set_active(scopeView, false);
+    if (showScope) {
+        scope_view_set_mode(scopeView,
+            waveformDisplayMode == WaveformDisplayMode::HistoryRms
+                ? crosspad_gui::ScopeViewMode::HistoryRms
+                : crosspad_gui::ScopeViewMode::Live);
+        set_live_scope_capture(true);
+        lv_obj_clear_flag(scopeView, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(waveformCanvas, LV_OBJ_FLAG_HIDDEN);
+        if (waveformFileLabel) lv_obj_add_flag(waveformFileLabel, LV_OBJ_FLAG_HIDDEN);
+        if (waveformTimeLabel) lv_obj_add_flag(waveformTimeLabel, LV_OBJ_FLAG_HIDDEN);
+        scope_view_set_active(scopeView, true);
+    } else {
+        set_live_scope_capture(false);
+        lv_obj_add_flag(scopeView, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(waveformCanvas, LV_OBJ_FLAG_HIDDEN);
+        if (waveformFileLabel) lv_obj_clear_flag(waveformFileLabel, LV_OBJ_FLAG_HIDDEN);
+        if (waveformTimeLabel) lv_obj_clear_flag(waveformTimeLabel, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    if (waveformModeLabel) {
+        if (showScope) {
+            lv_obj_add_flag(waveformModeLabel, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_label_set_text_static(waveformModeLabel, "FILE");
+            lv_obj_clear_flag(waveformModeLabel, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(waveformModeLabel);
+        }
+    }
+}
+
+static void waveform_mode_click_cb(lv_event_t*) {
+    if (scopeSourceKind < 0) {
+        waveformDisplayMode = WaveformDisplayMode::File;
+    } else if (waveformDisplayMode == WaveformDisplayMode::File) {
+        waveformDisplayMode = WaveformDisplayMode::Live;
+    } else if (waveformDisplayMode == WaveformDisplayMode::Live) {
+        waveformDisplayMode = WaveformDisplayMode::HistoryRms;
+    } else {
+        waveformDisplayMode = WaveformDisplayMode::File;
+    }
+    apply_waveform_display_mode();
+}
+
+/// Select the appropriate live source when the kit's engine changes. The
+/// file/live/RMS choice itself is controlled by clicking the waveform.
 static void sync_engine_view() {
     if (!scopeView || !waveformCanvas) return;
 
     auto* mgr  = crosspad::getKitManager();
     auto* kit  = mgr ? mgr->getCurrentKit() : nullptr;
     auto* inst = crosspad::getPlatformServices().pitchedInstrument;
-    const int pitched = (kit && kit->engine == crosspad::KitEngine::Pitched && inst) ? 1 : 0;
-    if (pitched == scopeShown) return;
-    scopeShown = pitched;
+    const bool pitched = kit && kit->engine == crosspad::KitEngine::Pitched && inst;
+    const bool sampler = sampler_get_platform_callbacks().player.getLiveScopeData != nullptr;
+    const int sourceKind = pitched ? 1 : (sampler ? 0 : -1);
+    if (sourceKind == scopeSourceKind) return;
+    scope_view_set_active(scopeView, false);
+    set_live_scope_capture(false);
+    scopeSourceKind = sourceKind;
 
-    if (pitched) {
+    if (sourceKind == 1) {
         scope_view_set_source(scopeView, scope_pull_engine, inst);
-        lv_obj_clear_flag(scopeView, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(waveformCanvas, LV_OBJ_FLAG_HIDDEN);
-        if (waveformFileLabel) lv_obj_add_flag(waveformFileLabel, LV_OBJ_FLAG_HIDDEN);
-        if (waveformTimeLabel) lv_obj_add_flag(waveformTimeLabel, LV_OBJ_FLAG_HIDDEN);
+        waveformDisplayMode = WaveformDisplayMode::Live;
+    } else if (sourceKind == 0) {
+        scope_view_set_source(scopeView, scope_pull_sampler, nullptr);
+        waveformDisplayMode = WaveformDisplayMode::File;
     } else {
         scope_view_clear_source(scopeView);
-        lv_obj_add_flag(scopeView, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(waveformCanvas, LV_OBJ_FLAG_HIDDEN);
-        if (waveformFileLabel) lv_obj_clear_flag(waveformFileLabel, LV_OBJ_FLAG_HIDDEN);
-        if (waveformTimeLabel) lv_obj_clear_flag(waveformTimeLabel, LV_OBJ_FLAG_HIDDEN);
+        waveformDisplayMode = WaveformDisplayMode::File;
     }
+    apply_waveform_display_mode();
 }
 
 // Timer-based pad state monitoring.
@@ -829,13 +908,26 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
 
     waveformCanvas = waveform_view_create(cont);
     lv_obj_align(waveformCanvas, LV_ALIGN_RIGHT_MID, -25, -10);
+    lv_obj_add_event_cb(waveformCanvas, waveform_mode_click_cb, LV_EVENT_CLICKED, nullptr);
 
     scopeView = create_scope_view(cont, WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT);
     if (scopeView) {
         lv_obj_align(scopeView, LV_ALIGN_RIGHT_MID, -25, -10);
         lv_obj_add_flag(scopeView, LV_OBJ_FLAG_HIDDEN);
+        scope_view_set_active(scopeView, false);
+        lv_obj_add_event_cb(scopeView, waveform_mode_click_cb, LV_EVENT_CLICKED, nullptr);
     }
-    scopeShown = -1;
+    scopeSourceKind = -2;
+    waveformDisplayMode = WaveformDisplayMode::File;
+
+    waveformModeLabel = lv_label_create(cont);
+    lv_label_set_text_static(waveformModeLabel, "FILE");
+    lv_obj_set_style_text_font(waveformModeLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(waveformModeLabel, lv_color_hex(0x00FF88), 0);
+    lv_obj_set_style_text_opa(waveformModeLabel, LV_OPA_70, 0);
+    lv_obj_align_to(waveformModeLabel, waveformCanvas, LV_ALIGN_TOP_RIGHT, -2, 1);
+    lv_obj_add_flag(waveformModeLabel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(waveformModeLabel, waveform_mode_click_cb, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t * fileLabel = lv_label_create(cont);
     static char audio_name[32];
@@ -918,9 +1010,14 @@ void sampler_panel_destroy(lv_obj_t * panel)
     waveformDimRight = nullptr;
     waveformFileLabel = nullptr;
     waveformTimeLabel = nullptr;
-    if (scopeView) scope_view_clear_source(scopeView);
+    waveformModeLabel = nullptr;
+    if (scopeView) {
+        scope_view_set_active(scopeView, false);
+        set_live_scope_capture(false);
+        scope_view_clear_source(scopeView);
+    }
     scopeView = nullptr;
-    scopeShown = -1;
+    scopeSourceKind = -2;
     timerPad = nullptr;
     g_sampler = nullptr;
     g_saveConfirmMsgbox = nullptr; // Clear msgbox reference

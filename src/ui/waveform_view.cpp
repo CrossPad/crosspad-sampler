@@ -59,6 +59,7 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
     lv_obj_set_style_border_color(cont, lv_color_hex(0x444444), LV_PART_MAIN);
     lv_obj_set_style_pad_all(cont, 0, LV_PART_MAIN);
     lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(cont, LV_OBJ_FLAG_CLICKABLE);
 
     // Canvas, child 0. Its buffer comes from PSRAM when there is any.
     if (!cbuf) {
@@ -74,6 +75,7 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
                          LV_COLOR_FORMAT_RGB565);
     lv_obj_set_size(canvas, WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT);
     lv_obj_align(canvas, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_clear_flag(canvas, LV_OBJ_FLAG_CLICKABLE);
     lv_canvas_fill_bg(canvas, lv_color_hex(0x111111), LV_OPA_COVER);
 
     // Playhead, child 1.
@@ -85,6 +87,7 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
     lv_obj_set_style_pad_all(playhead, 0, LV_PART_MAIN);
     lv_obj_align(playhead, LV_ALIGN_LEFT_MID, 0, 0);
     lv_obj_add_flag(playhead, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(playhead, LV_OBJ_FLAG_CLICKABLE);
 
     // Start marker, child 2.
     lv_obj_t* startMarker = lv_obj_create(cont);
@@ -95,6 +98,7 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
     lv_obj_set_style_pad_all(startMarker, 0, LV_PART_MAIN);
     lv_obj_align(startMarker, LV_ALIGN_LEFT_MID, 0, 0);
     lv_obj_add_flag(startMarker, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(startMarker, LV_OBJ_FLAG_CLICKABLE);
 
     // End marker, child 3.
     lv_obj_t* endMarker = lv_obj_create(cont);
@@ -105,6 +109,7 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
     lv_obj_set_style_pad_all(endMarker, 0, LV_PART_MAIN);
     lv_obj_align(endMarker, LV_ALIGN_LEFT_MID, 0, 0);
     lv_obj_add_flag(endMarker, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(endMarker, LV_OBJ_FLAG_CLICKABLE);
 
     return cont;
 }

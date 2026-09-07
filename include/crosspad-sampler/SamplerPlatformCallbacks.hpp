@@ -53,6 +53,15 @@ struct SamplerPlayerCallbacks {
     void (*getWaveformData)(uint8_t padIdx, uint8_t sampleSlot,
                             int16_t* outData, uint32_t maxSamples,
                             uint32_t* actualSamples)                                  = nullptr;
+
+    /// Pull the newest mono samples rendered by the ordinary 16-pad engine.
+    /// This is deliberately a snapshot callback instead of exposing a
+    /// platform-owned ScopeTap to the portable sampler UI.
+    uint32_t (*getLiveScopeData)(float* outData, uint32_t maxSamples,
+                                 float* fundamentalHz,
+                                 uint32_t* sampleRate)                                = nullptr;
+    /// Start/stop the engine-side scope tap. Disabled means no audio copy.
+    void (*setLiveScopeEnabled)(bool enabled)                                         = nullptr;
 };
 
 /// Callbacks the audio engine invokes back INTO the sampler (NoteOn/NoteOff
