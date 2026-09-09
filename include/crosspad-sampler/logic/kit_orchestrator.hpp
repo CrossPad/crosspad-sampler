@@ -36,7 +36,7 @@ public:
     ///   4. Set loading_ = true.
     ///   5. Stop all playback (pads 0–15 via postSamplePlayback).
     ///   6. Call IKitManager::loadKit() and setCurrentKitId().
-    ///   7. On success, call PadColorManager::loadColorsFromKit().
+    ///   7. Leave the LED colors alone — the loader stages them per pad.
     ///   8. Invoke the progress callback with (padsLoaded, PAD_COUNT).
     ///   9. Set loading_ = false.
     ///  10. Post AppChanged("Sampler") via IEventBus.

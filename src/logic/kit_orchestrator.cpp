@@ -50,9 +50,9 @@ crosspad::KitLoadResult KitOrchestrator::changeKit(int kitId)
         kitManager->setCurrentKitId(kitId);
     }
 
-    if (result.success && colorManager_) {
-        colorManager_->loadColorsFromKit(*kit);
-    }
+    // Colors are NOT applied here. A live swap reloads one pad at a time, so
+    // the loader stages them through PadColorManager::beginKitSwap() and hands
+    // each pad over as its sample lands (kit_load_task.cpp).
 
     if (progressFn_) {
         progressFn_(result.padsLoaded, PAD_COUNT, progressData_);

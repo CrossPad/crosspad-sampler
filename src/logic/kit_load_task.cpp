@@ -22,7 +22,8 @@
 #include <crosspad-sampler/SamplerPlatformCallbacks.hpp>
 #include <crosspad-sampler/SamplerConfig.hpp>
 
-#include <crosspad-sampler/ui/sampler_panel.hpp>   // getKitOrchestrator()
+#include <crosspad-sampler/ui/sampler_panel.hpp>   // getKitOrchestrator(), getPadColorManager()
+#include <crosspad-sampler/logic/pad_color_manager.hpp>
 
 #include <crosspad/kit/IKitManager.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
@@ -127,6 +128,8 @@ static bool reload_pad(uint8_t pad, KitSwapRecord& rec, bool onlyIfIdle) {
         cb.audio.reloadPad(pad);
     }
     rec.padDoneMs[pad] = static_cast<int32_t>(since_req_ms());
+    // The pad now plays the incoming kit, and may say so in its color.
+    getPadColorManager().markPadReloaded(pad);
     return true;
 }
 
@@ -146,6 +149,9 @@ static void progress_poll_timer_cb(lv_timer_t* timer) {
     int outcome = s_outcome.load(std::memory_order_acquire);
     if (outcome == 0) {
         crosspad_gui::statusbar_set_loading(s_progress.load(std::memory_order_relaxed));
+        // Every LED write of the swap happens here, on the LVGL thread; the
+        // loader only clears bits.
+        getPadColorManager().tickKitSwap();
         return;
     }
     if (outcome > 0) {
@@ -153,6 +159,8 @@ static void progress_poll_timer_cb(lv_timer_t* timer) {
     } else {
         crosspad_gui::statusbar_process_loader_status(100, true, true, s_error);
     }
+    getPadColorManager().endKitSwap();
+
     s_loading = false;
     lv_timer_delete(timer);
 
@@ -238,6 +246,11 @@ static void run_one_load(bool onlyModified, int kitId) {
     }
     const int total = __builtin_popcount(todo);
     int done = 0;
+
+    // Until each of those pads is reloaded it still plays the outgoing kit;
+    // dimmed and breathing is what that looks like.
+    getPadColorManager().beginKitSwap(*kit, todo);
+
     uint32_t waitedMs = 0;
     uint32_t lastAloneMs = 0;
 
