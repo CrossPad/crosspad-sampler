@@ -7,6 +7,7 @@
 #include <crosspad/app/AppEntry.hpp>
 #include <crosspad-sampler/ui/sampler_panel.hpp>
 #include <crosspad-sampler/SamplerPadLogic.hpp>
+#include <crosspad-sampler/SamplerPlatformCallbacks.hpp>
 #include <crosspad-gui/app/App.hpp>
 #include <crosspad/pad/PadManager.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
@@ -25,8 +26,22 @@ static void sampler_back_cb() {
     s_samplerApp = nullptr;
 }
 
+/* One level up from the sampler is the kit selector, not the launcher: the
+ * selector is where the running kit was chosen, and bouncing between the two
+ * is the loop a player actually works in. Leaving the app takes a second back,
+ * from the selector. A platform without a selector keeps the old behaviour by
+ * declining here. */
+static bool sampler_handle_back(lv_obj_t* app) {
+    (void)app;
+    const auto& cb = sampler_get_platform_callbacks().kitSelector;
+    if (!cb.openSelector) return false;
+    cb.openSelector();
+    return true;
+}
+
 static lv_obj_t* sampler_create_fn(lv_obj_t* parent, App* app) {
     s_samplerApp = app;
+    app->setOnBack(sampler_handle_back);
     return sampler_panel_create(parent, sampler_back_cb);
 }
 

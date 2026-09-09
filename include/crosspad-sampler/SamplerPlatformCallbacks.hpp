@@ -179,6 +179,12 @@ struct KitSelectorAppCallbacks {
     /// platform that opened it as a gate in front of another app launches
     /// that app from here.
     void (*onClosed)()                  = nullptr;
+    /// Open the selector over a running app and come back to that app when it
+    /// closes. Until this existed the selector was reachable only as a gate in
+    /// front of a launch, so once a kit was loaded there was no way back to it
+    /// at all — the sampler's own pick-kit button was a placeholder for exactly
+    /// that reason. Null on a platform with no selector.
+    void (*openSelector)()              = nullptr;
 };
 
 // ---------------------------------------------------------------------------

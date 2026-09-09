@@ -132,6 +132,24 @@ static lv_group_t * g_sampler = NULL; // group for the sampler buttons
 static void (*s_on_back)() = nullptr; // back button callback (calls app->destroyApp())
 
 // One callback for press, release and click, switched on the playback mode.
+/* The gate the on-screen pads hold a note for. They sound on the click, not on
+ * the touch-down, so there is no finger still on the pad to end the note — a
+ * length has to be chosen, and this is long enough to hear a sample start and
+ * short enough not to stack up under fast tapping. */
+static constexpr uint32_t kScreenPadGateMs = 150;
+
+static void screen_pad_gate_cb(lv_timer_t * t) {
+    const int padIdx = (int)(intptr_t)lv_timer_get_user_data(t);
+    crosspad::getPadManager().handlePadRelease(padIdx);
+    lv_timer_delete(t);
+}
+
+/* Click, not press. A press-triggered pad made every screen-wide swipe that
+ * crossed the pad row fire a note before it could become a swipe, which is
+ * what made gestures on this panel awkward to land. LVGL sends CLICKED only
+ * when the press was not lost, and the gesture layer cancels the press with
+ * lv_indev_wait_release() — so a drag across the pads is silent, and a tap
+ * still plays. The 16 physical pads are untouched by any of this. */
 static void Sampler_pad_event_cb(lv_event_t * e) {
     lv_event_code_t code = lv_event_get_code(e);
     lv_obj_t * obj = (lv_obj_t * )lv_event_get_target(e);
@@ -144,13 +162,12 @@ static void Sampler_pad_event_cb(lv_event_t * e) {
 
     lv_subject_set_int(&s_pad_sampler, padIdx + 1);
 
-    if (code == LV_EVENT_PRESSED) {
-        crosspad::getPadManager().handlePadPress(padIdx, 100);
-    } else if (code == LV_EVENT_RELEASED) {
-        crosspad::getPadManager().handlePadRelease(padIdx);
-    } else if (code == LV_EVENT_CLICKED) {
-        // CLICKED is ignored: PRESS already fired the NoteOn.
-    }
+    if (code != LV_EVENT_CLICKED) return;
+
+    crosspad::getPadManager().handlePadPress(padIdx, 100);
+    lv_timer_t * gate = lv_timer_create(screen_pad_gate_cb, kScreenPadGateMs,
+                                        (void*)(intptr_t)padIdx);
+    lv_timer_set_repeat_count(gate, 1);
 }
 
 
@@ -354,8 +371,9 @@ static void ShowSaveConfirmationDialog(lv_obj_t * panel) {
 }
 
 static void PickKit_button_cb(lv_event_t * e) {
-    LV_LOG_INFO("Pick kit button clicked");
-    // Placeholder: kit selection goes through KitOrchestrator here.
+    (void)e;
+    const auto& cb = sampler_get_platform_callbacks().kitSelector;
+    if (cb.openSelector) cb.openSelector();
 }
 
 static uint32_t scope_pull_engine(void* ctx, float* out, uint32_t n,
@@ -859,8 +877,6 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
             lv_obj_t * btn = lv_obj_get_child(buttonFrame, i);
             if (!btn) continue;
             lv_obj_add_event_cb(btn, Sampler_pad_event_cb, LV_EVENT_CLICKED, NULL);
-            lv_obj_add_event_cb(btn, Sampler_pad_event_cb, LV_EVENT_PRESSED, NULL);
-            lv_obj_add_event_cb(btn, Sampler_pad_event_cb, LV_EVENT_RELEASED, NULL);
         }
         for (int pad = 0; pad < 16; ++pad) {
             int btnIndex = notes[pad] - 1; // button child index for this pad
