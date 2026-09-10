@@ -189,7 +189,15 @@ bool waveform_loader_start() {
     if (s_running) return false;
 
     if (!s_queue) {
+        /* Storage in PSRAM, like the task's stack: 4.5 kB of internal RAM
+         * otherwise, and the consumer already runs on an external stack. The
+         * queue is never deleted, so nothing has to free it WithCaps. */
+#if defined(ARDUINO)
         s_queue = xQueueCreate(LOADER_QUEUE_SIZE, sizeof(WaveformLoadRequest));
+#else
+        s_queue = xQueueCreateWithCaps(LOADER_QUEUE_SIZE, sizeof(WaveformLoadRequest),
+                                       MALLOC_CAP_SPIRAM);
+#endif
         if (!s_queue) return false;
     }
 
