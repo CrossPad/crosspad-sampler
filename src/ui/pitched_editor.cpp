@@ -151,17 +151,17 @@ bool hasUnsavedEdits() {
 
 /// The same cache-or-request path the panel's pad provider takes, keyed by a
 /// resolved file name instead of a pad slot.
-void fileWaveformProvider(const char* path, int16_t* outData, uint32_t maxSamples,
-                          uint32_t* actualSamples, void* /*userData*/) {
+WaveformStatus fileWaveformProvider(const char* path, int16_t* outData, uint32_t maxSamples,
+                                    uint32_t* actualSamples, void* /*userData*/) {
     *actualSamples = 0;
-    if (!path || !path[0]) return;
+    if (!path || !path[0]) return WaveformStatus::NoSample;
 
     WaveformCacheEntry* entry = waveform_cache_find(path);
     if (!entry || !entry->valid || !entry->waveformData || entry->sampleCount == 0) {
         waveform_loader_start();
         waveform_loader_request(path, true, 0, 0, 0);
         s_wavePending = true;
-        return;
+        return WaveformStatus::Pending;
     }
 
     uint32_t count = entry->sampleCount < maxSamples ? entry->sampleCount : maxSamples;
@@ -174,6 +174,7 @@ void fileWaveformProvider(const char* path, int16_t* outData, uint32_t maxSample
         count = maxSamples;
     }
     *actualSamples = count;
+    return WaveformStatus::Ok;
 }
 
 void showZoneWaveform(int zoneIdx) {

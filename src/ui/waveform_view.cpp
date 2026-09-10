@@ -4,6 +4,7 @@
 
 #include "crosspad-sampler/ui/waveform_view.hpp"
 #include "crosspad-sampler/SamplerConfig.hpp"
+#include "crosspad-gui/crosspad_gui.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -27,6 +28,22 @@ static int16_t s_waveformBuf[WAVEFORM_CANVAS_WIDTH];
 
 /// Canvas pixel buffer — allocated from PSRAM on first use to avoid wasting DRAM.
 static uint8_t* cbuf = nullptr;
+
+/* What is on screen while it says "loading". The view retries on its own
+ * timer rather than waiting for whichever panel owns it to tick: a waveform
+ * that lands has to appear without the pad being pressed again, and both the
+ * sampler panel and the pad editor redraw on schedules of their own. */
+static lv_obj_t*  s_pendingView  = nullptr;
+static lv_timer_t* s_pendingTimer = nullptr;
+static bool       s_pendingIsFile = false;
+static uint8_t    s_pendingPad   = 0;
+static uint8_t    s_pendingSlot  = 0;
+static char       s_pendingPath[160] = {};
+
+static constexpr uint32_t kPendingPollMs = 300;
+
+static void pending_stop();
+static void pending_poll_cb(lv_timer_t*);
 static constexpr uint32_t CBUF_BYTES = LV_CANVAS_BUF_SIZE(WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT, 16, 1);
 
 // ── Helper: convert uint32_t 0xRRGGBB to lv_color_t ─────────────────────
@@ -111,10 +128,55 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
     lv_obj_add_flag(endMarker, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(endMarker, LV_OBJ_FLAG_CLICKABLE);
 
+    // "loading", child 4, over the canvas. The turning ring for this is the
+    // status bar's, driven from the panel; the canvas only says what it is
+    // waiting for. Hidden until a provider answers Pending.
+    lv_obj_t* pending = lv_label_create(cont);
+    lv_label_set_text(pending, "loading");
+    lv_obj_set_style_text_color(pending, lv_color_hex(0x808080), LV_PART_MAIN);
+    lv_obj_center(pending);
+    lv_obj_add_flag(pending, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(pending, LV_OBJ_FLAG_CLICKABLE);
+
+    // The poll holds a raw pointer to this view; its owner is free to delete
+    // it at any time, and an app teardown does.
+    lv_obj_add_event_cb(cont, [](lv_event_t* e) {
+        if (s_pendingView == (lv_obj_t*)lv_event_get_target(e)) pending_stop();
+    }, LV_EVENT_DELETE, nullptr);
+
     return cont;
 }
 
 // Redraw the canvas from the first @p actualSamples entries of s_waveformBuf.
+static void pending_stop()
+{
+    if (s_pendingTimer) { lv_timer_delete(s_pendingTimer); s_pendingTimer = nullptr; }
+    s_pendingView = nullptr;
+    s_pendingPath[0] = '\0';
+}
+
+/// Show or hide the "loading" label, child 4. An empty box means "this pad
+/// holds nothing"; a waveform on its way says so instead. While it is up, a
+/// timer re-asks the provider so the drawing replaces it by itself.
+static void set_pending_label(lv_obj_t* waveformView, bool pending)
+{
+    lv_obj_t* label = lv_obj_get_child(waveformView, 4);
+    if (label) {
+        if (pending) lv_obj_remove_flag(label, LV_OBJ_FLAG_HIDDEN);
+        else         lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    if (!pending) {
+        if (s_pendingView == waveformView) pending_stop();
+        return;
+    }
+
+    s_pendingView = waveformView;
+    if (!s_pendingTimer) {
+        s_pendingTimer = lv_timer_create(pending_poll_cb, kPendingPollMs, nullptr);
+    }
+}
+
 static void draw_from_buffer(lv_obj_t* waveformView, uint32_t actualSamples)
 {
     lv_obj_t* canvas = lv_obj_get_child(waveformView, 0);
@@ -167,11 +229,16 @@ void waveform_view_load(lv_obj_t* waveformView, uint8_t padIdx, uint8_t sampleSl
 
     // Fetch sample data downsampled to WAVEFORM_CANVAS_WIDTH columns.
     uint32_t actualSamples = 0;
-    s_provider(padIdx, sampleSlot,
+    const WaveformStatus st = s_provider(padIdx, sampleSlot,
                s_waveformBuf, static_cast<uint32_t>(WAVEFORM_CANVAS_WIDTH),
                &actualSamples, s_userData);
 
+    s_pendingIsFile = false;
+    s_pendingPad    = padIdx;
+    s_pendingSlot   = sampleSlot;
+
     draw_from_buffer(waveformView, actualSamples);
+    set_pending_label(waveformView, st == WaveformStatus::Pending);
 }
 
 void waveform_view_load_file(lv_obj_t* waveformView, const char* path)
@@ -180,10 +247,24 @@ void waveform_view_load_file(lv_obj_t* waveformView, const char* path)
     if (!lv_obj_get_child(waveformView, 0)) return;
 
     uint32_t actualSamples = 0;
-    s_fileProvider(path, s_waveformBuf, static_cast<uint32_t>(WAVEFORM_CANVAS_WIDTH),
-                   &actualSamples, s_fileUserData);
+    const WaveformStatus st =
+        s_fileProvider(path, s_waveformBuf, static_cast<uint32_t>(WAVEFORM_CANVAS_WIDTH),
+                       &actualSamples, s_fileUserData);
+
+    s_pendingIsFile = true;
+    snprintf(s_pendingPath, sizeof(s_pendingPath), "%s", path);
 
     draw_from_buffer(waveformView, actualSamples);
+    set_pending_label(waveformView, st == WaveformStatus::Pending);
+}
+
+static void pending_poll_cb(lv_timer_t*)
+{
+    lv_obj_t* view = s_pendingView;
+    if (!view) { pending_stop(); return; }
+
+    if (s_pendingIsFile) waveform_view_load_file(view, s_pendingPath);
+    else                 waveform_view_load(view, s_pendingPad, s_pendingSlot);
 }
 
 void waveform_view_clear(lv_obj_t* waveformView)
@@ -193,8 +274,10 @@ void waveform_view_clear(lv_obj_t* waveformView)
         lv_canvas_fill_bg(canvas, lv_color_hex(0x111111), LV_OPA_COVER);
     }
 
-    // Hide all markers and the playhead.
-    for (int i = 1; i <= 3; ++i) {
+    if (s_pendingView == waveformView) pending_stop();
+
+    // Hide the markers, the playhead and the loading label.
+    for (int i = 1; i <= 4; ++i) {
         lv_obj_t* child = lv_obj_get_child(waveformView, i);
         if (child) {
             lv_obj_add_flag(child, LV_OBJ_FLAG_HIDDEN);

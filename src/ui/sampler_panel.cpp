@@ -9,6 +9,7 @@
 #include "crosspad-sampler/ui/pad_editor.hpp"
 #include "crosspad-sampler/ui/pitched_editor.hpp"
 #include "crosspad-sampler/waveform/waveform_cache.hpp"
+#include "crosspad-sampler/logic/kit_load_task.hpp"
 #include "crosspad-sampler/waveform/waveform_loader.hpp"
 
 // crosspad-gui
@@ -634,13 +635,31 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
         lv_subject_copy_string(&s_audio_time, "0:00:0");
     }
 
+    /* The status bar's loading ring, the one the kit loader drives, says how
+     * far the waveforms are too — otherwise the only way to know a pad had
+     * arrived was to press it. The kit load owns the ring while it runs. */
+    if (!kit_load_task_is_loading()) {
+        static int lastRing = -2;
+        const int ring = waveform_loader_progress();
+        if (ring != lastRing) {
+            lastRing = ring;
+            crosspad_gui::statusbar_set_loading(ring);
+        }
+    }
+
     uint8_t pad = lv_subject_get_int(&s_pad_sampler);
     static uint8_t lastDisplayedPad = 0; // Track which pad was last displayed
     static uint8_t lastDisplayedSampleIdx = 255; // Track last sample index displayed
 
     // A waveform the loader was asked for: redraw as soon as it is cached.
-    if (waveformPending && waveformCanvas && lastDisplayedPad > 0
-        && lastDisplayedSampleIdx != 255) {
+    // The cache generation, not a shared flag — the pad editor draws from the
+    // same provider, and whichever view ticked first used to eat the flag and
+    // leave the other one showing an empty box for good.
+    static uint32_t lastDrawnWaveformGen = 0;
+    const uint32_t waveformGen = waveform_cache_generation();
+    if (waveformPending && waveformGen != lastDrawnWaveformGen
+        && waveformCanvas && lastDisplayedPad > 0 && lastDisplayedSampleIdx != 255) {
+        lastDrawnWaveformGen = waveformGen;
         waveformPending = false;   // the provider sets it again on a miss
         waveform_view_load(waveformCanvas, lastDisplayedPad - 1, lastDisplayedSampleIdx);
     }
@@ -779,11 +798,11 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
 
         auto* mgr = crosspad::getKitManager();
         auto* kit = mgr ? mgr->getCurrentKit() : nullptr;
-        if (!kit || padIdx >= KIT_PADS) return;
-        if (sampleSlot >= kit->pads[padIdx].samples.size()) return;
+        if (!kit || padIdx >= KIT_PADS) return WaveformStatus::NoSample;
+        if (sampleSlot >= kit->pads[padIdx].samples.size()) return WaveformStatus::NoSample;
 
         std::string resolvedSample = crosspad::resolveKitSamplePath(kit->path, kit->pads[padIdx].samples[sampleSlot].sample);
-        if (resolvedSample.empty()) return;
+        if (resolvedSample.empty()) return WaveformStatus::NoSample;
         const char* fullPath = resolvedSample.c_str();
 
         // A cache miss is a request, not a blank.
@@ -792,7 +811,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
             waveform_loader_start();
             waveform_loader_request(fullPath, true, padIdx, 0, 0);
             waveformPending = true;
-            return;
+            return WaveformStatus::Pending;
         }
 
         uint32_t count = entry->sampleCount < maxSamples ? entry->sampleCount : maxSamples;
@@ -806,6 +825,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
             count = maxSamples;
         }
         *actualSamples = count;
+        return WaveformStatus::Ok;
     }, nullptr);
     g_sampler = lv_group_create(); // create the group for the sampler buttons
     lv_indev_t * navEncoder = crosspad_gui::getGuiPlatform().getNavigationEncoder();

@@ -8,6 +8,15 @@
 
 namespace crosspad_sampler {
 
+/// What a provider found. A view that draws an empty box for both "no sample
+/// here" and "the loader has not read it yet" is why nobody could tell whether
+/// a pad had arrived without hitting it.
+enum class WaveformStatus : uint8_t {
+    Ok = 0,      ///< samples were written
+    Pending,     ///< not cached yet; the provider has asked the loader for it
+    NoSample,    ///< the slot holds nothing to draw
+};
+
 /// Callback used to fill a buffer with PCM sample data for a given pad/slot.
 /// @param padIdx       Index of the pad (0–15).
 /// @param sampleSlot   Sample slot index within the pad.
@@ -15,9 +24,9 @@ namespace crosspad_sampler {
 /// @param maxSamples   Capacity of outData (number of int16_t elements).
 /// @param actualSamples Set to the number of samples written into outData.
 /// @param userData     Opaque pointer passed to waveform_view_set_provider().
-using WaveformDataProvider = void (*)(uint8_t padIdx, uint8_t sampleSlot,
-                                      int16_t* outData, uint32_t maxSamples,
-                                      uint32_t* actualSamples, void* userData);
+using WaveformDataProvider = WaveformStatus (*)(uint8_t padIdx, uint8_t sampleSlot,
+                                                int16_t* outData, uint32_t maxSamples,
+                                                uint32_t* actualSamples, void* userData);
 
 /// Register the data provider used by waveform_view_load().
 /// Must be called before any waveform_view_load() call.
@@ -33,9 +42,9 @@ void waveform_view_set_provider(WaveformDataProvider fn, void* userData);
 /// @param maxSamples    Capacity of outData (number of int16_t elements).
 /// @param actualSamples Set to the number of samples written into outData.
 /// @param userData      Opaque pointer passed to waveform_view_set_file_provider().
-using WaveformFileProvider = void (*)(const char* path, int16_t* outData,
-                                      uint32_t maxSamples, uint32_t* actualSamples,
-                                      void* userData);
+using WaveformFileProvider = WaveformStatus (*)(const char* path, int16_t* outData,
+                                                uint32_t maxSamples, uint32_t* actualSamples,
+                                                void* userData);
 
 /// Register the provider used by waveform_view_load_file().
 /// @param fn       Provider callback (may be nullptr to disable loading).
@@ -49,6 +58,8 @@ void waveform_view_set_file_provider(WaveformFileProvider fn, void* userData);
 ///   1 – playhead   (2 px wide red vertical line, initially hidden)
 ///   2 – start marker (2 px wide green vertical line, initially hidden)
 ///   3 – end marker   (2 px wide red vertical line, initially hidden)
+///   4 – "loading" label (shown while the provider answers Pending; the
+///       turning ring for it is the status bar's)
 /// @return Pointer to the container lv_obj_t.
 lv_obj_t* waveform_view_create(lv_obj_t* parent);
 

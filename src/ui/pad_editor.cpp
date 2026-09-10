@@ -6,6 +6,7 @@
 #include "crosspad-sampler/SamplerPlatformCallbacks.hpp"
 #include "crosspad-sampler/SamplerConfig.hpp"
 #include "crosspad-sampler/ui/waveform_view.hpp"
+#include "crosspad-sampler/waveform/waveform_cache.hpp"
 
 #include "crosspad-gui/crosspad_gui.h"
 
@@ -894,8 +895,22 @@ static void UpdatePadEditor(lv_timer_t * e) {
         }
     }
 
-    if (pad == lastPad) return;
+    // The pad did not change, but a waveform that was still loading when it was
+    // selected lands in the cache later. Redraw on that, otherwise the canvas
+    // keeps the empty draw until the user leaves the pad and comes back.
+    static uint32_t lastDrawnWaveformGen = 0;
+    const uint32_t waveformGen = waveform_cache_generation();
+    if (pad == lastPad) {
+        if (waveformGen != lastDrawnWaveformGen) {
+            lastDrawnWaveformGen = waveformGen;
+            if (waveformView && pad->GetSampleCount() > 0) {
+                waveform_view_load(waveformView, (padId - 1) % 16, 0);
+            }
+        }
+        return;
+    }
     lastPad = pad;
+    lastDrawnWaveformGen = waveformGen;
 
     applyPadEditorLeds((padId - 1) % 16);
 
