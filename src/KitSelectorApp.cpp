@@ -27,7 +27,13 @@ static void on_kit_selected(int kitId, void* /*userData*/) {
     auto* kitMgr = crosspad::getPlatformServices().kitManager;
     if (kitMgr) {
         auto* kit = kitMgr->getKit(kitId);
-        crosspad_sampler::waveform_loader_stop();
+        /* The loader is not stopped here any more. Its stack is 6 kB of
+         * internal RAM in one piece, and by the time a kit is picked the
+         * largest free internal block is often smaller than that: the task
+         * died on every kit pick and the restart failed silently, so the kit
+         * ended up with no waveform at all. It stays alive; the queue is
+         * cleared inside clear_if_kit_changed(), which is what the stop was
+         * really for. */
         crosspad_sampler::waveform_cache_clear_if_kit_changed(
             kit, kit ? kit->path.c_str() : nullptr);
     }

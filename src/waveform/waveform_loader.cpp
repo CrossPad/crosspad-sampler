@@ -14,6 +14,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#if !defined(ARDUINO)
+#include "esp_heap_caps.h"
+#endif
 
 #include <cstring>
 #include <cstdio>
@@ -38,12 +41,23 @@ struct WaveformLoadRequest {
 constexpr uint8_t  kMaxAttempts  = 4;
 constexpr uint32_t kRetryDelayMs = 150;
 
+/* A request that meets a full queue is lost, and nothing used to ask for it
+ * again: a kit with more layers than the queue, or one loaded while the queue
+ * still held the last kit's, simply never got those waveforms for as long as
+ * it stayed loaded. So the queue running dry is a cue to walk the current kit
+ * again. The budget is per kit — a layer whose file is broken fails for good,
+ * and re-queueing it forever would be a card read every second. */
+constexpr uint32_t kSweepIdleMs  = 1000;
+constexpr uint8_t  kSweepBudget  = 8;
+
 // ── FreeRTOS state ──────────────────────────────────────────────────────
 
 static TaskHandle_t   s_task    = nullptr;
 static QueueHandle_t  s_queue   = nullptr;
 static volatile bool  s_running = false;
 static WaveformLoaderStats s_stats;
+static uint8_t s_sweepsLeft = kSweepBudget;   // loader task + clear_queue only
+static uint32_t s_kitRequested = 0;           // requests since this kit was picked
 
 static void requeue_or_fail(WaveformLoadRequest& req, uint32_t& failCounter) {
     if (req.attempt + 1 < kMaxAttempts) {
@@ -66,7 +80,15 @@ static void loader_task(void* /*param*/) {
     WaveformLoadRequest req;
 
     while (s_running) {
-        if (!xQueueReceive(s_queue, &req, portMAX_DELAY)) continue;
+        if (!xQueueReceive(s_queue, &req, pdMS_TO_TICKS(kSweepIdleMs))) {
+            // Nothing waiting: top up from the kit, then block again.
+            if (s_running && s_sweepsLeft > 0) {
+                s_stats.sweeps++;
+                if (waveform_loader_preload_kit(16) == 0) s_sweepsLeft = 0;
+                else                                      s_sweepsLeft--;
+            }
+            continue;
+        }
 
         if (!s_running || req.filename[0] == '\0') break;
 
@@ -126,6 +148,16 @@ static void loader_task(void* /*param*/) {
             break;
         }
 
+        /* A read the platform abandoned because a kit load started is not a
+         * failed read: it must not burn one of the four attempts, or a long
+         * load would spend them all and lose the layer. */
+        if (!ok && kit_load_task_is_loading()) {
+            if (cbs.freeWaveformMem) cbs.freeWaveformMem(buf); else free(buf);
+            while (s_running && kit_load_task_is_loading()) vTaskDelay(pdMS_TO_TICKS(50));
+            if (xQueueSend(s_queue, &req, 0) != pdTRUE) s_stats.dropped++;
+            continue;
+        }
+
         if (ok && waveform_cache_add(req.filename, buf, samplesToRead)) {
             s_stats.loaded++;
         } else {
@@ -144,7 +176,11 @@ static void loader_task(void* /*param*/) {
 
     s_running = false;
     s_task = nullptr;
+#if defined(ARDUINO)
     vTaskDelete(nullptr);
+#else
+    vTaskDeleteWithCaps(nullptr);
+#endif
 }
 
 // ── Public API ──────────────────────────────────────────────────────────
@@ -157,12 +193,30 @@ bool waveform_loader_start() {
         if (!s_queue) return false;
     }
 
+    /* Stack from PSRAM, the way kit_load takes its. 6 kB of internal RAM in
+     * one piece is more than the launcher with a kit up tends to have left:
+     * the create failed, the queue filled behind it and the kit had no
+     * waveform at all. A task created WithCaps must be deleted WithCaps. */
+#if defined(ARDUINO)
     BaseType_t r = xTaskCreatePinnedToCore(
         loader_task, "WFLoader",
         LOADER_STACK_SIZE, nullptr,
         LOADER_PRIORITY, &s_task, LOADER_CORE);
+#else
+    BaseType_t r = xTaskCreatePinnedToCoreWithCaps(
+        loader_task, "WFLoader",
+        LOADER_STACK_SIZE, nullptr,
+        LOADER_PRIORITY, &s_task, LOADER_CORE,
+        MALLOC_CAP_SPIRAM);
+#endif
 
     if (r == pdPASS) { s_running = true; return true; }
+
+    /* 6 kB of internal RAM in one piece, and the launcher with a kit up has
+     * had less than that. A failure here used to be a false nobody read: the
+     * queue filled, WAVE_STATUS said loader=0 and the kit had no waveforms. */
+    s_stats.startFail++;
+    printf("[WFLoader] task create failed (stack %d B internal)\n", LOADER_STACK_SIZE);
     return false;
 }
 
@@ -174,13 +228,24 @@ void waveform_loader_stop() {
     xQueueSend(s_queue, &term, 0);
 
     for (int i = 0; i < 50 && s_task; i++) vTaskDelay(pdMS_TO_TICKS(10));
-    if (s_task) { vTaskDelete(s_task); s_task = nullptr; }
+    if (s_task) {
+#if defined(ARDUINO)
+        vTaskDelete(s_task);
+#else
+        vTaskDeleteWithCaps(s_task);
+#endif
+        s_task = nullptr;
+    }
 }
 
 void waveform_loader_request(const char* filename, bool highPriority,
                               uint8_t padIndex,
                               uint32_t sampleStart, uint32_t sampleEnd) {
-    if (!filename || !s_queue) return;
+    if (!filename) return;
+    // Self-heal: a request is also the cue to bring the task back if a
+    // previous create failed for want of internal RAM.
+    if (!s_running) waveform_loader_start();
+    if (!s_queue) return;
     if (waveform_cache_find(filename)) return;
 
     WaveformLoadRequest req = {};
@@ -194,11 +259,12 @@ void waveform_loader_request(const char* filename, bool highPriority,
     const BaseType_t sent = highPriority
         ? xQueueSendToFront(s_queue, &req, 0)
         : xQueueSend(s_queue, &req, 0);
-    if (sent == pdTRUE) s_stats.requested++;
+    if (sent == pdTRUE) { s_stats.requested++; s_kitRequested++; }
     else                s_stats.dropped++;
 }
 
 int waveform_loader_preload_kit(int maxPads) {
+    if (!s_running) waveform_loader_start();
     if (!s_queue) return 0;
 
     auto* mgr = crosspad::getPlatformServices().kitManager;
@@ -231,6 +297,16 @@ bool waveform_loader_is_running() {
 
 void waveform_loader_clear_queue() {
     if (s_queue) xQueueReset(s_queue);
+    s_sweepsLeft = kSweepBudget;   // a new kit gets its own budget
+    s_kitRequested = 0;
+}
+
+int waveform_loader_progress() {
+    if (!s_queue || s_kitRequested == 0) return -1;
+    const uint32_t left = (uint32_t)uxQueueMessagesWaiting(s_queue);
+    if (left == 0) return -1;
+    const uint32_t done = (left >= s_kitRequested) ? 0 : (s_kitRequested - left);
+    return (int)(done * 100 / s_kitRequested);
 }
 
 void waveform_loader_get_stats(WaveformLoaderStats* out) {

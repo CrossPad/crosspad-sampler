@@ -53,6 +53,17 @@ WaveformCacheEntry* waveform_cache_find(const char* filename);
 /// Thread-safe insert.  Uses LRU eviction when full.
 bool waveform_cache_add(const char* filename, int16_t* waveform, uint32_t sampleCount);
 
+/// Is this waveform cached? Never waits for the mutex and does not touch LRU:
+/// for a caller that must not block, such as the prio-1 CDC drain loop, where
+/// one WAVE_STATUS walking a kit through waveform_cache_find() took 1.96 s.
+/// A false while the loader holds the lock is a "don't know", not a "no".
+bool waveform_cache_contains(const char* filename);
+
+/// Bumped whenever the set of cached waveforms changes (insert, clear, disk
+/// load). A view that drew a miss compares it against its own last value and
+/// redraws, instead of every view fighting over one shared "pending" flag.
+uint32_t waveform_cache_generation();
+
 /// Statistics.
 void waveform_cache_get_stats(int* loaded, int* total);
 

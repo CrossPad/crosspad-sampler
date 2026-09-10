@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: MIT
 
 #include "crosspad-sampler/waveform/waveform_cache.hpp"
+#include "crosspad-sampler/waveform/waveform_loader.hpp"
 #include "crosspad-sampler/SamplerConfig.hpp"
 #include "crosspad-sampler/SamplerPlatformCallbacks.hpp"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+#include <atomic>
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
@@ -26,6 +28,7 @@ static void*              s_cachedKit        = nullptr;
 static char               s_cachedKitPath[256] = {};
 static bool               s_savedThisBatch   = false;
 static SemaphoreHandle_t  s_mutex            = nullptr;
+static std::atomic<uint32_t> s_generation{0};
 
 // ── Memory helpers — route through platform callbacks if available ──────
 
@@ -103,12 +106,19 @@ void waveform_cache_init() {
 
     totalWaveformsToCache = 0;
     waveformsCached = 0;
+    s_generation.fetch_add(1);
 }
 
 bool waveform_cache_clear_if_kit_changed(void* kitPtr, const char* kitPath) {
     if (s_cachedKit == kitPtr && kitPtr != nullptr) {
         return false;   // same kit — reuse
     }
+
+    /* The queue outlives the cache. Requests for the kit we are leaving would
+     * otherwise keep the loader busy with files nobody can see any more, and
+     * the new kit's own layers hit a full queue and are dropped — 274 of them
+     * in one 30-kit sweep, with the current kit at cached=0 throughout. */
+    waveform_loader_clear_queue();
 
     waveform_cache_init();
     s_cachedKit = kitPtr;
@@ -177,6 +187,7 @@ bool waveform_cache_add(const char* filename, int16_t* waveform, uint32_t sample
             entry->sampleCount = sampleCount;
             entry->valid = true;
             entry->lastUsed = ++s_timestamp;
+            s_generation.fetch_add(1);
             ok = true;
         }
         xSemaphoreGive(s_mutex);
@@ -185,6 +196,25 @@ bool waveform_cache_add(const char* filename, int16_t* waveform, uint32_t sample
     // itself, and it is not recursive.
     if (ok) waveform_cache_notify_cached();
     return ok;
+}
+
+bool waveform_cache_contains(const char* filename) {
+    if (!filename) return false;
+    bool found = false;
+    if (lock() && xSemaphoreTake(s_mutex, 0)) {
+        for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {
+            if (s_cache[i].valid && strcmp(s_cache[i].filename, filename) == 0) {
+                found = true;
+                break;
+            }
+        }
+        xSemaphoreGive(s_mutex);
+    }
+    return found;
+}
+
+uint32_t waveform_cache_generation() {
+    return s_generation.load();
 }
 
 void waveform_cache_get_stats(int* loaded, int* total) {
@@ -331,6 +361,7 @@ bool waveform_cache_load_from_disk(const char* kitJsonPath) {
                 entry->sampleCount = sampleCount;
                 entry->valid = true;
                 entry->lastUsed = ++s_timestamp;
+                s_generation.fetch_add(1);
                 loaded++;
             }
             xSemaphoreGive(s_mutex);

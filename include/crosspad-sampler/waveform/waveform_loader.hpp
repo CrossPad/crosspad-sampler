@@ -36,9 +36,16 @@ struct WaveformLoaderStats {
     uint32_t failedInfo = 0;   ///< header/open failed for good
     uint32_t failedRead = 0;   ///< sample read failed for good
     uint32_t allocFail  = 0;   ///< no memory for the temp buffer
+    uint32_t sweeps     = 0;   ///< queue ran dry, the kit was walked again
+    uint32_t startFail  = 0;   ///< the task could not be created (internal RAM)
     uint32_t queued     = 0;   ///< waiting right now
 };
 void waveform_loader_get_stats(WaveformLoaderStats* out);
+
+/// Progress over the requests made since the current kit was picked, 0..100,
+/// or -1 when there is nothing outstanding. Drives the status bar's loading
+/// ring, the same one the kit loader uses.
+int waveform_loader_progress();
 
 /// Clear pending load requests.
 void waveform_loader_clear_queue();
