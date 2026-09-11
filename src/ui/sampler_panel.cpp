@@ -28,6 +28,7 @@
 #include <crosspad/kit/KitPathUtils.hpp>
 #include <crosspad/event/IEventBus.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
+#include <crosspad/sequencer/SequencerController.hpp>
 #include <crosspad/platform/IClock.hpp>
 #include <crosspad/settings/CrosspadSettings.hpp>
 #include <crosspad/status/CrosspadStatus.hpp>
@@ -67,6 +68,45 @@ static lv_obj_t * pickKitBtn = NULL; // pick kit button
 static lv_obj_t * previewBtn = NULL;   // plays the kit's preview.mid, looping
 static lv_obj_t * previewLabel = NULL;
 static lv_timer_t * previewTimer = NULL;
+
+/* Loop recorder: record a take over the kit's own click, then let it run.
+ * Reached through PlatformServices, so this panel stays as portable as the
+ * rest of the sampler -- a platform with no sequencer simply has none of the
+ * buttons do anything, which is what the null checks are for. */
+static lv_obj_t * seqRecBtn = NULL;
+static lv_obj_t * seqRecLabel = NULL;
+static lv_obj_t * seqClickBtn = NULL;
+static lv_obj_t * seqBarsBtn = NULL;
+static lv_obj_t * seqBarsLabel = NULL;
+
+static crosspad::SequencerController * sequencer_or_null()
+{
+    return crosspad::getPlatformServices().sequencer;
+}
+
+static void seq_sync_labels()
+{
+    auto * sq = sequencer_or_null();
+    if (!sq || !seqRecLabel) return;
+
+    const bool running = sq->getState() == crosspad::SequencerState::Running;
+    const bool taking  = sq->isRecording();
+    /* The button says what the sequencer is doing, not what the next press
+     * would do -- the state is the thing a player needs to see mid-take. */
+    lv_label_set_text(seqRecLabel, !running ? "REC" : (taking ? "TAKE" : "LOOP"));
+    lv_obj_set_style_bg_color(seqRecBtn,
+        !running ? lv_color_hex(0xB0B0B0)
+                 : (taking ? lv_color_hex(0xE05050) : lv_color_hex(0x50C070)), 0);
+
+    if (seqClickBtn) {
+        lv_obj_set_style_bg_color(seqClickBtn,
+            sq->getClickActive() ? lv_color_hex(0x50C070) : lv_color_hex(0xB0B0B0), 0);
+    }
+    if (seqBarsLabel) {
+        const uint8_t bars = sq->getSeqLength() / 4 ? sq->getSeqLength() / 4 : 1;
+        lv_label_set_text_fmt(seqBarsLabel, "%ub", (unsigned)bars);
+    }
+}
 
 /// The button is the transport, so its face is the only state the user sees.
 static void preview_sync_label()
@@ -935,6 +975,82 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_obj_set_style_text_color(previewLabel, lv_color_hex(0x000000), 0);
     preview_sync_label();
     lv_group_add_obj(g_sampler, previewBtn);
+
+    /* Transport, one button: idle -> take -> loop -> idle. A looper has no use
+     * for separate play and stop buttons, and the row has no room for them. */
+    seqRecBtn = lv_button_create(cont);
+    lv_obj_set_size(seqRecBtn, 48, 28);
+    lv_obj_align_to(seqRecBtn, previewBtn, LV_ALIGN_OUT_LEFT_MID, -6, 0);
+    lv_obj_add_event_cb(seqRecBtn, [](lv_event_t * e) {
+        (void)e;
+        auto * sq = sequencer_or_null();
+        if (!sq) return;
+        if (sq->getState() != crosspad::SequencerState::Running) {
+            /* The kit's own tempo, the same number the preview beat plays at,
+             * so a take and the preview are the same groove. */
+            crosspad::KitInfo * kit = crosspad::getKitManager()
+                                        ? crosspad::getKitManager()->getCurrentKit() : nullptr;
+            if (kit && kit->bpm) sq->setBpm((float)kit->bpm);
+            sq->record();
+        } else if (sq->isRecording()) {
+            sq->playback();          // close the take, keep the loop running
+        } else {
+            sq->stop();
+        }
+        seq_sync_labels();
+    }, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_style(seqRecBtn, &styleButtonPressed, LV_STATE_PRESSED);
+    seqRecLabel = lv_label_create(seqRecBtn);
+    lv_obj_center(seqRecLabel);
+    lv_obj_set_style_text_color(seqRecLabel, lv_color_hex(0x000000), 0);
+    lv_group_add_obj(g_sampler, seqRecBtn);
+
+    /* The click is the reference the take is played against; it is never in the
+     * recording itself -- the metronome is routed to the speakers only, not to
+     * the USB capture bus. */
+    seqClickBtn = lv_button_create(cont);
+    lv_obj_set_size(seqClickBtn, 44, 28);
+    lv_obj_align_to(seqClickBtn, previewBtn, LV_ALIGN_OUT_RIGHT_MID, 6, 0);
+    lv_obj_add_event_cb(seqClickBtn, [](lv_event_t * e) {
+        (void)e;
+        auto * sq = sequencer_or_null();
+        if (!sq) return;
+        sq->setClickActive(!sq->getClickActive());
+        seq_sync_labels();
+    }, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_style(seqClickBtn, &styleButtonPressed, LV_STATE_PRESSED);
+    lv_obj_t * clkLabel = lv_label_create(seqClickBtn);
+    lv_label_set_text(clkLabel, "CLK");
+    lv_obj_center(clkLabel);
+    lv_obj_set_style_text_color(clkLabel, lv_color_hex(0x000000), 0);
+    lv_group_add_obj(g_sampler, seqClickBtn);
+
+    /* Loop length. Four bars is the ceiling because SequencerLimits caps a
+     * sequence at 16 beats -- the same limit the Arduino engine works to. */
+    seqBarsBtn = lv_button_create(cont);
+    lv_obj_set_size(seqBarsBtn, 40, 28);
+    lv_obj_align_to(seqBarsBtn, seqClickBtn, LV_ALIGN_OUT_RIGHT_MID, 6, 0);
+    lv_obj_add_event_cb(seqBarsBtn, [](lv_event_t * e) {
+        (void)e;
+        auto * sq = sequencer_or_null();
+        if (!sq) return;
+        const uint8_t bars = sq->getSeqLength() / 4;
+        const uint8_t next = (bars >= 4) ? 1 : (uint8_t)(bars * 2);
+        sq->setSeqLength((uint8_t)(next * 4));
+        seq_sync_labels();
+    }, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_style(seqBarsBtn, &styleButtonPressed, LV_STATE_PRESSED);
+    seqBarsLabel = lv_label_create(seqBarsBtn);
+    lv_obj_center(seqBarsLabel);
+    lv_obj_set_style_text_color(seqBarsLabel, lv_color_hex(0x000000), 0);
+    lv_group_add_obj(g_sampler, seqBarsBtn);
+    /* The loop deliberately keeps running when the panel closes -- it lives on
+     * its own task. Only the pointers to the widgets die with it. */
+    lv_obj_add_event_cb(seqRecBtn, [](lv_event_t * e) {
+        (void)e;
+        seqRecBtn = seqRecLabel = seqClickBtn = seqBarsBtn = seqBarsLabel = NULL;
+    }, LV_EVENT_DELETE, NULL);
+    seq_sync_labels();
     g_samplerPadEditorLogic = std::make_shared<PadEditorLogicHandler>();
     crosspad::getPadManager().registerPadLogic("Pad editor", g_samplerPadEditorLogic);
 
