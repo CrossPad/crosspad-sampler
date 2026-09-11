@@ -78,6 +78,9 @@ static lv_obj_t * seqRecLabel = NULL;
 static lv_obj_t * seqClickBtn = NULL;
 static lv_obj_t * seqBarsBtn = NULL;
 static lv_obj_t * seqBarsLabel = NULL;
+static lv_obj_t * seqSceneBtn = NULL;
+static lv_obj_t * seqSceneLabel = NULL;
+static lv_timer_t * seqSyncTimer = NULL;
 
 static crosspad::SequencerController * sequencer_or_null()
 {
@@ -102,9 +105,22 @@ static void seq_sync_labels()
         lv_obj_set_style_bg_color(seqClickBtn,
             sq->getClickActive() ? lv_color_hex(0x50C070) : lv_color_hex(0xB0B0B0), 0);
     }
+    const uint8_t active  = sq->getActiveScene();
+    const uint8_t pending = sq->getPendingScene();
+
     if (seqBarsLabel) {
-        const uint8_t bars = sq->getSeqLength() / 4 ? sq->getSeqLength() / 4 : 1;
+        /* The length of the scene that is sounding, not a global setting --
+         * each scene carries its own. */
+        const uint8_t bars = sq->getSceneBars(active) ? sq->getSceneBars(active) : 1;
         lv_label_set_text_fmt(seqBarsLabel, "%ub", (unsigned)bars);
+    }
+    if (seqSceneLabel) {
+        /* Shows the scene you asked for, with amber until the loop end hands
+         * it over -- a switch that has not happened yet must not look like one
+         * that has. */
+        lv_label_set_text_fmt(seqSceneLabel, "S%u", (unsigned)(pending + 1));
+        lv_obj_set_style_bg_color(seqSceneBtn,
+            pending == active ? lv_color_hex(0xB0B0B0) : lv_color_hex(0xE0A050), 0);
     }
 }
 
@@ -1025,8 +1041,8 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_obj_set_style_text_color(clkLabel, lv_color_hex(0x000000), 0);
     lv_group_add_obj(g_sampler, seqClickBtn);
 
-    /* Loop length. Four bars is the ceiling because SequencerLimits caps a
-     * sequence at 16 beats -- the same limit the Arduino engine works to. */
+    /* Loop length of the scene that is sounding. Applied at once: this is the
+     * loop the click counts, so the two cannot disagree. */
     seqBarsBtn = lv_button_create(cont);
     lv_obj_set_size(seqBarsBtn, 40, 28);
     lv_obj_align_to(seqBarsBtn, seqClickBtn, LV_ALIGN_OUT_RIGHT_MID, 6, 0);
@@ -1034,9 +1050,10 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
-        const uint8_t bars = sq->getSeqLength() / 4;
-        const uint8_t next = (bars >= 4) ? 1 : (uint8_t)(bars * 2);
-        sq->setSeqLength((uint8_t)(next * 4));
+        const uint8_t active = sq->getActiveScene();
+        const uint8_t bars = sq->getSceneBars(active);
+        const uint8_t next = (bars >= 8) ? 1 : (uint8_t)(bars ? bars * 2 : 1);
+        sq->setSceneBars(active, next);
         seq_sync_labels();
     }, LV_EVENT_CLICKED, NULL);
     lv_obj_add_style(seqBarsBtn, &styleButtonPressed, LV_STATE_PRESSED);
@@ -1044,11 +1061,40 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_obj_center(seqBarsLabel);
     lv_obj_set_style_text_color(seqBarsLabel, lv_color_hex(0x000000), 0);
     lv_group_add_obj(g_sampler, seqBarsBtn);
+
+    /* Scene. Several patterns live in one kit and this steps through them; the
+     * swap itself waits for the loop end, which is why the label goes amber in
+     * between rather than changing straight away. */
+    seqSceneBtn = lv_button_create(cont);
+    lv_obj_set_size(seqSceneBtn, 40, 28);
+    lv_obj_align_to(seqSceneBtn, seqBarsBtn, LV_ALIGN_OUT_RIGHT_MID, 6, 0);
+    lv_obj_add_event_cb(seqSceneBtn, [](lv_event_t * e) {
+        (void)e;
+        auto * sq = sequencer_or_null();
+        if (!sq) return;
+        const uint8_t from = sq->getPendingScene();
+        sq->selectScene((uint8_t)((from + 1) % (crosspad::SequencerLimits::MAX_SEQ_INDEX + 1)));
+        seq_sync_labels();
+    }, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_style(seqSceneBtn, &styleButtonPressed, LV_STATE_PRESSED);
+    seqSceneLabel = lv_label_create(seqSceneBtn);
+    lv_obj_center(seqSceneLabel);
+    lv_obj_set_style_text_color(seqSceneLabel, lv_color_hex(0x000000), 0);
+    lv_group_add_obj(g_sampler, seqSceneBtn);
+
+    /* A queued scene becomes active at a loop end nobody clicked, so the
+     * labels have to be refreshed by time rather than by event. */
+    if (!seqSyncTimer) {
+        seqSyncTimer = lv_timer_create([](lv_timer_t *) { seq_sync_labels(); }, 200, nullptr);
+    }
+
     /* The loop deliberately keeps running when the panel closes -- it lives on
      * its own task. Only the pointers to the widgets die with it. */
     lv_obj_add_event_cb(seqRecBtn, [](lv_event_t * e) {
         (void)e;
         seqRecBtn = seqRecLabel = seqClickBtn = seqBarsBtn = seqBarsLabel = NULL;
+        seqSceneBtn = seqSceneLabel = NULL;
+        if (seqSyncTimer) { lv_timer_delete(seqSyncTimer); seqSyncTimer = NULL; }
     }, LV_EVENT_DELETE, NULL);
     seq_sync_labels();
     g_samplerPadEditorLogic = std::make_shared<PadEditorLogicHandler>();
