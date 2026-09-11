@@ -78,6 +78,9 @@ static lv_obj_t * seqRecLabel = NULL;
 static lv_obj_t * seqClickBtn = NULL;
 static lv_obj_t * seqBarsBtn = NULL;
 static lv_obj_t * seqBarsLabel = NULL;
+static lv_obj_t * seqDubBtn = NULL;
+static lv_obj_t * seqPlayBtn = NULL;
+static lv_obj_t * seqStopBtn = NULL;
 static lv_obj_t * seqSceneDrop = NULL;   // sits above the waveform
 static lv_timer_t * seqSyncTimer = NULL;
 
@@ -89,20 +92,28 @@ static crosspad::SequencerController * sequencer_or_null()
 static void seq_sync_labels()
 {
     auto * sq = sequencer_or_null();
-    if (!sq || !seqRecLabel) return;
+    if (!sq || !seqRecBtn) return;
+
+    const lv_color_t idle = lv_color_hex(0xB0B0B0);
+    const lv_color_t live = lv_color_hex(0xE05050);
+    const lv_color_t go   = lv_color_hex(0x50C070);
 
     const bool running = sq->getState() == crosspad::SequencerState::Running;
-    const bool taking  = sq->isRecording();
-    /* The button says what the sequencer is doing, not what the next press
-     * would do -- the state is the thing a player needs to see mid-take. */
-    lv_label_set_text(seqRecLabel, !running ? "REC" : (taking ? "TAKE" : "LOOP"));
-    lv_obj_set_style_bg_color(seqRecBtn,
-        !running ? lv_color_hex(0xB0B0B0)
-                 : (taking ? lv_color_hex(0xE05050) : lv_color_hex(0x50C070)), 0);
+    const auto mode    = sq->getMode();
+    const bool rec = running && mode == crosspad::SequencerMode::Record;
+    const bool dub = running && mode == crosspad::SequencerMode::Overdub;
+
+    /* Each button carries its own state now that they are four: which one is
+     * lit says what the sequencer is doing, and the labels stay put so a
+     * player is not reading text mid-take. */
+    lv_obj_set_style_bg_color(seqRecBtn, rec ? live : idle, 0);
+    if (seqDubBtn)  lv_obj_set_style_bg_color(seqDubBtn,  dub ? live : idle, 0);
+    if (seqPlayBtn) lv_obj_set_style_bg_color(seqPlayBtn,
+                        (running && !rec && !dub) ? go : idle, 0);
+    if (seqStopBtn) lv_obj_set_style_bg_color(seqStopBtn, idle, 0);
 
     if (seqClickBtn) {
-        lv_obj_set_style_bg_color(seqClickBtn,
-            sq->getClickActive() ? lv_color_hex(0x50C070) : lv_color_hex(0xB0B0B0), 0);
+        lv_obj_set_style_bg_color(seqClickBtn, sq->getClickActive() ? go : idle, 0);
     }
     const uint8_t active  = sq->getActiveScene();
     const uint8_t pending = sq->getPendingScene();
@@ -204,6 +215,25 @@ static const int notes[] = {13, 14, 15, 16, 9, 10, 11, 12, 5, 6, 7, 8, 1, 2, 3, 
 
 static lv_timer_t * timerPad = NULL;
 static lv_group_t * g_sampler = NULL; // group for the sampler buttons
+
+/* Every sequencer button is the same shape; only the text and what it does
+ * differ, so the shape is written once. */
+static lv_obj_t * seq_make_button(lv_obj_t * parent, int w, int h, const char * text,
+                                  lv_event_cb_t cb)
+{
+    lv_obj_t * b = lv_button_create(parent);
+    lv_obj_set_size(b, w, h);
+    lv_obj_add_style(b, &styleButtonPressed, LV_STATE_PRESSED);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * l = lv_label_create(b);
+    lv_label_set_text(l, text);
+    lv_obj_center(l);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(0x000000), 0);
+    if (g_sampler) lv_group_add_obj(g_sampler, b);
+    return b;
+}
+
 static void (*s_on_back)() = nullptr; // back button callback (calls app->destroyApp())
 
 // One callback for press, release and click, switched on the playback mode.
@@ -996,92 +1026,6 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     preview_sync_label();
     lv_group_add_obj(g_sampler, previewBtn);
 
-    /* Transport, one button: idle -> take -> loop -> idle. A looper has no use
-     * for separate play and stop buttons, and the row has no room for them. */
-    seqRecBtn = lv_button_create(cont);
-    lv_obj_set_size(seqRecBtn, 48, 28);
-    lv_obj_align_to(seqRecBtn, previewBtn, LV_ALIGN_OUT_LEFT_MID, -6, 0);
-    lv_obj_add_event_cb(seqRecBtn, [](lv_event_t * e) {
-        (void)e;
-        auto * sq = sequencer_or_null();
-        if (!sq) return;
-        if (sq->getState() != crosspad::SequencerState::Running) {
-            /* The kit's own tempo, the same number the preview beat plays at,
-             * so a take and the preview are the same groove. */
-            crosspad::KitInfo * kit = crosspad::getKitManager()
-                                        ? crosspad::getKitManager()->getCurrentKit() : nullptr;
-            if (kit && kit->bpm) sq->setBpm((float)kit->bpm);
-            sq->record();
-        } else if (sq->isRecording()) {
-            sq->playback();          // close the take, keep the loop running
-        } else {
-            sq->stop();
-        }
-        seq_sync_labels();
-    }, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_style(seqRecBtn, &styleButtonPressed, LV_STATE_PRESSED);
-    seqRecLabel = lv_label_create(seqRecBtn);
-    lv_obj_center(seqRecLabel);
-    lv_obj_set_style_text_color(seqRecLabel, lv_color_hex(0x000000), 0);
-    lv_group_add_obj(g_sampler, seqRecBtn);
-
-    /* The click is the reference the take is played against; it is never in the
-     * recording itself -- the metronome is routed to the speakers only, not to
-     * the USB capture bus. */
-    seqClickBtn = lv_button_create(cont);
-    lv_obj_set_size(seqClickBtn, 44, 28);
-    lv_obj_align_to(seqClickBtn, previewBtn, LV_ALIGN_OUT_RIGHT_MID, 6, 0);
-    lv_obj_add_event_cb(seqClickBtn, [](lv_event_t * e) {
-        (void)e;
-        auto * sq = sequencer_or_null();
-        if (!sq) return;
-        sq->setClickActive(!sq->getClickActive());
-        seq_sync_labels();
-    }, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_style(seqClickBtn, &styleButtonPressed, LV_STATE_PRESSED);
-    lv_obj_t * clkLabel = lv_label_create(seqClickBtn);
-    lv_label_set_text(clkLabel, "CLK");
-    lv_obj_center(clkLabel);
-    lv_obj_set_style_text_color(clkLabel, lv_color_hex(0x000000), 0);
-    lv_group_add_obj(g_sampler, seqClickBtn);
-
-    /* Loop length of the scene that is sounding. Applied at once: this is the
-     * loop the click counts, so the two cannot disagree. */
-    seqBarsBtn = lv_button_create(cont);
-    lv_obj_set_size(seqBarsBtn, 40, 28);
-    lv_obj_align_to(seqBarsBtn, seqClickBtn, LV_ALIGN_OUT_RIGHT_MID, 6, 0);
-    lv_obj_add_event_cb(seqBarsBtn, [](lv_event_t * e) {
-        (void)e;
-        auto * sq = sequencer_or_null();
-        if (!sq) return;
-        const uint8_t active = sq->getActiveScene();
-        const uint8_t bars = sq->getSceneBars(active);
-        const uint8_t next = (bars >= 8) ? 1 : (uint8_t)(bars ? bars * 2 : 1);
-        sq->setSceneBars(active, next);
-        seq_sync_labels();
-    }, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_style(seqBarsBtn, &styleButtonPressed, LV_STATE_PRESSED);
-    seqBarsLabel = lv_label_create(seqBarsBtn);
-    lv_obj_center(seqBarsLabel);
-    lv_obj_set_style_text_color(seqBarsLabel, lv_color_hex(0x000000), 0);
-    lv_group_add_obj(g_sampler, seqBarsBtn);
-
-
-    /* A queued scene becomes active at a loop end nobody clicked, so the
-     * labels have to be refreshed by time rather than by event. */
-    if (!seqSyncTimer) {
-        seqSyncTimer = lv_timer_create([](lv_timer_t *) { seq_sync_labels(); }, 200, nullptr);
-    }
-
-    /* The loop deliberately keeps running when the panel closes -- it lives on
-     * its own task. Only the pointers to the widgets die with it. */
-    lv_obj_add_event_cb(seqRecBtn, [](lv_event_t * e) {
-        (void)e;
-        seqRecBtn = seqRecLabel = seqClickBtn = seqBarsBtn = seqBarsLabel = NULL;
-        seqSceneDrop = NULL;
-        if (seqSyncTimer) { lv_timer_delete(seqSyncTimer); seqSyncTimer = NULL; }
-    }, LV_EVENT_DELETE, NULL);
-    seq_sync_labels();
     g_samplerPadEditorLogic = std::make_shared<PadEditorLogicHandler>();
     crosspad::getPadManager().registerPadLogic("Pad editor", g_samplerPadEditorLogic);
 
@@ -1091,7 +1035,8 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
 
     // NULL callbacks: our own events are attached below.
     buttonFrame = createButtons(cont, NULL);
-    lv_obj_align(buttonFrame, LV_ALIGN_LEFT_MID, 15, -5);
+    /* Positioned later, flush with the scene dropdown -- the anchor has to
+     * exist first. */
 
     if (buttonFrame) {
         uint32_t cnt = lv_obj_get_child_cnt(buttonFrame);
@@ -1177,7 +1122,10 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_obj_set_size(seqSceneDrop, WAVEFORM_CANVAS_WIDTH, 24);
     lv_obj_set_style_text_font(seqSceneDrop, &lv_font_montserrat_10, 0);
     lv_obj_set_style_pad_all(seqSceneDrop, 4, 0);
-    lv_obj_align_to(seqSceneDrop, waveformCanvas, LV_ALIGN_OUT_TOP_MID, 0, -3);
+    /* -10, not -3: the pads hang from this and have to finish above the
+     * transport row. Measured -- 120 px of pads from y 52 end at 172, and the
+     * row starts at 174. */
+    lv_obj_align_to(seqSceneDrop, waveformCanvas, LV_ALIGN_OUT_TOP_MID, 0, -10);
     lv_obj_add_event_cb(seqSceneDrop, [](lv_event_t * e) {
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1186,6 +1134,115 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         seq_sync_labels();
     }, LV_EVENT_VALUE_CHANGED, NULL);
     if (g_sampler) lv_group_add_obj(g_sampler, seqSceneDrop);
+    seq_sync_labels();
+
+    /* The pads sit flush with the dropdown -- raised together, so the grid
+     * lines up with the scene picker beside it. */
+    lv_obj_align_to(buttonFrame, seqSceneDrop, LV_ALIGN_OUT_LEFT_TOP, -10, 0);
+    lv_obj_update_layout(cont);
+
+    /* The six controls live in a flex row so LVGL owns the spacing and the
+     * centring: the strip is 224 px against a 320 px screen, and a hand-chained
+     * set of offsets would have to be recomputed every time a button changes
+     * size. Order here is the order on screen. */
+    lv_obj_t * seqRow = lv_obj_create(cont);
+    lv_obj_remove_style_all(seqRow);
+    lv_obj_set_size(seqRow, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(seqRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(seqRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(seqRow, 4, 0);
+    lv_obj_remove_flag(seqRow, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* One row under the waveform, every button the same 34x22: click, loop
+     * length, then the transport. Six of them are 224 px and the waveform
+     * column is only 150, so the row runs left under the pads -- which is why
+     * the pads had to be lifted to finish at 172. REC replaces the scene, DUB
+     * adds to it, and play and stop are not a toggle: a player reaching for
+     * stop mid-take should not have to know what a second press would mean. */
+    /* Click and loop length take the same shape as the transport and sit to
+     * REC's left, so the whole row reads as one strip of controls rather than
+     * settings parked somewhere else. First in the row, so the order in this
+     * function is the order on the screen. */
+    seqClickBtn = seq_make_button(seqRow, 34, 22, "CLK", [](lv_event_t * e) {
+        (void)e;
+        auto * sq = sequencer_or_null();
+        if (!sq) return;
+        sq->setClickActive(!sq->getClickActive());
+        seq_sync_labels();
+    });
+
+    seqBarsBtn = seq_make_button(seqRow, 34, 22, "4b", [](lv_event_t * e) {
+        (void)e;
+        auto * sq = sequencer_or_null();
+        if (!sq) return;
+        const uint8_t active = sq->getActiveScene();
+        const uint8_t bars = sq->getSceneBars(active);
+        const uint8_t next = (bars >= 8) ? 1 : (uint8_t)(bars ? bars * 2 : 1);
+        sq->setSceneBars(active, next);
+        seq_sync_labels();
+    });
+    seqBarsLabel = lv_obj_get_child(seqBarsBtn, 0);
+
+    seqRecBtn = seq_make_button(seqRow, 34, 22, "REC", [](lv_event_t * e) {
+        (void)e;
+        auto * sq = sequencer_or_null();
+        if (!sq) return;
+        crosspad::KitInfo * kit = crosspad::getKitManager()
+                                    ? crosspad::getKitManager()->getCurrentKit() : nullptr;
+        if (kit && kit->bpm) sq->setBpm((float)kit->bpm);
+        /* A second press closes the take without stopping the loop, which is
+         * what you want after playing the part in. */
+        if (sq->isRecording()) sq->playback();
+        else                   sq->record();
+        seq_sync_labels();
+    });
+    seqRecLabel = lv_obj_get_child(seqRecBtn, 0);
+
+    seqDubBtn = seq_make_button(seqRow, 34, 22, "DUB", [](lv_event_t * e) {
+        (void)e;
+        auto * sq = sequencer_or_null();
+        if (!sq) return;
+        /* Overdub keeps what is there and layers on top -- the difference from
+         * REC is the whole point of having both. */
+        sq->overdub();
+        seq_sync_labels();
+    });
+
+    seqPlayBtn = seq_make_button(seqRow, 34, 22, LV_SYMBOL_PLAY, [](lv_event_t * e) {
+        (void)e;
+        auto * sq = sequencer_or_null();
+        if (!sq) return;
+        sq->playback();
+        seq_sync_labels();
+    });
+
+    seqStopBtn = seq_make_button(seqRow, 34, 22, LV_SYMBOL_STOP, [](lv_event_t * e) {
+        (void)e;
+        auto * sq = sequencer_or_null();
+        if (!sq) return;
+        sq->stop();
+        seq_sync_labels();
+    });
+
+    /* y from the waveform so the row follows it, x centred on the panel. */
+    lv_obj_update_layout(cont);
+    const int32_t rowY = lv_obj_get_y(waveformCanvas) + lv_obj_get_height(waveformCanvas) + 18;
+    lv_obj_align(seqRow, LV_ALIGN_TOP_MID, 0, rowY);
+
+    /* A queued scene becomes active at a loop end nobody clicked, so the
+     * labels have to be refreshed by time rather than by event. */
+    if (!seqSyncTimer) {
+        seqSyncTimer = lv_timer_create([](lv_timer_t *) { seq_sync_labels(); }, 200, nullptr);
+    }
+
+    /* The loop deliberately keeps running when the panel closes -- it lives on
+     * its own task. Only the pointers to the widgets die with it. */
+    lv_obj_add_event_cb(seqRecBtn, [](lv_event_t * e) {
+        (void)e;
+        seqRecBtn = seqRecLabel = seqClickBtn = seqBarsBtn = seqBarsLabel = NULL;
+        seqDubBtn = seqPlayBtn = seqStopBtn = seqSceneDrop = NULL;
+        if (seqSyncTimer) { lv_timer_delete(seqSyncTimer); seqSyncTimer = NULL; }
+    }, LV_EVENT_DELETE, NULL);
     seq_sync_labels();
 
     lv_obj_t * fileLabel = lv_label_create(cont);
