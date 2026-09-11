@@ -78,8 +78,7 @@ static lv_obj_t * seqRecLabel = NULL;
 static lv_obj_t * seqClickBtn = NULL;
 static lv_obj_t * seqBarsBtn = NULL;
 static lv_obj_t * seqBarsLabel = NULL;
-static lv_obj_t * seqSceneBtn = NULL;
-static lv_obj_t * seqSceneLabel = NULL;
+static lv_obj_t * seqSceneDrop = NULL;   // sits above the waveform
 static lv_timer_t * seqSyncTimer = NULL;
 
 static crosspad::SequencerController * sequencer_or_null()
@@ -114,13 +113,18 @@ static void seq_sync_labels()
         const uint8_t bars = sq->getSceneBars(active) ? sq->getSceneBars(active) : 1;
         lv_label_set_text_fmt(seqBarsLabel, "%ub", (unsigned)bars);
     }
-    if (seqSceneLabel) {
-        /* Shows the scene you asked for, with amber until the loop end hands
-         * it over -- a switch that has not happened yet must not look like one
-         * that has. */
-        lv_label_set_text_fmt(seqSceneLabel, "S%u", (unsigned)(pending + 1));
-        lv_obj_set_style_bg_color(seqSceneBtn,
-            pending == active ? lv_color_hex(0xB0B0B0) : lv_color_hex(0xE0A050), 0);
+    if (seqSceneDrop && !lv_dropdown_is_open(seqSceneDrop)) {
+        /* Shows the scene you asked for, amber until the loop end hands it
+         * over -- a switch that has not happened yet must not look like one
+         * that has. Left alone while the list is open, or the sync would fight
+         * whoever is scrolling it. */
+        if (lv_dropdown_get_selected(seqSceneDrop) != pending) {
+            lv_dropdown_set_selected(seqSceneDrop, pending);
+        }
+        lv_obj_set_style_bg_color(seqSceneDrop,
+            pending == active ? lv_color_hex(0x303030) : lv_color_hex(0xE0A050), 0);
+        lv_obj_set_style_text_color(seqSceneDrop,
+            pending == active ? lv_color_hex(0xFFFFFF) : lv_color_hex(0x000000), 0);
     }
 }
 
@@ -1062,25 +1066,6 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_obj_set_style_text_color(seqBarsLabel, lv_color_hex(0x000000), 0);
     lv_group_add_obj(g_sampler, seqBarsBtn);
 
-    /* Scene. Several patterns live in one kit and this steps through them; the
-     * swap itself waits for the loop end, which is why the label goes amber in
-     * between rather than changing straight away. */
-    seqSceneBtn = lv_button_create(cont);
-    lv_obj_set_size(seqSceneBtn, 40, 28);
-    lv_obj_align_to(seqSceneBtn, seqBarsBtn, LV_ALIGN_OUT_RIGHT_MID, 6, 0);
-    lv_obj_add_event_cb(seqSceneBtn, [](lv_event_t * e) {
-        (void)e;
-        auto * sq = sequencer_or_null();
-        if (!sq) return;
-        const uint8_t from = sq->getPendingScene();
-        sq->selectScene((uint8_t)((from + 1) % (crosspad::SequencerLimits::MAX_SEQ_INDEX + 1)));
-        seq_sync_labels();
-    }, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_style(seqSceneBtn, &styleButtonPressed, LV_STATE_PRESSED);
-    seqSceneLabel = lv_label_create(seqSceneBtn);
-    lv_obj_center(seqSceneLabel);
-    lv_obj_set_style_text_color(seqSceneLabel, lv_color_hex(0x000000), 0);
-    lv_group_add_obj(g_sampler, seqSceneBtn);
 
     /* A queued scene becomes active at a loop end nobody clicked, so the
      * labels have to be refreshed by time rather than by event. */
@@ -1093,7 +1078,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_obj_add_event_cb(seqRecBtn, [](lv_event_t * e) {
         (void)e;
         seqRecBtn = seqRecLabel = seqClickBtn = seqBarsBtn = seqBarsLabel = NULL;
-        seqSceneBtn = seqSceneLabel = NULL;
+        seqSceneDrop = NULL;
         if (seqSyncTimer) { lv_timer_delete(seqSyncTimer); seqSyncTimer = NULL; }
     }, LV_EVENT_DELETE, NULL);
     seq_sync_labels();
@@ -1181,6 +1166,27 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_obj_align_to(waveformModeLabel, waveformCanvas, LV_ALIGN_TOP_RIGHT, -2, 1);
     lv_obj_add_flag(waveformModeLabel, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(waveformModeLabel, waveform_mode_click_cb, LV_EVENT_CLICKED, nullptr);
+
+    /* Scene picker, directly above the waveform. A dropdown rather than a
+     * cycling button because four scenes are a list you pick from, not a
+     * sequence you step through -- and a list says which ones exist without
+     * pressing anything. The pick only queues the scene; the swap still waits
+     * for the loop end, which is what the amber is for. */
+    seqSceneDrop = lv_dropdown_create(cont);
+    lv_dropdown_set_options_static(seqSceneDrop, "Seq 1\nSeq 2\nSeq 3\nSeq 4");
+    lv_obj_set_size(seqSceneDrop, WAVEFORM_CANVAS_WIDTH, 24);
+    lv_obj_set_style_text_font(seqSceneDrop, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_pad_all(seqSceneDrop, 4, 0);
+    lv_obj_align_to(seqSceneDrop, waveformCanvas, LV_ALIGN_OUT_TOP_MID, 0, -3);
+    lv_obj_add_event_cb(seqSceneDrop, [](lv_event_t * e) {
+        auto * sq = sequencer_or_null();
+        if (!sq) return;
+        lv_obj_t * dd = (lv_obj_t *)lv_event_get_target(e);
+        sq->selectScene((uint8_t)lv_dropdown_get_selected(dd));
+        seq_sync_labels();
+    }, LV_EVENT_VALUE_CHANGED, NULL);
+    if (g_sampler) lv_group_add_obj(g_sampler, seqSceneDrop);
+    seq_sync_labels();
 
     lv_obj_t * fileLabel = lv_label_create(cont);
     static char audio_name[32];
