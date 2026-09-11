@@ -23,6 +23,9 @@
 #include <crosspad/kit/IKitManager.hpp>
 #include <crosspad/kit/KitInfo.hpp>
 #include <crosspad/kit/KitPathUtils.hpp>
+#include "crosspad-sampler/PreviewPlayer.hpp"
+#include <string>
+#include <crosspad/kit/KitPathUtils.hpp>
 #include <crosspad/event/IEventBus.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
 #include <crosspad/platform/IClock.hpp>
@@ -61,6 +64,17 @@ static lv_subject_t s_pWaveform; // subject for the waveform display pointer
 
 static lv_obj_t * buttonFrame = NULL; // frame for the sampler buttons
 static lv_obj_t * pickKitBtn = NULL; // pick kit button
+static lv_obj_t * previewBtn = NULL;   // plays the kit's preview.mid, looping
+static lv_obj_t * previewLabel = NULL;
+static lv_timer_t * previewTimer = NULL;
+
+/// The button is the transport, so its face is the only state the user sees.
+static void preview_sync_label()
+{
+    if (!previewLabel) return;
+    lv_label_set_text(previewLabel,
+        crosspad_sampler::previewPlayer().running() ? LV_SYMBOL_STOP : LV_SYMBOL_PLAY);
+}
 static lv_obj_t * waveformCanvas = NULL; // waveform display canvas
 /* The provider found nothing in the cache for the pad on screen and asked the
  * loader for it; the pad timer redraws once it lands instead of leaving the
@@ -880,6 +894,47 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_label_set_text(editLabel, "Edit");
     lv_obj_set_style_text_color(editLabel, lv_color_hex(0x000000), 0);
     lv_group_add_obj(g_sampler, editBtn); // add the edit button to the group
+
+    /* Preview: play the kit's own preview.mid through the pads, looping, so a
+     * kit can be auditioned without a host. Driven by an lv_timer rather than a
+     * task -- see PreviewPlayer for why that is good enough. */
+    previewBtn = lv_button_create(cont);
+    lv_obj_align(previewBtn, LV_ALIGN_BOTTOM_MID, 0, -8);
+    lv_obj_add_event_cb(previewBtn, [](lv_event_t * e) {
+        (void)e;
+        auto& pp = crosspad_sampler::previewPlayer();
+        if (pp.running()) { pp.stop(); preview_sync_label(); return; }
+        crosspad::KitInfo * kit = crosspad::getKitManager()
+                                    ? crosspad::getKitManager()->getCurrentKit() : nullptr;
+        if (!kit) return;
+        /* Same resolver the artwork uses, so the mount prefix and the two kit
+         * layouts are already handled. */
+        const std::string path = crosspad::kitAssetPath(kit->path, "preview.mid");
+        if (!pp.load(path.c_str(), kit->bpm)) {
+            LV_LOG_WARN("no usable preview.mid for this kit");
+            return;
+        }
+        pp.start(lv_tick_get());
+        if (!previewTimer) {
+            previewTimer = lv_timer_create([](lv_timer_t *) {
+                crosspad_sampler::previewPlayer().poll(lv_tick_get());
+            }, 10, nullptr);
+        }
+        preview_sync_label();
+    }, LV_EVENT_CLICKED, NULL);
+    /* The timer outlives the click handler, so it has to die with the panel. */
+    lv_obj_add_event_cb(previewBtn, [](lv_event_t * e) {
+        (void)e;
+        crosspad_sampler::previewPlayer().stop();
+        if (previewTimer) { lv_timer_delete(previewTimer); previewTimer = nullptr; }
+    }, LV_EVENT_DELETE, NULL);
+    lv_obj_add_style(previewBtn, &styleButton, 0);
+    lv_obj_add_style(previewBtn, &styleButtonPressed, LV_STATE_PRESSED);
+    lv_obj_add_style(previewBtn, &styleButtonInactive, LV_STATE_DISABLED);
+    previewLabel = lv_label_create(previewBtn);
+    lv_obj_set_style_text_color(previewLabel, lv_color_hex(0x000000), 0);
+    preview_sync_label();
+    lv_group_add_obj(g_sampler, previewBtn);
     g_samplerPadEditorLogic = std::make_shared<PadEditorLogicHandler>();
     crosspad::getPadManager().registerPadLogic("Pad editor", g_samplerPadEditorLogic);
 
