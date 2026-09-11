@@ -33,6 +33,10 @@ constexpr int32_t kRowGap    = 5;
 constexpr int32_t kRowPitch  = kRowH + kRowGap;
 constexpr int32_t kCoverSize = 122;
 constexpr int32_t kThumbSize = 20;
+/* The gutter between the cover and the list, holding nothing but the caret.
+ * It narrows the rows by its own width plus one column gap; the caret has to
+ * sit outside the list because the list scrolls and the caret does not. */
+constexpr int32_t kCaretW    = 14;
 
 /* The list is virtual: every kit has a Row entry, but only the rows within
  * this many of the highlight have LVGL objects. A row is ~3 kB of PSRAM and
@@ -78,7 +82,9 @@ lv_obj_t*    s_coverAuthor = nullptr;
 lv_obj_t*    s_statusLabel = nullptr;
 lv_obj_t*    s_backBtn     = nullptr;
 lv_obj_t*    s_busy        = nullptr;
-lv_obj_t*    s_spacer      = nullptr;   ///< sits under the last row: the scroll extent
+lv_obj_t*    s_caret       = nullptr;   ///< the grot beside the row the cover belongs to
+lv_obj_t*    s_frame       = nullptr;   ///< the fixed selection frame, over the first row slot
+lv_obj_t*    s_moreCard    = nullptr;   ///< where-to-get-kits note, past the last row
 
 lv_group_t*  s_group       = nullptr;
 lv_group_t*  s_prevGroup   = nullptr;
@@ -208,20 +214,33 @@ void cover_request(int idx) {
 
 // ── Selection ────────────────────────────────────────────────────────────────
 
-void row_set_selected(int idx, bool selected) {
-    if (idx < 0 || idx >= (int)s_rows.size() || !s_rows[idx].obj) return;
-    Row& r = s_rows[idx];
-    /* A state flip, not lv_obj_add_style(): adding or removing a style
-     * refreshes every property and marks the flex column's layout dirty,
-     * which re-measured all rows (two DOT labels each) on every detent. */
-    if (selected) {
-        lv_obj_add_state(r.obj, LV_STATE_CHECKED);
-        if (r.author) lv_obj_set_style_text_opa(r.author, LV_OPA_COVER, 0);
-    } else {
-        lv_obj_remove_state(r.obj, LV_STATE_CHECKED);
-        if (r.author) lv_obj_set_style_text_opa(r.author, LV_OPA_50, 0);
-    }
+/// The caret never moves: it sits against the list's first row slot, and the
+/// selection is whichever row the list has been scrolled under it. A caret
+/// that tracked the selection instead read as part of the row it touched —
+/// one more highlight moving with the choice, which is what it was meant to
+/// replace.
+void caret_place() {
+    if (!s_caret) return;
+    const int32_t h = lv_font_get_line_height(&lv_font_montserrat_14);
+    lv_obj_set_y(s_caret, (kRowH - h) / 2);
+    lv_obj_remove_flag(s_caret, LV_OBJ_FLAG_HIDDEN);
 }
+
+/// The row slot currently against the caret.
+int row_under_caret() {
+    if (!s_list) return 0;
+    const int32_t y = lv_obj_get_scroll_y(s_list);
+    int idx = (int)((y + kRowPitch / 2) / kRowPitch);
+    if (idx < 0) idx = 0;
+    const int n = (int)s_rows.size();
+    if (idx >= n) idx = n - 1;
+    return idx;
+}
+
+/* select_row() scrolls, and scrolling re-enters through LV_EVENT_SCROLL. The
+ * handler reads the row under the caret and would select it again — same index,
+ * but the round trip fights an animation and re-runs the window work. */
+bool s_scrolling = false;
 
 void row_apply_loaded_edge(lv_obj_t* row) {
     lv_obj_set_style_border_color(row, CROSSPAD_THEME_PRIMARY, 0);
@@ -278,10 +297,8 @@ void ensure_window(int centre) {
 void select_row(int idx) {
     if (s_building || idx < 0 || idx >= (int)s_rows.size()) return;
 
-    row_set_selected(s_selected, false);
     s_selected = idx;
     ensure_window(idx);
-    row_set_selected(s_selected, true);
 
     auto* mgr = crosspad::getKitManager();
     auto* kit = mgr ? mgr->getKit(idx) : nullptr;
@@ -289,7 +306,11 @@ void select_row(int idx) {
         lv_label_set_text(s_coverName, kit->name.c_str());
         lv_label_set_text(s_coverAuthor, kit->author.c_str());
     }
-    lv_obj_scroll_to_view(s_rows[idx].obj, LV_ANIM_OFF);
+    /* To the caret, not merely into view: the caret marks the first row slot,
+     * so the selected row has to be the one that lands there. */
+    s_scrolling = true;
+    lv_obj_scroll_to_y(s_list, idx * kRowPitch, LV_ANIM_OFF);
+    s_scrolling = false;
     cover_request(idx);
     thumb_warm();
 }
@@ -364,11 +385,30 @@ void row_clicked_cb(lv_event_t* e) {
 
 /* A touch flick lands wherever it lands; the rows there have to exist. */
 void list_scrolled_cb(lv_event_t*) {
-    if (s_building || !s_list || s_rows.empty()) return;
+    if (s_building || s_scrolling || !s_list || s_rows.empty()) return;
+    /* Rows first: a flick lands wherever it lands and the row it lands on has
+     * to exist before anything reads it. */
     const int32_t y = lv_obj_get_scroll_y(s_list);
     const int32_t h = lv_obj_get_height(s_list);
-    const int centre = (int)((y + h / 2) / kRowPitch);
-    ensure_window(centre);
+    ensure_window((int)((y + h / 2) / kRowPitch));
+
+    /* The caret is fixed, so dragging the list is how touch chooses: the row
+     * that comes to rest under it is the selection, cover and all. */
+    const int idx = row_under_caret();
+    if (idx != s_selected) select_row(idx);
+}
+
+/* A flick comes to rest wherever momentum ends, and with a fixed caret that
+ * means it would point between two rows. LVGL's own scroll snap is not usable
+ * here: it snaps to any child, and the tail spacer is one. */
+void list_scroll_end_cb(lv_event_t*) {
+    if (s_building || s_scrolling || !s_list || s_rows.empty()) return;
+    const int idx = row_under_caret();
+    const int32_t want = idx * kRowPitch;
+    if (lv_obj_get_scroll_y(s_list) == want) return;
+    s_scrolling = true;
+    lv_obj_scroll_to_y(s_list, want, LV_ANIM_ON);
+    s_scrolling = false;
 }
 
 void back_clicked_cb(lv_event_t*) {
@@ -392,7 +432,6 @@ void build_row(int idx) {
     lv_obj_t* row = lv_obj_create(s_list);
     lv_obj_remove_style_all(row);
     lv_obj_add_style(row, &styleKitBrowserRow, 0);
-    lv_obj_add_style(row, &styleKitBrowserRowSelected, LV_STATE_CHECKED);
     lv_obj_set_size(row, LV_PCT(100), kRowH);
     lv_obj_set_pos(row, 0, idx * kRowPitch);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
@@ -403,11 +442,15 @@ void build_row(int idx) {
     lv_obj_add_event_cb(row, row_focused_cb, LV_EVENT_FOCUSED, tag);
     if (s_group) lv_group_add_obj(s_group, row);
 
+    /* The row is the click target, so nothing inside it may take a press: a
+     * tap that landed on the text column hit this container instead and the
+     * row never saw LV_EVENT_CLICKED — the kit under the finger did nothing. */
     lv_obj_t* thumbBox = lv_obj_create(row);
     lv_obj_remove_style_all(thumbBox);
     lv_obj_add_style(thumbBox, &styleKitBrowserThumb, 0);
     lv_obj_set_size(thumbBox, kThumbSize, kThumbSize);
     lv_obj_remove_flag(thumbBox, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(thumbBox, LV_OBJ_FLAG_CLICKABLE);
 
     /* No file access here: the initial goes up now, the thumbnail once the
      * warmer has it cached. Building 80 rows used to cost 80 fopen()s. */
@@ -424,6 +467,7 @@ void build_row(int idx) {
     lv_obj_set_height(texts, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(texts, LV_FLEX_FLOW_COLUMN);
     lv_obj_remove_flag(texts, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(texts, LV_OBJ_FLAG_CLICKABLE);
 
     /* One-line fixed height each: DOT only truncates when the height cannot
      * grow, and a wrapped name would overflow the 30 px row. */
@@ -444,10 +488,6 @@ void build_row(int idx) {
     r.obj = row; r.name = name; r.author = author;
     r.thumb = img; r.letter = letter;
     r.thumbTried = false;
-    if (idx == s_selected) {
-        lv_obj_add_state(row, LV_STATE_CHECKED);
-        lv_obj_set_style_text_opa(author, LV_OPA_COVER, 0);
-    }
     if (idx == s_loaded) row_apply_loaded_edge(row);
 }
 
@@ -484,7 +524,7 @@ void build_rows() {
     s_selected = -1;
     s_loaded   = -1;
     s_coverShown = -1;
-    s_spacer = nullptr;
+    s_moreCard = nullptr;
 
     for (int i = 0; i < count; ++i) {
         if (auto* kit = mgr->getKit(i)) {
@@ -492,15 +532,38 @@ void build_rows() {
         }
     }
     if (count > 0) {
-        /* One pixel under the last slot: the list's scrollable extent comes
-         * from its children, and the rows themselves come and go. */
-        s_spacer = lv_obj_create(s_list);
-        lv_obj_remove_style_all(s_spacer);
-        lv_obj_set_size(s_spacer, 1, 1);
-        lv_obj_set_pos(s_spacer, 0, count * kRowPitch - kRowGap - 1);
-        lv_obj_remove_flag(s_spacer, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_remove_flag(s_spacer, LV_OBJ_FLAG_SCROLLABLE);
+        /* Past the last row, and it is also the list's scrollable extent —
+         * the rows come and go, so something permanent has to define it. Its
+         * height is a viewport minus one row for a second reason: the frame is
+         * fixed against the first slot, so the last kit can only reach it if
+         * there is that much left to scroll past it. */
+        const int32_t tail = lv_obj_get_height(s_list) - kRowH;
+        s_moreCard = lv_obj_create(s_list);
+        lv_obj_remove_style_all(s_moreCard);
+        lv_obj_set_size(s_moreCard, LV_PCT(100), tail > kRowH ? tail : kRowH);
+        lv_obj_set_pos(s_moreCard, 0, count * kRowPitch);
+        lv_obj_remove_flag(s_moreCard, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_remove_flag(s_moreCard, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_flex_flow(s_moreCard, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_pad_top(s_moreCard, 8, 0);
+        lv_obj_set_style_pad_row(s_moreCard, 3, 0);
+
+        lv_obj_t* moreTitle = lv_label_create(s_moreCard);
+        lv_obj_set_style_text_font(moreTitle, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(moreTitle, CROSSPAD_THEME_PRIMARY, 0);
+        lv_label_set_text(moreTitle, "More kits");
+
+        /* The path, not a URL: this is where the firmware actually looks, and
+         * it is the one instruction that stays true whatever the shop is
+         * called. */
+        lv_obj_t* moreBody = lv_label_create(s_moreCard);
+        lv_obj_set_style_text_font(moreBody, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_opa(moreBody, LV_OPA_50, 0);
+        lv_label_set_long_mode(moreBody, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(moreBody, LV_PCT(100));
+        lv_label_set_text(moreBody, "Put kit folders in\ncrosspad/kits\non the SD card.");
     }
+    caret_place();
     const int current = mgr->getCurrentKitId();
     ensure_window(current >= 0 && current < count ? current : 0);
     s_building = false;
@@ -646,6 +709,24 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     lv_obj_set_size(s_coverAuthor, kCoverSize, lv_font_get_line_height(&lv_font_montserrat_10));
     lv_label_set_text(s_coverAuthor, "");
 
+    /* The caret's gutter. It is a sibling of the list, not a child: the list
+     * scrolls and the caret must not, and a row's own leading glyph would
+     * vanish with the row whenever the virtual window dropped it. Both are
+     * PCT(100) tall flex items, so a y inside the gutter is a y inside the
+     * list's viewport with no offset to carry. */
+    lv_obj_t* gutter = lv_obj_create(body);
+    lv_obj_remove_style_all(gutter);
+    lv_obj_set_size(gutter, kCaretW, LV_PCT(100));
+    lv_obj_remove_flag(gutter, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(gutter, LV_OBJ_FLAG_CLICKABLE);
+
+    s_caret = lv_label_create(gutter);
+    lv_label_set_text(s_caret, LV_SYMBOL_RIGHT);
+    lv_obj_set_style_text_font(s_caret, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_caret, CROSSPAD_THEME_PRIMARY, 0);
+    lv_obj_set_x(s_caret, 0);
+    lv_obj_add_flag(s_caret, LV_OBJ_FLAG_HIDDEN);
+
     s_list = lv_obj_create(body);
     lv_obj_remove_style_all(s_list);
     lv_obj_set_flex_grow(s_list, 1);
@@ -655,7 +736,29 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     /* On every scroll step, not only at the end: a flick must find rows
      * where it lands. ensure_window() returns at once while the window holds. */
     lv_obj_add_event_cb(s_list, list_scrolled_cb, LV_EVENT_SCROLL, nullptr);
+    lv_obj_add_event_cb(s_list, list_scroll_end_cb, LV_EVENT_SCROLL_END, nullptr);
 
+    /* The selection frame. Outside the list, because the list scrolls and this
+     * must not, and out of the flex flow (IGNORE_LAYOUT) so it can be laid on
+     * top of the list's first row slot. Not clickable: the row underneath has
+     * to keep receiving the press. */
+    s_frame = lv_obj_create(body);
+    lv_obj_remove_style_all(s_frame);
+    lv_obj_add_flag(s_frame, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_remove_flag(s_frame, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(s_frame, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(s_frame, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_radius(s_frame, 6, 0);
+    lv_obj_set_style_border_color(s_frame, CROSSPAD_THEME_PRIMARY, 0);
+    lv_obj_set_style_border_opa(s_frame, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_frame, 2, 0);
+
+    /* The caret's y comes from the list's height and scroll position, and
+     * select_row() runs inside build_rows(); without this the flex pass has
+     * not happened yet and the list still measures zero. */
+    lv_obj_update_layout(scr);
+    lv_obj_set_pos(s_frame, lv_obj_get_x(s_list), lv_obj_get_y(s_list));
+    lv_obj_set_size(s_frame, lv_obj_get_width(s_list), kRowH);
     build_rows();
 
     s_loadTimer = lv_timer_create(load_poll_cb, 100, nullptr);
@@ -690,7 +793,8 @@ void reset_state() {
     s_selected = s_loaded = -1;
     s_coverWanted = s_coverShown = -1;
     s_overlay = s_list = s_coverBox = s_coverImg = s_coverLetter = nullptr;
-    s_coverName = s_coverAuthor = s_statusLabel = s_backBtn = s_busy = s_spacer = nullptr;
+    s_coverName = s_coverAuthor = s_statusLabel = s_backBtn = s_busy = nullptr;
+    s_caret = s_frame = s_moreCard = nullptr;
 }
 
 void overlay_deleted_cb(lv_event_t* e) {
