@@ -1297,7 +1297,17 @@ void sampler_panel_destroy(lv_obj_t * panel)
     crosspad::getPadManager().unregisterPadLogic("Pad editor");
     g_samplerPadEditorLogic.reset();
 
+    /* An open dropdown list is a live object outside this panel's tree, and it
+     * is bound to the group about to be freed. Tearing the panel down around
+     * it leaves the encoder reaching into freed memory -- the crash class
+     * CLAUDE.md warns about, and the sampler died on an ENC_ROTATE with the
+     * list open. Close it first; closed, there is nothing to race. */
+    if (seqSceneDrop && lv_dropdown_is_open(seqSceneDrop)) {
+        lv_dropdown_close(seqSceneDrop);
+    }
+
     lv_group_delete(g_sampler); // delete the group
+    g_sampler = NULL;           // freed: never hand it out again
     lv_subject_deinit(&s_pad_sampler);
     lv_subject_deinit(&s_kit_name);
     lv_subject_deinit(&s_audio_idx);
