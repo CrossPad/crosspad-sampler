@@ -22,6 +22,15 @@ lv_obj_t* sampler_panel_create(lv_obj_t* parent, void (*onBack)() = nullptr);
 /// @param panel The lv_obj_t returned by sampler_panel_create().
 void sampler_panel_destroy(lv_obj_t* panel);
 
+/// Tell the panel that something opaque (the pad editor, the pitched editor)
+/// is covering it, or has gone away again.
+///
+/// Covered, the panel stops polling: its pad grid, times, VU and scope keep
+/// updating at 20-30 Hz otherwise, and every label they touch invalidates an
+/// area the refresh still has to repaint -- work that shows up as the editor
+/// stuttering, because the editor is what gets repainted there.
+void sampler_panel_set_covered(bool covered);
+
 /// Access the shared SamplerPadLogic instance.
 SamplerPadLogic& getSamplerPadLogic();
 

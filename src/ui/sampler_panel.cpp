@@ -39,6 +39,7 @@
 #include <string>
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <vector>
 #include <memory>
 
@@ -82,17 +83,78 @@ static lv_obj_t * seqDubBtn = NULL;
 static lv_obj_t * seqPlayBtn = NULL;
 static lv_obj_t * seqStopBtn = NULL;
 static lv_obj_t * seqSceneDrop = NULL;   // sits above the waveform
+static lv_obj_t * seqRow = NULL;         // the transport strip, slides in and out
+static lv_obj_t * seqEditBtn = NULL;     // the pad editor travels with the strip
+static lv_obj_t * seqToggleBtn = NULL;   // "Advanced" -- brings the strip in
+static bool seqControlsShown = false;    // the panel opens as a sampler
+static lv_obj_t * seqBpmSpin = NULL;     // the kit's tempo, in the same row
+static bool seqBpmSyncing = false;       // a sync must not read back as an edit
+static bool seqTempoDirty = false;       // tempo changed, kit.json does not have it
 static lv_timer_t * seqSyncTimer = NULL;
+
+/* Encoder focus, made unmissable.
+ *
+ * The panel's buttons already carry colour for *state* -- REC goes red while a
+ * take runs, CLK green while the click is on -- and those are written as local
+ * styles. A focus style merely *added* to the object would lose to them, so the
+ * focus skin is local too, on LV_STATE_FOCUSED, where it beats the default-state
+ * write without erasing it: move away and the state colour is back.
+ *
+ * Blue rather than a lighter grey because the row is grey at rest; the point is
+ * that the cursor is findable at a glance on a 320 px screen, from arm's length.
+ */
+/* Light fill, saturated edge. The dark labels on Back / Edit set their own
+ * colour locally, so a child label never follows the parent into the focused
+ * state -- a deep blue fill left black text on dark blue, which is what looked
+ * broken. A pale fill keeps every existing label legible without touching it. */
+#define CP_CLICK_OFF  lv_color_hex(0xFFFFFF)   /* metronome + bars at rest   */
+#define CP_CLICK_ON   lv_color_hex(0xE8B33A)   /* metronome while it counts  */
+#define CP_FOCUS_BG   lv_color_hex(0xBBD6FF)
+#define CP_FOCUS_EDGE lv_color_hex(0x2F6BFF)
+
+static void apply_focus_skin(lv_obj_t * o)
+{
+    if (!o) return;
+    lv_obj_set_style_bg_color(o, CP_FOCUS_BG, LV_STATE_FOCUSED);
+    lv_obj_set_style_bg_opa(o, LV_OPA_COVER, LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_color(o, CP_FOCUS_EDGE, LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_width(o, 2, LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_pad(o, 2, LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_opa(o, LV_OPA_COVER, LV_STATE_FOCUSED);
+    lv_obj_set_style_border_color(o, CP_FOCUS_EDGE, LV_STATE_FOCUSED);
+}
 
 static crosspad::SequencerController * sequencer_or_null()
 {
     return crosspad::getPlatformServices().sequencer;
 }
 
+/// The encoder moved the tempo. It goes to the clock at once -- the pattern is
+/// rescaled with it, so a take keeps its place in the bar -- and into the kit,
+/// which is where a tempo belongs: sequences.json carries it on the next sweep
+/// by itself, kit.json waits for the save prompt like every other kit edit.
+static void seq_bpm_changed_cb(lv_event_t * e)
+{
+    auto * sq = sequencer_or_null();
+    if (!sq || seqBpmSyncing) return;
+    const int32_t v = lv_spinbox_get_value((lv_obj_t *)lv_event_get_target(e));
+    if ((int32_t)lroundf(sq->getBpm()) == v) return;
+    sq->setBpm((float)v);
+
+    crosspad::KitInfo * kit = crosspad::getKitManager()
+                                ? crosspad::getKitManager()->getCurrentKit() : nullptr;
+    if (kit && kit->bpm != (uint16_t)v) {
+        kit->bpm = (uint16_t)v;
+        seqTempoDirty = true;
+    }
+}
+
 static void seq_sync_labels()
 {
     auto * sq = sequencer_or_null();
     if (!sq || !seqRecBtn) return;
+    /* Off screen there is nothing to say; the strip is synced as it comes back. */
+    if (!seqControlsShown) return;
 
     const lv_color_t idle = lv_color_hex(0xB0B0B0);
     const lv_color_t live = lv_color_hex(0xE05050);
@@ -113,17 +175,33 @@ static void seq_sync_labels()
     if (seqStopBtn) lv_obj_set_style_bg_color(seqStopBtn, idle, 0);
 
     if (seqClickBtn) {
-        lv_obj_set_style_bg_color(seqClickBtn, sq->getClickActive() ? go : idle, 0);
+        /* White at rest, amber while the click is on. The colour is the whole
+         * indicator -- there is no room at 34 x 22 for anything subtler. */
+        lv_obj_set_style_bg_color(seqClickBtn,
+            sq->getClickActive() ? CP_CLICK_ON : CP_CLICK_OFF, 0);
     }
+
     const uint8_t active  = sq->getActiveScene();
     const uint8_t pending = sq->getPendingScene();
 
+    if (seqBarsBtn) lv_obj_set_style_bg_color(seqBarsBtn, CP_CLICK_OFF, 0);
     if (seqBarsLabel) {
         /* The length of the scene that is sounding, not a global setting --
          * each scene carries its own. */
         const uint8_t bars = sq->getSceneBars(active) ? sq->getSceneBars(active) : 1;
         lv_label_set_text_fmt(seqBarsLabel, "%ub", (unsigned)bars);
     }
+    if (seqBpmSpin) {
+        /* The clock is the authority: a kit landing with a tempo of its own
+         * sets it without anyone touching this widget. */
+        const int32_t shown = (int32_t)lroundf(sq->getBpm());
+        if (lv_spinbox_get_value(seqBpmSpin) != shown) {
+            seqBpmSyncing = true;
+            lv_spinbox_set_value(seqBpmSpin, shown);
+            seqBpmSyncing = false;
+        }
+    }
+
     if (seqSceneDrop && !lv_dropdown_is_open(seqSceneDrop)) {
         /* Shows the scene you asked for, amber until the loop end hands it
          * over -- a switch that has not happened yet must not look like one
@@ -159,6 +237,7 @@ static lv_obj_t * waveformDimRight = NULL; // dimming overlay after end
 static lv_obj_t * waveformFileLabel = NULL; // sample filename under the waveform
 static lv_obj_t * waveformTimeLabel = NULL; // playback time under the waveform
 static lv_obj_t * scopeView = NULL;
+static lv_obj_t * vuMeter = NULL;
 static lv_obj_t * waveformModeLabel = NULL;
 
 enum class WaveformDisplayMode : uint8_t { File, Live, HistoryRms };
@@ -179,6 +258,14 @@ public:
     void onPadPress(PadManager& padManager, uint8_t padIdx, uint8_t velocity) override {
         crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
         if (kit == NULL) return;
+
+        /* The pad you hit is the pad you are editing. Until now this handler
+         * only auditioned the sample: the editor kept showing whichever pad
+         * was selected before it opened, so reaching for another sound meant
+         * leaving the editor to pick it. The subject is what every panel reads
+         * for "current pad", so setting it here moves the whole editor. */
+        lv_subject_set_int(&s_pad_sampler, padIdx + 1);
+
         crosspad::Pad * pad = &kit->pads[padIdx];
         if (pad->sampleCount == 0) return;
 
@@ -230,8 +317,89 @@ static lv_obj_t * seq_make_button(lv_obj_t * parent, int w, int h, const char * 
     lv_obj_center(l);
     lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(l, lv_color_hex(0x000000), 0);
+    apply_focus_skin(b);
     if (g_sampler) lv_group_add_obj(g_sampler, b);
     return b;
+}
+
+/* The sampler opens as a sampler: pads, waveform, the kit. The sequencer is one
+ * tab away -- pressing it slides the scene picker and the transport in from the
+ * left edge, pressing it again sends them back. Hidden rather than deleted, so
+ * the loop keeps running and the widgets keep their state; LVGL's group skips
+ * hidden objects, which is what keeps the encoder from walking into a strip
+ * that is not on screen. */
+static constexpr int32_t kSeqSlideX = -330;   // past the left edge, both rows
+
+static void seq_sync_labels();
+
+static void seq_controls_slide_cb(void * var, int32_t v)
+{
+    (void)var;
+    if (seqRow)       lv_obj_set_style_translate_x(seqRow, v, 0);
+    if (seqSceneDrop) lv_obj_set_style_translate_x(seqSceneDrop, v, 0);
+    /* The pad editor is an advanced control too: a sampler you just play does
+     * not need it, and leaving it on the bottom row was the one thing still
+     * saying "there is more here" on a screen meant to say nothing of the kind. */
+    if (seqEditBtn)   lv_obj_set_style_translate_x(seqEditBtn, v, 0);
+}
+
+static void seq_controls_hidden_cb(lv_anim_t * a)
+{
+    (void)a;
+    if (seqRow)       lv_obj_add_flag(seqRow, LV_OBJ_FLAG_HIDDEN);
+    if (seqSceneDrop) lv_obj_add_flag(seqSceneDrop, LV_OBJ_FLAG_HIDDEN);
+    if (seqEditBtn)   lv_obj_add_flag(seqEditBtn, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void seq_controls_set(bool show, bool animate)
+{
+    if (!seqRow) return;
+    seqControlsShown = show;
+
+    /* An open list lives outside this panel's tree: sliding the dropdown out
+     * from under it would leave it hanging over the pads. */
+    if (seqSceneDrop && lv_dropdown_is_open(seqSceneDrop)) lv_dropdown_close(seqSceneDrop);
+
+    /* Lit while the advanced controls are out, so the button says which of the
+     * two screens you are looking at without reading the rest of it. */
+    if (seqToggleBtn) {
+        lv_obj_set_style_bg_color(seqToggleBtn, show ? CP_CLICK_ON : CP_CLICK_OFF, 0);
+    }
+
+    lv_anim_delete(seqRow, seq_controls_slide_cb);
+
+    if (show) {
+        lv_obj_remove_flag(seqRow, LV_OBJ_FLAG_HIDDEN);
+        if (seqSceneDrop) lv_obj_remove_flag(seqSceneDrop, LV_OBJ_FLAG_HIDDEN);
+        if (seqEditBtn)   lv_obj_remove_flag(seqEditBtn, LV_OBJ_FLAG_HIDDEN);
+        seq_sync_labels();
+    } else if (g_sampler && seqToggleBtn) {
+        /* Focus cannot be left on something about to leave the screen -- but
+         * it is only ours to move when it is standing on the strip. */
+        lv_obj_t * focused = lv_group_get_focused(g_sampler);
+        if (focused && (focused == seqSceneDrop || focused == seqEditBtn ||
+                        lv_obj_get_parent(focused) == seqRow)) {
+            lv_group_focus_obj(seqToggleBtn);
+        }
+    }
+
+    if (!animate) {
+        seq_controls_slide_cb(seqRow, show ? 0 : kSeqSlideX);
+        if (!show) seq_controls_hidden_cb(nullptr);
+        return;
+    }
+
+    lv_anim_t a;
+    lv_anim_init(&a);
+    /* The row is the anim's var, so the panel's teardown deletes the anim with
+     * it rather than leaving it writing into freed memory. */
+    lv_anim_set_var(&a, seqRow);
+    lv_anim_set_exec_cb(&a, seq_controls_slide_cb);
+    lv_anim_set_values(&a, show ? kSeqSlideX : 0, show ? 0 : kSeqSlideX);
+    lv_anim_set_duration(&a, 180);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    if (!show) lv_anim_set_completed_cb(&a, seq_controls_hidden_cb);
+    lv_anim_start(&a);
 }
 
 static void (*s_on_back)() = nullptr; // back button callback (calls app->destroyApp())
@@ -355,8 +523,10 @@ static bool HasDirtyPads(std::vector<uint8_t>& dirtyPadNumbers) {
         }
     }
     // A pitched kit's edits are the instrument's, not any pad's; without this
-    // the leave-app prompt never appeared for them.
-    return !dirtyPadNumbers.empty() || kit->instrument.dirty;
+    // the leave-app prompt never appeared for them. A tempo dialled in the
+    // transport row is the same shape of edit: the loop already carries it in
+    // sequences.json, kit.json only gets it if the player says save.
+    return !dirtyPadNumbers.empty() || kit->instrument.dirty || seqTempoDirty;
 }
 
 static std::string FormatDirtyPadsList(const std::vector<uint8_t>& dirtyPadNumbers) {
@@ -401,7 +571,14 @@ static void ShowSaveConfirmationDialog(lv_obj_t * panel) {
 
     lv_msgbox_add_title(g_saveConfirmMsgbox, "Unsaved Changes");
 
-    std::string message = "Do you want to save changes to the kit?\n\n" + FormatDirtyPadsList(dirtyPadNumbers);
+    std::string message = "Do you want to save changes to the kit?\n\n";
+    if (!dirtyPadNumbers.empty()) message += FormatDirtyPadsList(dirtyPadNumbers);
+    if (seqTempoDirty) {
+        crosspad::KitInfo * tempoKit = crosspad::getKitManager()
+                                        ? crosspad::getKitManager()->getCurrentKit() : nullptr;
+        if (!dirtyPadNumbers.empty()) message += "\n";
+        message += "Tempo: " + std::to_string(tempoKit ? tempoKit->bpm : 0) + " BPM";
+    }
     lv_msgbox_add_text(g_saveConfirmMsgbox, message.c_str());
 
     lv_obj_t * saveBtn = lv_msgbox_add_footer_button(g_saveConfirmMsgbox, "Save");
@@ -419,6 +596,7 @@ static void ShowSaveConfirmationDialog(lv_obj_t * panel) {
             kitMgr->saveKit(*kitMgr->getCurrentKit());
         }
 
+        seqTempoDirty = false;
         crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
         if (kit != NULL) {
             kit->instrument.dirty = false;
@@ -439,6 +617,7 @@ static void ShowSaveConfirmationDialog(lv_obj_t * panel) {
     lv_obj_add_event_cb(discardBtn, [](lv_event_t * e) {
         LV_LOG_INFO("Discarding changes - reloading kit...");
 
+        seqTempoDirty = false;
         crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
         if (kit != NULL) {
                 kit->instrument.dirty = false;
@@ -650,6 +829,8 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
     }
     if (lastKit != kit) { // kit changed
         s_sampleInfoCache.clear();
+        /* Whatever tempo was dialled in belonged to the kit that just left. */
+        seqTempoDirty = false;
         LV_LOG_INFO("Kit changed: %s (previous: %s)", kit->name.c_str(),
                     lastKit ? lastKit->name.c_str() : "NULL");
         lv_subject_copy_string(&s_kit_name, kit->name.c_str());
@@ -951,7 +1132,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
 
 
     lv_obj_t * backBtn = lv_button_create(cont);
-    lv_obj_align(backBtn, LV_ALIGN_BOTTOM_MID, -50, -8);
+    lv_obj_align(backBtn, LV_ALIGN_BOTTOM_MID, -72, -8);
     lv_obj_add_event_cb(backBtn, [](lv_event_t * e) {
         LV_LOG_INFO("Exit button clicked");
         ShowSaveConfirmationDialog(g_parentContainer);
@@ -962,10 +1143,12 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_obj_t * backLabel = lv_label_create(backBtn);
     lv_label_set_text(backLabel, "Back");
     lv_obj_set_style_text_color(backLabel, lv_color_hex(0x000000), 0);
+    apply_focus_skin(backBtn);
     lv_group_add_obj(g_sampler, backBtn); // add the back button to the group
 
     lv_obj_t * editBtn = lv_button_create(cont);
-    lv_obj_align(editBtn, LV_ALIGN_BOTTOM_MID, 50, -8);
+    seqEditBtn = editBtn;
+    lv_obj_align(editBtn, LV_ALIGN_BOTTOM_MID, 72, -8);
     lv_obj_add_event_cb(editBtn, [](lv_event_t * e) {
         LV_LOG_INFO("Opening pad editor");
         lv_obj_t * cont = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
@@ -983,6 +1166,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_obj_t * editLabel = lv_label_create(editBtn);
     lv_label_set_text(editLabel, "Edit");
     lv_obj_set_style_text_color(editLabel, lv_color_hex(0x000000), 0);
+    apply_focus_skin(editBtn);
     lv_group_add_obj(g_sampler, editBtn); // add the edit button to the group
 
     /* Preview: play the kit's own preview.mid through the pads, looping, so a
@@ -1024,7 +1208,10 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     previewLabel = lv_label_create(previewBtn);
     lv_obj_set_style_text_color(previewLabel, lv_color_hex(0x000000), 0);
     preview_sync_label();
-    lv_group_add_obj(g_sampler, previewBtn);
+    /* Parked: the preview beat is off the bottom row for now, so Back and Edit
+     * get the width instead. The player and its timer still exist, so bringing
+     * the button back is a matter of unhiding it. */
+    lv_obj_add_flag(previewBtn, LV_OBJ_FLAG_HIDDEN);
 
     g_samplerPadEditorLogic = std::make_shared<PadEditorLogicHandler>();
     crosspad::getPadManager().registerPadLogic("Pad editor", g_samplerPadEditorLogic);
@@ -1071,20 +1258,28 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_subject_init_int(&s_pad_sampler, 0);
     lv_label_bind_text(padLabel, &s_pad_sampler, "PAD: %d");
 
+    /* "KITS", not a list glyph. The icon was recoloured to the theme's primary,
+     * which on this background came out near-black: you could not see it, and
+     * even spotted it did not say what it opened. A light plate with a word on
+     * it does both. */
     pickKitBtn = lv_button_create(cont);
-    lv_obj_align(pickKitBtn, LV_ALIGN_TOP_RIGHT, 0, 0);
-    lv_obj_t * pickKitBtnIcon = lv_image_create(pickKitBtn);
-    lv_image_set_src(pickKitBtnIcon, LV_SYMBOL_LIST);
-    lv_obj_set_size(pickKitBtn, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_center(pickKitBtnIcon);
+    lv_obj_set_size(pickKitBtn, 72, 20);
+    /* Off the status bar: flush against it the plate read as part of the bar
+     * rather than as something on this screen. */
+    lv_obj_align(pickKitBtn, LV_ALIGN_TOP_RIGHT, -2, 6);
     lv_obj_add_event_cb(pickKitBtn, PickKit_button_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_style(pickKitBtn, &styleButton, 0);
     lv_obj_add_style(pickKitBtn, &styleButtonPressed, LV_STATE_PRESSED);
-    lv_obj_add_style(pickKitBtn, &stylePrimaryImgRecolor, 0);
-    lv_obj_add_style(pickKitBtnIcon, &stylePrimaryImgRecolor, 0);
-    lv_obj_set_style_pad_all(pickKitBtn, 1, 0);
-    lv_obj_set_style_pad_all(pickKitBtnIcon, 1, 0);
+    lv_obj_set_style_bg_color(pickKitBtn, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_opa(pickKitBtn, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(pickKitBtn, 5, 0);
+    lv_obj_set_style_pad_all(pickKitBtn, 0, 0);
+    lv_obj_t * pickKitLabel = lv_label_create(pickKitBtn);
+    lv_label_set_text(pickKitLabel, "Browse kit");
+    lv_obj_set_style_text_font(pickKitLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(pickKitLabel, lv_color_hex(0x101010), 0);
+    lv_obj_center(pickKitLabel);
 
+    apply_focus_skin(pickKitBtn);
     if (g_sampler) {
         lv_group_add_obj(g_sampler, pickKitBtn);
     }
@@ -1133,6 +1328,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         sq->selectScene((uint8_t)lv_dropdown_get_selected(dd));
         seq_sync_labels();
     }, LV_EVENT_VALUE_CHANGED, NULL);
+    apply_focus_skin(seqSceneDrop);
     if (g_sampler) lv_group_add_obj(g_sampler, seqSceneDrop);
     seq_sync_labels();
 
@@ -1145,7 +1341,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
      * centring: the strip is 224 px against a 320 px screen, and a hand-chained
      * set of offsets would have to be recomputed every time a button changes
      * size. Order here is the order on screen. */
-    lv_obj_t * seqRow = lv_obj_create(cont);
+    seqRow = lv_obj_create(cont);
     lv_obj_remove_style_all(seqRow);
     lv_obj_set_size(seqRow, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(seqRow, LV_FLEX_FLOW_ROW);
@@ -1163,7 +1359,36 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
      * REC's left, so the whole row reads as one strip of controls rather than
      * settings parked somewhere else. First in the row, so the order in this
      * function is the order on the screen. */
-    seqClickBtn = seq_make_button(seqRow, 34, 22, "CLK", [](lv_event_t * e) {
+    /* Tempo, and it is the kit's rather than the session's: focus it, press to
+     * edit, turn for a BPM at a time, press again to leave. A spinbox because
+     * a tempo is a number you dial, and it is the widget the pad editor
+     * already teaches -- a button would have to invent an edit mode of its
+     * own. First in the row: the tempo is what the click and the bars are
+     * counted against. */
+    seqBpmSpin = lv_CreateStandardSpinbox(seqRow,
+                                          (int32_t)crosspad::SequencerLimits::MIN_BPM,
+                                          (int32_t)crosspad::SequencerLimits::MAX_BPM,
+                                          120, seq_bpm_changed_cb, g_sampler, nullptr,
+                                          &lv_font_montserrat_16);
+    /* Local styles, so they beat the ones the helper added. */
+    lv_obj_set_size(seqBpmSpin, 48, 24);
+    lv_obj_set_style_pad_all(seqBpmSpin, 0, 0);
+    lv_obj_set_style_radius(seqBpmSpin, 5, 0);
+    lv_obj_set_style_bg_color(seqBpmSpin, CP_CLICK_OFF, 0);
+    lv_obj_set_style_bg_opa(seqBpmSpin, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(seqBpmSpin, lv_color_hex(0x000000), 0);
+    /* 16 px, not the row's 10: three digits at 10 px were a smudge, and this
+     * build has no bold Montserrat -- size is the only weight available. The
+     * field is a one-line textarea whose label spans the whole width, so
+     * text_align is what centres the number in it. */
+    lv_obj_set_style_text_font(seqBpmSpin, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_align(seqBpmSpin, LV_TEXT_ALIGN_CENTER, 0);
+    apply_focus_skin(seqBpmSpin);
+
+    /* Just "M". Four beat dots at 22 px high read as clutter rather than as a
+     * beat -- the click is something you hear, and the colour already says
+     * whether it is on. */
+    seqClickBtn = seq_make_button(seqRow, 34, 22, "M", [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1187,9 +1412,6 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
-        crosspad::KitInfo * kit = crosspad::getKitManager()
-                                    ? crosspad::getKitManager()->getCurrentKit() : nullptr;
-        if (kit && kit->bpm) sq->setBpm((float)kit->bpm);
         /* A second press closes the take without stopping the loop, which is
          * what you want after playing the part in. */
         if (sq->isRecording()) sq->playback();
@@ -1229,6 +1451,29 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     const int32_t rowY = lv_obj_get_y(waveformCanvas) + lv_obj_get_height(waveformCanvas) + 18;
     lv_obj_align(seqRow, LV_ALIGN_TOP_MID, 0, rowY);
 
+    /* "Advanced", in the gap Back and Edit leave in the middle of the bottom
+     * row -- the slot Edit used to reach past. A word rather than an arrow:
+     * what it opens is not obvious from a chevron, and with Edit now behind it
+     * the button is the only way in. */
+    seqToggleBtn = lv_button_create(cont);
+    lv_obj_set_size(seqToggleBtn, 76, 32);
+    lv_obj_align(seqToggleBtn, LV_ALIGN_BOTTOM_MID, 0, -8);
+    lv_obj_add_style(seqToggleBtn, &styleButton, 0);
+    lv_obj_add_style(seqToggleBtn, &styleButtonPressed, LV_STATE_PRESSED);
+    lv_obj_add_event_cb(seqToggleBtn, [](lv_event_t * e) {
+        (void)e;
+        seq_controls_set(!seqControlsShown, true);
+    }, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * seqToggleLabel = lv_label_create(seqToggleBtn);
+    lv_obj_set_style_text_color(seqToggleLabel, lv_color_hex(0x000000), 0);
+    lv_label_set_text(seqToggleLabel, "Advanced");
+    lv_obj_center(seqToggleLabel);
+    apply_focus_skin(seqToggleBtn);
+    if (g_sampler) lv_group_add_obj(g_sampler, seqToggleBtn);
+
+    /* Closed on entry: opening the Sampler is opening a sampler. */
+    seq_controls_set(false, false);
+
     /* A queued scene becomes active at a loop end nobody clicked, so the
      * labels have to be refreshed by time rather than by event. */
     if (!seqSyncTimer) {
@@ -1240,7 +1485,8 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_obj_add_event_cb(seqRecBtn, [](lv_event_t * e) {
         (void)e;
         seqRecBtn = seqRecLabel = seqClickBtn = seqBarsBtn = seqBarsLabel = NULL;
-        seqDubBtn = seqPlayBtn = seqStopBtn = seqSceneDrop = NULL;
+        seqDubBtn = seqPlayBtn = seqStopBtn = seqSceneDrop = seqBpmSpin = NULL;
+        seqRow = seqEditBtn = seqToggleBtn = NULL;
         if (seqSyncTimer) { lv_timer_delete(seqSyncTimer); seqSyncTimer = NULL; }
     }, LV_EVENT_DELETE, NULL);
     seq_sync_labels();
@@ -1280,10 +1526,28 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         lv_subject_copy_string(&s_kit_name, "No Kit");
     }
 
-    lv_obj_t * vu = create_vu_meter(cont, 6, 85);
-    lv_obj_align(vu, LV_ALIGN_RIGHT_MID, -4, -3);
+    vuMeter = create_vu_meter(cont, 6, 85);
+    lv_obj_align(vuMeter, LV_ALIGN_RIGHT_MID, -4, -3);
 
     return cont;
+}
+
+void sampler_panel_set_covered(bool covered)
+{
+    if (timerPad)     { if (covered) lv_timer_pause(timerPad);     else lv_timer_resume(timerPad); }
+    if (seqSyncTimer) { if (covered) lv_timer_pause(seqSyncTimer); else lv_timer_resume(seqSyncTimer); }
+    /* Hidden objects do not invalidate, which is the only handle on the VU:
+     * its timer lives in crosspad-gui and is not ours to pause. */
+    if (vuMeter) {
+        if (covered) lv_obj_add_flag(vuMeter, LV_OBJ_FLAG_HIDDEN);
+        else         lv_obj_remove_flag(vuMeter, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (covered) {
+        if (scopeView) scope_view_set_active(scopeView, false);
+        set_live_scope_capture(false);   // and the audio-side tap with it
+    } else {
+        apply_waveform_display_mode();   // puts the scope and its capture back
+    }
 }
 
 void sampler_panel_destroy(lv_obj_t * panel)
@@ -1343,6 +1607,7 @@ void sampler_panel_destroy(lv_obj_t * panel)
         scope_view_clear_source(scopeView);
     }
     scopeView = nullptr;
+    vuMeter = nullptr;
     scopeSourceKind = -2;
     timerPad = nullptr;
     g_sampler = nullptr;
