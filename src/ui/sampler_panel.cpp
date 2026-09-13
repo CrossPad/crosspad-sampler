@@ -83,7 +83,8 @@ static lv_obj_t * seqDubBtn = NULL;
 static lv_obj_t * seqPlayBtn = NULL;
 static lv_obj_t * seqStopBtn = NULL;
 static lv_obj_t * seqSceneDrop = NULL;   // sits above the waveform
-static lv_obj_t * seqRow = NULL;         // the transport strip, slides in and out
+static lv_obj_t * seqRow = NULL;         // the transport, centred at the bottom
+static lv_obj_t * seqTopRow = NULL;      // tempo, click and bars, on the scene line
 static lv_obj_t * seqEditBtn = NULL;     // the pad editor travels with the strip
 static lv_obj_t * seqToggleBtn = NULL;   // "Advanced" -- brings the strip in
 static bool seqControlsShown = false;    // the panel opens as a sampler
@@ -366,12 +367,18 @@ static void pads_set_compact(bool compact)
             }
         }
     }
+    /* Re-centred on the waveform: an align_to is a one-off, and the frame just
+     * changed size around its top-left corner. */
+    if (waveformCanvas) {
+        lv_obj_align_to(buttonFrame, waveformCanvas, LV_ALIGN_OUT_LEFT_MID, -10, 0);
+    }
 }
 
 static void seq_controls_slide_cb(void * var, int32_t v)
 {
     (void)var;
     if (seqRow)       lv_obj_set_style_translate_x(seqRow, v, 0);
+    if (seqTopRow)    lv_obj_set_style_translate_x(seqTopRow, v, 0);
     if (seqSceneDrop) lv_obj_set_style_translate_x(seqSceneDrop, v, 0);
     /* The pad editor is an advanced control too: a sampler you just play does
      * not need it, and leaving it on the bottom row was the one thing still
@@ -383,6 +390,7 @@ static void seq_controls_hidden_cb(lv_anim_t * a)
 {
     (void)a;
     if (seqRow)       lv_obj_add_flag(seqRow, LV_OBJ_FLAG_HIDDEN);
+    if (seqTopRow)    lv_obj_add_flag(seqTopRow, LV_OBJ_FLAG_HIDDEN);
     if (seqSceneDrop) lv_obj_add_flag(seqSceneDrop, LV_OBJ_FLAG_HIDDEN);
     if (seqEditBtn)   lv_obj_add_flag(seqEditBtn, LV_OBJ_FLAG_HIDDEN);
 }
@@ -408,6 +416,7 @@ static void seq_controls_set(bool show, bool animate)
 
     if (show) {
         lv_obj_remove_flag(seqRow, LV_OBJ_FLAG_HIDDEN);
+        if (seqTopRow)    lv_obj_remove_flag(seqTopRow, LV_OBJ_FLAG_HIDDEN);
         if (seqSceneDrop) lv_obj_remove_flag(seqSceneDrop, LV_OBJ_FLAG_HIDDEN);
         if (seqEditBtn)   lv_obj_remove_flag(seqEditBtn, LV_OBJ_FLAG_HIDDEN);
         seq_sync_labels();
@@ -416,7 +425,8 @@ static void seq_controls_set(bool show, bool animate)
          * it is only ours to move when it is standing on the strip. */
         lv_obj_t * focused = lv_group_get_focused(g_sampler);
         if (focused && (focused == seqSceneDrop || focused == seqEditBtn ||
-                        lv_obj_get_parent(focused) == seqRow)) {
+                        lv_obj_get_parent(focused) == seqRow ||
+                        lv_obj_get_parent(focused) == seqTopRow)) {
             lv_group_focus_obj(seqToggleBtn);
         }
     }
@@ -1368,11 +1378,25 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     }, LV_EVENT_VALUE_CHANGED, NULL);
     apply_focus_skin(seqSceneDrop);
     if (g_sampler) lv_group_add_obj(g_sampler, seqSceneDrop);
+
+    /* The scene line carries what the scene is counted in: the tempo, the click
+     * and the bar count, to the left of the picker. They belong with the scene
+     * rather than with the transport -- and the transport, alone at the bottom,
+     * can finally be centred. */
+    seqTopRow = lv_obj_create(cont);
+    lv_obj_remove_style_all(seqTopRow);
+    lv_obj_set_size(seqTopRow, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(seqTopRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(seqTopRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(seqTopRow, 2, 0);
+    lv_obj_remove_flag(seqTopRow, LV_OBJ_FLAG_SCROLLABLE);
     seq_sync_labels();
 
-    /* The pads sit flush with the dropdown -- raised together, so the grid
-     * lines up with the scene picker beside it. */
-    lv_obj_align_to(buttonFrame, seqSceneDrop, LV_ALIGN_OUT_LEFT_TOP, -10, 0);
+    /* On the waveform's axis: the grid and the wave share a centre line, which
+     * is what the eye reads as the two halves of the screen belonging
+     * together. */
+    lv_obj_align_to(buttonFrame, waveformCanvas, LV_ALIGN_OUT_LEFT_MID, -10, 0);
     lv_obj_update_layout(cont);
 
     /* The six controls live in a flex row so LVGL owns the spacing and the
@@ -1403,7 +1427,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
      * already teaches -- a button would have to invent an edit mode of its
      * own. First in the row: the tempo is what the click and the bars are
      * counted against. */
-    seqBpmSpin = lv_CreateStandardSpinbox(seqRow,
+    seqBpmSpin = lv_CreateStandardSpinbox(seqTopRow,
                                           (int32_t)crosspad::SequencerLimits::MIN_BPM,
                                           (int32_t)crosspad::SequencerLimits::MAX_BPM,
                                           120, seq_bpm_changed_cb, g_sampler, nullptr,
@@ -1463,7 +1487,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     /* Just "M". Four beat dots at 22 px high read as clutter rather than as a
      * beat -- the click is something you hear, and the colour already says
      * whether it is on. */
-    seqClickBtn = seq_make_button(seqRow, 30, 22, "M", [](lv_event_t * e) {
+    seqClickBtn = seq_make_button(seqTopRow, 30, 22, "M", [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1471,7 +1495,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         seq_sync_labels();
     });
 
-    seqBarsBtn = seq_make_button(seqRow, 30, 22, "4b", [](lv_event_t * e) {
+    seqBarsBtn = seq_make_button(seqTopRow, 30, 22, "4b", [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1521,8 +1545,12 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         seq_sync_labels();
     });
 
-    /* y from the waveform so the row follows it, x centred on the panel. */
+    /* The scene line first: tempo, click and bars to the left of the picker,
+     * on its centre line. Then the transport, centred on the panel below the
+     * waveform -- four buttons now, so the middle of the screen is the middle
+     * of the row. */
     lv_obj_update_layout(cont);
+    lv_obj_align_to(seqTopRow, seqSceneDrop, LV_ALIGN_OUT_LEFT_MID, -6, 0);
     const int32_t rowY = lv_obj_get_y(waveformCanvas) + lv_obj_get_height(waveformCanvas) + 18;
     lv_obj_align(seqRow, LV_ALIGN_TOP_MID, 0, rowY);
 
@@ -1561,7 +1589,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         (void)e;
         seqRecBtn = seqRecLabel = seqClickBtn = seqBarsBtn = seqBarsLabel = NULL;
         seqDubBtn = seqPlayBtn = seqStopBtn = seqSceneDrop = seqBpmSpin = NULL;
-        seqRow = seqEditBtn = seqToggleBtn = NULL;
+        seqRow = seqTopRow = seqEditBtn = seqToggleBtn = NULL;
         if (seqSyncTimer) { lv_timer_delete(seqSyncTimer); seqSyncTimer = NULL; }
     }, LV_EVENT_DELETE, NULL);
     seq_sync_labels();
