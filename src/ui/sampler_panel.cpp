@@ -138,6 +138,16 @@ static crosspad::SequencerController * sequencer_or_null()
 /// rescaled with it, so a take keeps its place in the bar -- and into the kit,
 /// which is where a tempo belongs: sequences.json carries it on the next sweep
 /// by itself, kit.json waits for the save prompt like every other kit edit.
+/// What the tempo field opens on: the clock's, which is the kit's once its
+/// sequences have loaded. 120 only when there is no sequencer to ask.
+static int32_t seqStartupBpm()
+{
+    auto * sq = sequencer_or_null();
+    if (!sq) return 120;
+    const int32_t v = (int32_t)lroundf(sq->getBpm());
+    return v > 0 ? v : 120;
+}
+
 static void seq_bpm_changed_cb(lv_event_t * e)
 {
     auto * sq = sequencer_or_null();
@@ -1520,11 +1530,21 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
      * already teaches -- a button would have to invent an edit mode of its
      * own. First in the row: the tempo is what the click and the bars are
      * counted against. */
+    /* Seeded from the clock, and marked as a sync while it happens. Built with
+     * a flat 120 it did not merely show the wrong number: giving the spinbox a
+     * value sends VALUE_CHANGED, the handler read that as a player dialling
+     * 120, and it went to the engine -- so opening the Sampler stamped 120 BPM
+     * over whatever the kit had just loaded, and the store task then wrote
+     * that 120 back into sequences.json. A tempo survived until the panel was
+     * next opened, which is to say it did not survive a reboot. */
+    const int32_t startBpm = seqStartupBpm();
+    seqBpmSyncing = true;
     seqBpmSpin = lv_CreateStandardSpinbox(seqTopRow,
                                           (int32_t)crosspad::SequencerLimits::MIN_BPM,
                                           (int32_t)crosspad::SequencerLimits::MAX_BPM,
-                                          120, seq_bpm_changed_cb, g_sampler, nullptr,
+                                          startBpm, seq_bpm_changed_cb, g_sampler, nullptr,
                                           &lv_font_montserrat_16);
+    seqBpmSyncing = false;
     /* Local styles, so they beat the ones the helper added. */
     lv_obj_set_size(seqBpmSpin, 40, 22);
     lv_obj_set_style_pad_all(seqBpmSpin, 0, 0);
