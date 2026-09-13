@@ -40,6 +40,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <atomic>
 #include <vector>
 #include <memory>
 
@@ -254,6 +255,10 @@ static WaveformDisplayMode waveformDisplayMode = WaveformDisplayMode::File;
  * for the pitched engine. A source change also resets the RMS history. */
 static int scopeSourceKind = -2;
 
+/// Set from the pad thread, consumed on the LVGL thread (the pad editor's
+/// timer, and the panel's own poll). Nothing but an integer crosses over.
+std::atomic<int> g_padPressPending{0};
+
 class PadEditorLogicHandler : public IPadLogicHandler {
 public:
 
@@ -267,12 +272,14 @@ public:
         crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
         if (kit == NULL) return;
 
-        /* The pad you hit is the pad you are editing. Until now this handler
-         * only auditioned the sample: the editor kept showing whichever pad
-         * was selected before it opened, so reaching for another sound meant
-         * leaving the editor to pick it. The subject is what every panel reads
-         * for "current pad", so setting it here moves the whole editor. */
-        lv_subject_set_int(&s_pad_sampler, padIdx + 1);
+        /* The pad you hit is the pad you are editing -- but not from here.
+         * This runs on whatever thread delivers pad events (the STM32 UART task
+         * on this hardware), and the subject's observers are LVGL widgets:
+         * setting it directly walked LVGL's invalidation list from two threads
+         * at once. That is a task watchdog on the UART task with lv_inv_area in
+         * its backtrace, and a UI that never comes back. The editor's own timer
+         * picks this up on the LVGL thread. */
+        g_padPressPending.store(padIdx + 1, std::memory_order_relaxed);
 
         crosspad::Pad * pad = &kit->pads[padIdx];
         if (pad->sampleCount == 0) return;

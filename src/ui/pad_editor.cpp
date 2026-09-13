@@ -21,6 +21,7 @@
 #include <crosspad/platform/IClock.hpp>
 #include <crosspad/status/CrosspadStatus.hpp>
 
+#include <atomic>
 #include <string>
 #include <cstdio>
 #include <cstring>
@@ -78,6 +79,10 @@ lv_subject_t s_Volume;
 lv_subject_t s_Pan;
 
 extern lv_subject_t s_pad_sampler; // subject for the last pressed pad (defined in sampler_panel.cpp)
+/// A pad hit while the editor is up, stamped by the pad thread. Consumed here,
+/// on the LVGL thread: the subject drives labels, and labels are not something
+/// another thread may touch.
+extern std::atomic<int> g_padPressPending;
 
 lv_obj_t * list = NULL; // samples list
 lv_timer_t * t_padUpdate;
@@ -920,6 +925,12 @@ static void applyPadEditorLeds(int selectedIdx) {
 
 static void UpdatePadEditor(lv_timer_t * e) {
     LV_LOG_INFO("Update pad editor...");
+
+    /* The pad you hit is the pad you edit. The hit is stamped on the pad
+     * thread; this is where it becomes UI. */
+    if (const int hit = g_padPressPending.exchange(0, std::memory_order_relaxed)) {
+        lv_subject_set_int(&s_pad_sampler, hit);
+    }
 
     // Only re-read the settings when the shown pad changed.
     KitInfo * kit = getCurrentKit();
