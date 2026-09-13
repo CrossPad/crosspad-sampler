@@ -56,6 +56,25 @@ constexpr uint32_t kCoverDelayMs = 750;
  * thumbnail is cached. Decoding at draw time -- the old way -- put an SD read
  * and a PNG decode on every row that scrolled into view. */
 constexpr uint32_t kThumbTickMs = 10;
+/* ...but not while the list is moving. Each tick is an SD read and a PNG
+ * decode on the LVGL thread, and with the encoder turning that lands between
+ * every two frames of the scroll: the list stuttered its way down the kits and
+ * the decodes were mostly of rows nobody stopped on. The warmer waits for the
+ * selection to stand still this long instead. */
+constexpr uint32_t kThumbQuietMs = 350;
+
+/* How far the selection may drift inside the built window before the window
+ * moves with it. Sliding by one row per detent meant building and destroying a
+ * row -- seven widgets and some fifty allocations -- on every click. */
+constexpr int kRowSlack = 4;
+
+/* Seventy kits at one row per click is a seventy-click job, and every click
+ * costs a repaint whatever the row count -- so the way to cross the list
+ * quickly is to cover more ground per repaint, not to repaint faster. Clicks
+ * arriving inside this window step by twice as many rows as the last one, up
+ * to kMaxStep; a click on its own always moves exactly one. */
+constexpr uint32_t kFastStepMs = 140;
+constexpr int      kMaxStep    = 8;
 
 struct Row {
     lv_obj_t* obj    = nullptr;   ///< null while the row is outside the window
@@ -100,12 +119,19 @@ int  s_coverShown  = -1;
 /* lv_group_add_obj() fires LV_EVENT_FOCUSED synchronously for its first
  * object, landing in row_focused_cb() mid-assembly. Focus callbacks are
  * ignored until the list is complete, and again during teardown. */
+uint32_t s_backToken = 0;   ///< power-button back registration
+uint32_t s_lastStepMs = 0;  ///< when the selection last moved by a click
+int      s_lastStepDir = 0;
+int      s_stepRun = 1;     ///< rows per click, doubling while the spin holds
+bool     s_refocusing = false;
 bool s_building = false;
 bool s_loadingStarted = false;
 
 lv_timer_t* s_coverTimer = nullptr;
 lv_timer_t* s_loadTimer  = nullptr;
 lv_timer_t* s_thumbTimer = nullptr;
+lv_timer_t* s_thumbQuietTimer = nullptr;
+std::string s_coverPathShown;   ///< what the cover image is decoded from
 
 lv_indev_t* encoder() {
     return crosspad_gui::getGuiPlatform().getNavigationEncoder();
@@ -138,16 +164,29 @@ const char* initialOf(const crosspad::KitInfo& kit) {
 
 // ── Thumbnails ───────────────────────────────────────────────────────────────
 
-/// The pending row closest to the highlight, or -1 when every row is done.
+/// The pending row closest to the highlight, or -1 when every visible row is
+/// done.
+///
+/// On screen only, plus a row of margin. Warming the whole built window meant a
+/// dozen decodes -- and a dozen row repaints -- for rows nobody had scrolled
+/// to, and each one pushed something else out of LVGL's image cache, which the
+/// visible rows then had to decode again at draw time, inside the refresh.
 int thumb_next_pending() {
     const int n = (int)s_rows.size();
-    if (n == 0) return -1;
-    const int centre = (s_selected >= 0 && s_selected < n) ? s_selected : 0;
-    for (int d = 0; d < n; ++d) {
+    if (n == 0 || !s_list) return -1;
+    const int32_t y = lv_obj_get_scroll_y(s_list);
+    const int32_t h = lv_obj_get_height(s_list);
+    int first = (int)(y / kRowPitch) - 1;
+    int last  = (int)((y + h) / kRowPitch) + 1;
+    if (first < 0) first = 0;
+    if (last >= n) last = n - 1;
+    if (last < first) return -1;
+    const int centre = (s_selected >= first && s_selected <= last) ? s_selected : first;
+    for (int d = 0; d <= last - first; ++d) {
         const int below = centre + d;
         const int above = centre - d;
-        if (below < n && s_rows[below].obj && !s_rows[below].thumbTried) return below;
-        if (above >= 0 && s_rows[above].obj && !s_rows[above].thumbTried) return above;
+        if (below <= last && s_rows[below].obj && !s_rows[below].thumbTried) return below;
+        if (above >= first && s_rows[above].obj && !s_rows[above].thumbTried) return above;
     }
     return -1;
 }
@@ -177,22 +216,58 @@ void thumb_warm() {
     lv_timer_resume(s_thumbTimer);
 }
 
+void thumb_quiet_cb(lv_timer_t*) {
+    if (s_thumbQuietTimer) lv_timer_pause(s_thumbQuietTimer);
+    thumb_warm();
+}
+
+/// Decoding stops now and starts again once the list has stood still. Called
+/// from everything that moves the selection.
+void thumb_defer() {
+    if (s_thumbTimer) lv_timer_pause(s_thumbTimer);
+    if (!s_thumbQuietTimer) {
+        s_thumbQuietTimer = lv_timer_create(thumb_quiet_cb, kThumbQuietMs, nullptr);
+    }
+    lv_timer_reset(s_thumbQuietTimer);
+    lv_timer_resume(s_thumbQuietTimer);
+}
+
 // ── Cover pane ───────────────────────────────────────────────────────────────
 
+/* One cover in the image cache at a time. A decoded 122x122 is ~59 kB of the
+ * 192 kB LVGL keeps for images, so a few of them evict every row thumbnail --
+ * and the next scroll decodes those again at draw time, inside the refresh,
+ * which is what made a single click of the encoder take a third of a second. */
 void cover_show(int idx) {
     auto* mgr = crosspad::getKitManager();
     auto* kit = mgr ? mgr->getKit(idx) : nullptr;
     if (!kit || !s_coverImg || !s_coverLetter) return;
 
     const std::string path = crosspad::kitAssetPath(kit->path, "cover.png");
+    const std::string previous = s_coverPathShown;
     if (fileExists(path)) {
+        /* Decode here, not at draw time. Setting the source alone leaves the
+         * PNG to be read and decoded inside the next refresh -- one frame in
+         * the middle of a scroll taking over a tenth of a second, which is
+         * felt as the list catching. The same open+close the thumbnails use. */
+        lv_image_decoder_dsc_t dsc;
+        if (lv_image_decoder_open(&dsc, path.c_str(), nullptr) == LV_RESULT_OK) {
+            lv_image_decoder_close(&dsc);
+        }
         lv_image_set_src(s_coverImg, path.c_str());
+        s_coverPathShown = path;
         lv_obj_remove_flag(s_coverImg, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_coverLetter, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_label_set_text(s_coverLetter, initialOf(*kit));
         lv_obj_add_flag(s_coverImg, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_coverLetter, LV_OBJ_FLAG_HIDDEN);
+        s_coverPathShown.clear();
+    }
+    /* After the swap, never before: dropping what is still on screen only buys
+     * the decode back. */
+    if (!previous.empty() && previous != s_coverPathShown) {
+        lv_image_cache_drop(previous.c_str());
     }
     s_coverShown = idx;
 }
@@ -214,27 +289,33 @@ void cover_request(int idx) {
 
 // ── Selection ────────────────────────────────────────────────────────────────
 
-/// The caret never moves: it sits against the list's first row slot, and the
-/// selection is whichever row the list has been scrolled under it. A caret
-/// that tracked the selection instead read as part of the row it touched —
-/// one more highlight moving with the choice, which is what it was meant to
-/// replace.
-void caret_place() {
-    if (!s_caret) return;
-    const int32_t h = lv_font_get_line_height(&lv_font_montserrat_14);
-    lv_obj_set_y(s_caret, (kRowH - h) / 2);
-    lv_obj_remove_flag(s_caret, LV_OBJ_FLAG_HIDDEN);
+/// Put the frame and the caret on the selected row, wherever the list is.
+///
+/// They used to be nailed to the first row slot and the list was scrolled to
+/// bring the selection under them -- which repainted every visible row, their
+/// thumbnails and their twelve labels, for a selection that moved by one. The
+/// marker moving instead repaints the row it leaves and the row it lands on.
+void selection_mark() {
+    if (s_selected < 0 || !s_list) return;
+    const int32_t off = (int32_t)s_selected * kRowPitch - lv_obj_get_scroll_y(s_list);
+    if (s_frame) lv_obj_set_pos(s_frame, lv_obj_get_x(s_list), lv_obj_get_y(s_list) + off);
+    if (s_caret) {
+        const int32_t h = lv_font_get_line_height(&lv_font_montserrat_14);
+        lv_obj_set_y(s_caret, off + (kRowH - h) / 2);
+        lv_obj_remove_flag(s_caret, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
-/// The row slot currently against the caret.
-int row_under_caret() {
-    if (!s_list) return 0;
-    const int32_t y = lv_obj_get_scroll_y(s_list);
-    int idx = (int)((y + kRowPitch / 2) / kRowPitch);
-    if (idx < 0) idx = 0;
+/// First and last row fully inside the viewport.
+void rows_in_view(int& first, int& last) {
     const int n = (int)s_rows.size();
-    if (idx >= n) idx = n - 1;
-    return idx;
+    const int32_t y = lv_obj_get_scroll_y(s_list);
+    const int32_t h = lv_obj_get_height(s_list);
+    first = (int)((y + kRowPitch - 1) / kRowPitch);
+    last  = (int)((y + h) / kRowPitch) - 1;
+    if (first < 0) first = 0;
+    if (last >= n) last = n - 1;
+    if (last < first) last = first;
 }
 
 /* select_row() scrolls, and scrolling re-enters through LV_EVENT_SCROLL. The
@@ -278,20 +359,34 @@ void ensure_window(int centre) {
     if (last >= n) last = n - 1;
     if (first == s_winFirst && last == s_winLast) return;
 
+    /* Still comfortably inside what is built -- including at the ends of the
+     * list, where the clamp is what keeps the selection away from an edge the
+     * window cannot pass. Nothing to do until it nears a real edge. */
+    const int needFirst = centre - kRowSlack < 0 ? 0 : centre - kRowSlack;
+    const int needLast  = centre + kRowSlack >= n ? n - 1 : centre + kRowSlack;
+    if (s_winLast >= s_winFirst && s_winFirst <= needFirst && s_winLast >= needLast) return;
+
+    const int prevFirst = s_winFirst;
     const bool wasBuilding = s_building;
     s_building = true;
     for (int i = s_winFirst; i <= s_winLast; ++i) {
         if (i < first || i > last) destroy_row(i);
     }
-    bool added = false;
+    /* The group walks its objects in insertion order, so a row appended below
+     * the last one is already in the right place; only a row built above the
+     * window's old start puts the order out, and only that needs the rebuild. */
+    bool addedAbove = false;
     for (int i = first; i <= last; ++i) {
-        if (!s_rows[i].obj) { build_row(i); added = true; }
+        if (!s_rows[i].obj) {
+            build_row(i);
+            if (i < prevFirst || s_winLast < s_winFirst) addedAbove = true;
+        }
     }
     s_winFirst = first;
     s_winLast  = last;
-    if (added) group_reorder();
+    if (addedAbove) group_reorder();
     s_building = wasBuilding;
-    thumb_warm();
+    thumb_defer();
 }
 
 void select_row(int idx) {
@@ -306,13 +401,23 @@ void select_row(int idx) {
         lv_label_set_text(s_coverName, kit->name.c_str());
         lv_label_set_text(s_coverAuthor, kit->author.c_str());
     }
-    /* To the caret, not merely into view: the caret marks the first row slot,
-     * so the selected row has to be the one that lands there. */
-    s_scrolling = true;
-    lv_obj_scroll_to_y(s_list, idx * kRowPitch, LV_ANIM_OFF);
-    s_scrolling = false;
+    /* Into view, and no further: the list only moves when the selection would
+     * leave it, which is what keeps a click of the encoder to two repainted
+     * rows instead of a whole screen of them. */
+    const int32_t top  = (int32_t)idx * kRowPitch;
+    const int32_t view = lv_obj_get_height(s_list);
+    const int32_t sy   = lv_obj_get_scroll_y(s_list);
+    int32_t want = sy;
+    if (top < sy)                         want = top;
+    else if (top + kRowH > sy + view)     want = top + kRowH - view;
+    if (want != sy) {
+        s_scrolling = true;
+        lv_obj_scroll_to_y(s_list, want, LV_ANIM_OFF);
+        s_scrolling = false;
+    }
+    selection_mark();
     cover_request(idx);
-    thumb_warm();
+    thumb_defer();
 }
 
 // ── Loading ──────────────────────────────────────────────────────────────────
@@ -371,8 +476,49 @@ void load_poll_cb(lv_timer_t*) {
 
 // ── Events ───────────────────────────────────────────────────────────────────
 
+/* LVGL moves the focus one row per detent; this turns a fast run of them into
+ * a longer jump before anything is drawn, so a spin crosses the list in a
+ * handful of repaints instead of seventy. */
 void row_focused_cb(lv_event_t* e) {
-    select_row((int)(intptr_t)lv_event_get_user_data(e));
+    if (s_refocusing) return;
+    const int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    const int n = (int)s_rows.size();
+    if (s_building || idx < 0 || idx >= n) { select_row(idx); return; }
+
+    const uint32_t now = lv_tick_get();
+    const int dir = (s_selected < 0) ? 0 : (idx > s_selected) - (idx < s_selected);
+    int target = idx;
+
+    /* Only a single-row move is a detent; a click on a row, or a drag, is not
+     * something to accelerate. */
+    if (dir != 0 && idx - s_selected == dir) {
+        /* Strictly later, not merely soon: a quick flick reaches LVGL as
+         * several key presses inside one tick, and those already carry their
+         * own distance -- doubling on top of them would fling the list. */
+        const uint32_t since = now - s_lastStepMs;
+        if (dir == s_lastStepDir && since > 0 && since <= kFastStepMs) {
+            s_stepRun = s_stepRun < kMaxStep ? s_stepRun * 2 : kMaxStep;
+        } else {
+            s_stepRun = 1;
+        }
+        target = idx + dir * (s_stepRun - 1);
+        if (target < 0) target = 0;
+        if (target >= n) target = n - 1;
+    } else {
+        s_stepRun = 1;
+    }
+    s_lastStepDir = dir;
+    s_lastStepMs = now;
+
+    if (target != idx) {
+        /* The jump lands on a row that may not be built yet, and moving the
+         * focus fires this callback again. */
+        s_refocusing = true;
+        ensure_window(target);
+        if (s_rows[target].obj) lv_group_focus_obj(s_rows[target].obj);
+        s_refocusing = false;
+    }
+    select_row(target);
 }
 
 /* Encoder press and touch both land here, and both load on the first click:
@@ -392,23 +538,37 @@ void list_scrolled_cb(lv_event_t*) {
     const int32_t h = lv_obj_get_height(s_list);
     ensure_window((int)((y + h / 2) / kRowPitch));
 
-    /* The caret is fixed, so dragging the list is how touch chooses: the row
-     * that comes to rest under it is the selection, cover and all. */
-    const int idx = row_under_caret();
-    if (idx != s_selected) select_row(idx);
+    /* A drag keeps the kit it had selected for as long as it is on screen;
+     * dragged past it, the nearest row still in view takes over. */
+    int first = 0, last = 0;
+    rows_in_view(first, last);
+    if (s_selected < first)     select_row(first);
+    else if (s_selected > last) select_row(last);
+    else                        selection_mark();
 }
 
-/* A flick comes to rest wherever momentum ends, and with a fixed caret that
- * means it would point between two rows. LVGL's own scroll snap is not usable
- * here: it snaps to any child, and the tail spacer is one. */
+/* A flick comes to rest wherever momentum ends, which is usually between two
+ * rows. LVGL's own scroll snap is not usable here: it snaps to any child, and
+ * the tail spacer is one. */
 void list_scroll_end_cb(lv_event_t*) {
     if (s_building || s_scrolling || !s_list || s_rows.empty()) return;
-    const int idx = row_under_caret();
-    const int32_t want = idx * kRowPitch;
-    if (lv_obj_get_scroll_y(s_list) == want) return;
+    const int32_t y = lv_obj_get_scroll_y(s_list);
+    const int32_t want = ((y + kRowPitch / 2) / kRowPitch) * kRowPitch;
+    if (y == want) return;
     s_scrolling = true;
     lv_obj_scroll_to_y(s_list, want, LV_ANIM_ON);
     s_scrolling = false;
+}
+
+/* The power button's short click has to leave through the browser's own close
+ * path. Without this hook powerBack() falls through to "destroy the running
+ * app", which tears the overlay down directly -- and the hook that puts the
+ * app the user came from back on screen is raised by the close path and by
+ * nothing else, so back from the browser landed on the launcher. */
+bool selector_back_cb(void*) {
+    if (!s_overlay) return false;
+    kit_selector_close();
+    return true;
 }
 
 void back_clicked_cb(lv_event_t*) {
@@ -563,7 +723,6 @@ void build_rows() {
         lv_obj_set_width(moreBody, LV_PCT(100));
         lv_label_set_text(moreBody, "Put kit folders in\ncrosspad/kits\non the SD card.");
     }
-    caret_place();
     const int current = mgr->getCurrentKitId();
     ensure_window(current >= 0 && current < count ? current : 0);
     s_building = false;
@@ -762,6 +921,7 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     build_rows();
 
     s_loadTimer = lv_timer_create(load_poll_cb, 100, nullptr);
+    s_backToken = crosspad_gui::ui_back_push(selector_back_cb, nullptr);
     return scr;
 }
 
@@ -777,9 +937,11 @@ void reset_state() {
     s_building = true;
     s_loadingStarted = false;
 
+    if (s_backToken) { crosspad_gui::ui_back_remove(s_backToken); s_backToken = 0; }
     if (s_loadTimer)  { lv_timer_delete(s_loadTimer);  s_loadTimer = nullptr; }
     if (s_coverTimer) { lv_timer_delete(s_coverTimer); s_coverTimer = nullptr; }
     if (s_thumbTimer) { lv_timer_delete(s_thumbTimer); s_thumbTimer = nullptr; }
+    if (s_thumbQuietTimer) { lv_timer_delete(s_thumbQuietTimer); s_thumbQuietTimer = nullptr; }
 
     // Restore the previous encoder group (the launcher's) before deleting ours
     if (lv_indev_t* enc = encoder()) {
@@ -792,6 +954,11 @@ void reset_state() {
     s_winFirst = 0; s_winLast = -1;
     s_selected = s_loaded = -1;
     s_coverWanted = s_coverShown = -1;
+    s_coverPathShown.clear();
+    s_lastStepMs = 0;
+    s_lastStepDir = 0;
+    s_stepRun = 1;
+    s_refocusing = false;
     s_overlay = s_list = s_coverBox = s_coverImg = s_coverLetter = nullptr;
     s_coverName = s_coverAuthor = s_statusLabel = s_backBtn = s_busy = nullptr;
     s_caret = s_frame = s_moreCard = nullptr;
