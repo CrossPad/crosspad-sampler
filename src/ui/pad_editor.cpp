@@ -345,17 +345,34 @@ lv_obj_t * pad_editor_create(lv_obj_t *parent, crosspad_gui::ILvglApp * a) {
 /// waveform request is already queued, and the cache generation brings the
 /// editor back to this the moment it lands.
 static bool RefreshSourceInfo(const char * fullPath) {
-    WaveformCacheEntry * entry = fullPath ? waveform_cache_find(fullPath) : nullptr;
-    if (!entry || !entry->valid || entry->srcFrames == 0) {
-        waveformInfoValid = false;
-        return false;
+    if (!fullPath) { waveformInfoValid = false; return false; }
+
+    WaveformCacheEntry * entry = waveform_cache_find(fullPath);
+    if (entry && entry->valid && entry->srcFrames != 0) {
+        waveformSampleInfo.sampleCount      = entry->srcFrames;
+        waveformSampleInfo.sampleRate       = entry->srcSampleRate;
+        waveformSampleInfo.numberOfChannels = entry->srcChannels;
+        waveformSampleInfo.bitsPerSample    = entry->srcBitDepth;
+        waveformInfoValid = true;
+        return true;
     }
-    waveformSampleInfo.sampleCount      = entry->srcFrames;
-    waveformSampleInfo.sampleRate       = entry->srcSampleRate;
-    waveformSampleInfo.numberOfChannels = entry->srcChannels;
-    waveformSampleInfo.bitsPerSample    = entry->srcBitDepth;
-    waveformInfoValid = true;
-    return true;
+
+    /* Nothing cached yet -- ask the player, which has the file open already and
+     * gives up after 30 ms rather than waiting on the card. Without this the
+     * markers and the playhead waited for the waveform loader to come round,
+     * and on a pad whose sample had not been warmed they never appeared at
+     * all. */
+    auto & cbs = sampler_get_platform_callbacks();
+    if (cbs.player.getSampleInfo) {
+        SampleInfo info = {};
+        if (cbs.player.getSampleInfo(fullPath, &info) && info.sampleCount > 0) {
+            waveformSampleInfo = info;
+            waveformInfoValid = true;
+            return true;
+        }
+    }
+    waveformInfoValid = false;
+    return false;
 }
 
 static void UpdateWaveformMarkers() {
@@ -930,6 +947,10 @@ static void UpdatePadEditor(lv_timer_t * e) {
      * thread; this is where it becomes UI. */
     if (const int hit = g_padPressPending.exchange(0, std::memory_order_relaxed)) {
         lv_subject_set_int(&s_pad_sampler, hit);
+        /* The pad is playing, so the waveform should say where in the sample it
+         * is -- the same playhead a click on the sample list starts. */
+        waveformStartTime = portable_millis();
+        waveformPlaying   = true;
     }
 
     // Only re-read the settings when the shown pad changed.

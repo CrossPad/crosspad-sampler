@@ -1059,6 +1059,25 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
                         waveform_view_set_markers(waveformCanvas, startNorm, endNorm);
                     }
                 }
+            } else if (waveformCanvas && sampleInfoValid
+                       && currentSampleInfo.sampleCount > 0) {
+                /* Same pad, but its trim may have moved -- the editor writes
+                 * start and end straight into the kit, and this panel is what
+                 * you look at when you come back out of it. Redrawn only when
+                 * the numbers actually change. */
+                static uint32_t lastStart = 0xFFFFFFFFu;
+                static uint32_t lastEnd   = 0xFFFFFFFFu;
+                const uint32_t startS = kit2->pads[pad - 1].samples[sampleIdx].start;
+                const uint32_t endS   = kit2->pads[pad - 1].samples[sampleIdx].end;
+                if (startS != lastStart || endS != lastEnd) {
+                    lastStart = startS;
+                    lastEnd   = endS;
+                    const uint32_t total = currentSampleInfo.sampleCount;
+                    uint32_t e = (endS == 0 || endS > total) ? total : endS;
+                    waveform_view_set_markers(waveformCanvas,
+                                              total ? (float)startS / (float)total : 0.0f,
+                                              total ? (float)e / (float)total : 1.0f);
+                }
             }
         } else if (pad != lastDisplayedPad) {
             lastDisplayedPad = pad;
