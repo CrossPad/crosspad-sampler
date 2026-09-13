@@ -10,6 +10,7 @@
 #include "crosspad-sampler/SamplerConfig.hpp"
 #include "crosspad-sampler/SamplerPlatformCallbacks.hpp"
 #include "crosspad-sampler/ui/pitched_editor.hpp"
+#include "crosspad-sampler/ui/sampler_panel.hpp"
 #include "crosspad-sampler/ui/waveform_view.hpp"
 #include "crosspad-sampler/waveform/waveform_cache.hpp"
 #include "crosspad-sampler/waveform/waveform_loader.hpp"
@@ -639,6 +640,10 @@ lv_obj_t* pitched_editor_create(lv_obj_t* parent) {
     KitInfo* kit = currentKit();
     if (!kit) return nullptr;
 
+    /* Same as the pad editor: nothing of the panel behind is visible, so
+     * nothing of it should be repainting. */
+    sampler_panel_set_covered(true);
+
     s_cont = lv_obj_create(parent);
     lv_obj_set_size(s_cont, lv_obj_get_content_width(parent), lv_obj_get_content_height(parent));
     lv_obj_center(s_cont);
@@ -927,6 +932,7 @@ lv_obj_t* pitched_editor_create(lv_obj_t* parent) {
     waveform_view_set_file_provider(fileWaveformProvider, nullptr);
 
     lv_obj_add_event_cb(s_cont, [](lv_event_t*) {
+        sampler_panel_set_covered(false);   // the panel is on show again
         waveform_view_set_file_provider(nullptr, nullptr);
         crosspad_gui::ui_back_remove(s_backToken);
         s_backToken = 0;

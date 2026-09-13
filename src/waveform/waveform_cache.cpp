@@ -157,7 +157,9 @@ WaveformCacheEntry* waveform_cache_find(const char* filename) {
     return result;
 }
 
-bool waveform_cache_add(const char* filename, int16_t* waveform, uint32_t sampleCount) {
+bool waveform_cache_add(const char* filename, int16_t* waveform, uint32_t sampleCount,
+                        uint32_t srcFrames, uint32_t srcSampleRate,
+                        uint8_t srcChannels, uint8_t srcBitDepth) {
     if (!filename || !waveform || sampleCount == 0) return false;
     bool ok = false;
 
@@ -185,6 +187,10 @@ bool waveform_cache_add(const char* filename, int16_t* waveform, uint32_t sample
             memcpy(entry->waveformData, waveform, sampleCount * sizeof(int16_t));
             snprintf(entry->filename, sizeof(entry->filename), "%s", filename);
             entry->sampleCount = sampleCount;
+            entry->srcFrames = srcFrames;
+            entry->srcSampleRate = srcSampleRate;
+            entry->srcChannels = srcChannels;
+            entry->srcBitDepth = srcBitDepth;
             entry->valid = true;
             entry->lastUsed = ++s_timestamp;
             s_generation.fetch_add(1);
@@ -247,7 +253,10 @@ void waveform_cache_notify_cached() {
 static const char CACHE_MAGIC[4] = {'W', 'F', 'C', 'A'};
 // v2: full-file envelope (preload uses start=0/end=0). v1 entries were
 // cropped to the kit's in/out and would misalign with new markers.
-static const uint8_t CACHE_VERSION = 2;
+/* 3: entries carry the source file's frames/rate/channels/depth, so the pad
+ * editor can draw its markers without reopening the wav. An older file is
+ * rejected rather than migrated -- it is a cache, the loader refills it. */
+static const uint8_t CACHE_VERSION = 3;
 
 bool waveform_cache_save_to_disk(const char* kitJsonPath) {
     auto& wf = sampler_get_platform_callbacks().waveform;
@@ -266,11 +275,13 @@ bool waveform_cache_save_to_disk(const char* kitJsonPath) {
     if (validCount == 0) return false;
 
     // Blob layout: 8-byte header (4 magic, version, count, 2 reserved), then
-    // per entry 1 fnLen + fn + 4 sampleCount + data.
+    // per entry 1 fnLen + fn + 4 sampleCount + 4 srcFrames + 4 srcSampleRate
+    // + 1 srcChannels + 1 srcBitDepth + data.
     uint32_t maxSize = 8;
     for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {
         if (s_cache[i].valid && s_cache[i].waveformData) {
-            maxSize += 1 + strlen(s_cache[i].filename) + 4 + s_cache[i].sampleCount * sizeof(int16_t);
+            maxSize += 1 + strlen(s_cache[i].filename) + 4 + 10
+                     + s_cache[i].sampleCount * sizeof(int16_t);
         }
     }
 
@@ -291,6 +302,10 @@ bool waveform_cache_save_to_disk(const char* kitJsonPath) {
             buf[pos++] = fnLen;
             memcpy(buf + pos, s_cache[i].filename, fnLen); pos += fnLen;
             memcpy(buf + pos, &s_cache[i].sampleCount, 4); pos += 4;
+            memcpy(buf + pos, &s_cache[i].srcFrames, 4); pos += 4;
+            memcpy(buf + pos, &s_cache[i].srcSampleRate, 4); pos += 4;
+            buf[pos++] = s_cache[i].srcChannels;
+            buf[pos++] = s_cache[i].srcBitDepth;
             uint32_t dataBytes = s_cache[i].sampleCount * sizeof(int16_t);
             memcpy(buf + pos, s_cache[i].waveformData, dataBytes); pos += dataBytes;
         }
@@ -339,6 +354,13 @@ bool waveform_cache_load_from_disk(const char* kitJsonPath) {
         memcpy(&sampleCount, buf + pos, 4); pos += 4;
         if (sampleCount == 0 || sampleCount > 10000) break;
 
+        if (pos + 10 > bytesRead) break;
+        uint32_t srcFrames = 0, srcSampleRate = 0;
+        memcpy(&srcFrames, buf + pos, 4); pos += 4;
+        memcpy(&srcSampleRate, buf + pos, 4); pos += 4;
+        uint8_t srcChannels = buf[pos++];
+        uint8_t srcBitDepth = buf[pos++];
+
         uint32_t dataBytes = sampleCount * sizeof(int16_t);
         if (pos + dataBytes > bytesRead) break;
 
@@ -359,6 +381,10 @@ bool waveform_cache_load_from_disk(const char* kitJsonPath) {
                 snprintf(entry->filename, sizeof(entry->filename), "%s", filename);
                 entry->waveformData = data;
                 entry->sampleCount = sampleCount;
+                entry->srcFrames = srcFrames;
+                entry->srcSampleRate = srcSampleRate;
+                entry->srcChannels = srcChannels;
+                entry->srcBitDepth = srcBitDepth;
                 entry->valid = true;
                 entry->lastUsed = ++s_timestamp;
                 s_generation.fetch_add(1);

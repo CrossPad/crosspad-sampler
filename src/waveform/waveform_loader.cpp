@@ -158,7 +158,9 @@ static void loader_task(void* /*param*/) {
             continue;
         }
 
-        if (ok && waveform_cache_add(req.filename, buf, samplesToRead)) {
+        if (ok && waveform_cache_add(req.filename, buf, samplesToRead,
+                                     info.sampleCount, info.sampleRate,
+                                     info.channels, info.bitDepth)) {
             s_stats.loaded++;
         } else {
             printf("[WFLoader] Failed to load (attempt %u): %s\n",

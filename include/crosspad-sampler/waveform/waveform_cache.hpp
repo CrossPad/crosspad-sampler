@@ -20,7 +20,15 @@ namespace crosspad_sampler {
 struct WaveformCacheEntry {
     char      filename[128] = {};
     int16_t*  waveformData  = nullptr;   // Platform-allocated (PSRAM or heap)
-    uint32_t  sampleCount   = 0;
+    uint32_t  sampleCount   = 0;         // points in waveformData, not frames
+    /// What the source file said when the loader opened it. The pad editor
+    /// needs these for the start/end markers and the playhead, and reading
+    /// them again means an fopen -- which on the LVGL thread is a frozen
+    /// screen for as long as the streamer keeps the card busy. 0 = not known.
+    uint32_t  srcFrames     = 0;
+    uint32_t  srcSampleRate = 0;
+    uint8_t   srcChannels   = 0;
+    uint8_t   srcBitDepth   = 0;
     bool      valid         = false;
     uint32_t  lastUsed      = 0;         // LRU timestamp
 };
@@ -50,8 +58,12 @@ void waveform_cache_clear();
 /// Thread-safe lookup.  Updates LRU timestamp on hit.
 WaveformCacheEntry* waveform_cache_find(const char* filename);
 
-/// Thread-safe insert.  Uses LRU eviction when full.
-bool waveform_cache_add(const char* filename, int16_t* waveform, uint32_t sampleCount);
+/// Thread-safe insert.  Uses LRU eviction when full. The source-file numbers
+/// are optional: a caller that does not have them stores zeros, and a reader
+/// treats that as "not read yet" rather than as an empty file.
+bool waveform_cache_add(const char* filename, int16_t* waveform, uint32_t sampleCount,
+                        uint32_t srcFrames = 0, uint32_t srcSampleRate = 0,
+                        uint8_t srcChannels = 0, uint8_t srcBitDepth = 0);
 
 /// Is this waveform cached? Never waits for the mutex and does not touch LRU:
 /// for a caller that must not block, such as the prio-1 CDC drain loop, where

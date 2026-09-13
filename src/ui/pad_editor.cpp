@@ -5,6 +5,7 @@
 #include <lvgl.h>
 #include "crosspad-sampler/SamplerPlatformCallbacks.hpp"
 #include "crosspad-sampler/SamplerConfig.hpp"
+#include "crosspad-sampler/ui/sampler_panel.hpp"
 #include "crosspad-sampler/ui/waveform_view.hpp"
 #include "crosspad-sampler/waveform/waveform_cache.hpp"
 
@@ -200,6 +201,9 @@ static bool padEditorBack_cb(void *) {
 
 lv_obj_t * pad_editor_create(lv_obj_t *parent, crosspad_gui::ILvglApp * a) {
     thisApp = a;
+    /* The panel behind is fully covered from here on; leaving it polling costs
+     * a repaint of whatever the editor draws over it, twenty times a second. */
+    sampler_panel_set_covered(true);
 
 
     lv_obj_t * cont = lv_obj_create(parent);
@@ -327,6 +331,28 @@ lv_obj_t * pad_editor_create(lv_obj_t *parent, crosspad_gui::ILvglApp * a) {
     return cont;
 }
 
+/// The source file's numbers, taken from the waveform cache the loader fills.
+///
+/// This runs on the LVGL thread, and the card is shared with the streamer: the
+/// fopen that used to be here blocked the UI for as long as the card was busy
+/// -- up to the FatFs timeout -- so hitting pads in the editor froze the screen
+/// once per pad. A miss here is not an error, it is "not read yet": the
+/// waveform request is already queued, and the cache generation brings the
+/// editor back to this the moment it lands.
+static bool RefreshSourceInfo(const char * fullPath) {
+    WaveformCacheEntry * entry = fullPath ? waveform_cache_find(fullPath) : nullptr;
+    if (!entry || !entry->valid || entry->srcFrames == 0) {
+        waveformInfoValid = false;
+        return false;
+    }
+    waveformSampleInfo.sampleCount      = entry->srcFrames;
+    waveformSampleInfo.sampleRate       = entry->srcSampleRate;
+    waveformSampleInfo.numberOfChannels = entry->srcChannels;
+    waveformSampleInfo.bitsPerSample    = entry->srcBitDepth;
+    waveformInfoValid = true;
+    return true;
+}
+
 static void UpdateWaveformMarkers() {
     if (!waveformView || !waveformInfoValid || waveformSampleInfo.sampleCount == 0) return;
 
@@ -351,6 +377,7 @@ static void UpdateWaveformMarkers() {
 }
 
 static void DestroyPadEditor(lv_event_t * e) {
+    sampler_panel_set_covered(false);   // the panel is on show again
     crosspad_gui::ui_back_remove(s_backToken);
     s_backToken = 0;
 
@@ -749,8 +776,24 @@ void Load_button_cb(lv_event_t * e) {
 static void Browse_button_cb(lv_event_t * e) {
     LV_LOG_ERROR("Browse samples button pressed");
     lv_obj_t * parent = thisApp ? thisApp->getAppContainer() : s_padEditorCont;
-    lv_CreateFileExplorer(parent, FILTER_AUDIO, DEFAULT_KIT_PATH, Load_button_cb, lv_event_get_user_data(e));
+    lv_obj_t * explorer = lv_CreateFileExplorer(parent, FILTER_AUDIO, DEFAULT_KIT_PATH,
+                                                Load_button_cb, lv_event_get_user_data(e));
     lv_timer_pause(t_padUpdate);
+
+    /* Nothing under a full-screen browser needs drawing. The editor and the
+     * sampler panel beneath it stay in the tree, and LVGL was redrawing both
+     * under every frame of the list -- three screens' worth of work for one
+     * click of the encoder. Hidden while the browser is up, back when it goes.
+     * Only when the browser is a sibling: opened as the editor's own child it
+     * would go with it. */
+    lv_obj_t * panel = s_padEditorCont ? lv_obj_get_parent(s_padEditorCont) : nullptr;
+    if (explorer && panel && parent != s_padEditorCont) {
+        lv_obj_add_flag(panel, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_event_cb(explorer, [](lv_event_t *) {
+            lv_obj_t * p = s_padEditorCont ? lv_obj_get_parent(s_padEditorCont) : nullptr;
+            if (p) lv_obj_remove_flag(p, LV_OBJ_FLAG_HIDDEN);
+        }, LV_EVENT_DELETE, nullptr);
+    }
 }
 
 static bool isMoving = false;
@@ -905,6 +948,12 @@ static void UpdatePadEditor(lv_timer_t * e) {
             lastDrawnWaveformGen = waveformGen;
             if (waveformView && pad->GetSampleCount() > 0) {
                 waveform_view_load(waveformView, (padId - 1) % 16, 0);
+                /* The same load carries the file's own numbers, so the markers
+                 * that had nothing to sit on when the pad was picked appear
+                 * with the waveform rather than on the next pad change. */
+                if (!waveformInfoValid && RefreshSourceInfo(currentWaveformPath)) {
+                    UpdateWaveformMarkers();
+                }
             }
         }
         return;
@@ -992,34 +1041,8 @@ static void UpdatePadEditor(lv_timer_t * e) {
             currentWaveformPath[sizeof(currentWaveformPath) - 1] = '\0';
             waveform_view_load(waveformView, (padId - 1) % 16, 0);
 
-            // The waveform-side getFileInfo: its own fopen, so no contention
-            // with the streaming handle.
-            if (pathChanged || !waveformInfoValid) {
-                auto& wf = sampler_get_platform_callbacks().waveform;
-                AudioFileInfo info = {};
-                if (wf.getFileInfo && wf.getFileInfo(fullPath, &info) && info.sampleCount > 0) {
-                    waveformSampleInfo.sampleCount      = info.sampleCount;
-                    waveformSampleInfo.sampleRate       = info.sampleRate;
-                    waveformSampleInfo.numberOfChannels = info.channels;
-                    waveformSampleInfo.bitsPerSample    = info.bitDepth;
-                    waveformInfoValid = true;
-                } else {
-                    waveformInfoValid = false;
-                }
-            }
-
-            if (waveformInfoValid && waveformSampleInfo.sampleCount > 0) {
-                uint32_t startS = pad->samples[0].start;
-                uint32_t endS = pad->samples[0].end;
-                uint32_t totalSamples = waveformSampleInfo.sampleCount;
-
-                if (endS == 0 || endS > totalSamples) endS = totalSamples;
-
-                float startPos = totalSamples > 0 ? (float)startS / (float)totalSamples : 0.0f;
-                float endPos = totalSamples > 0 ? (float)endS / (float)totalSamples : 1.0f;
-
-                waveform_view_set_markers(waveformView, startPos, endPos);
-            }
+            if (pathChanged || !waveformInfoValid) RefreshSourceInfo(fullPath);
+            UpdateWaveformMarkers();
         }
     }
 
