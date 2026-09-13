@@ -85,6 +85,7 @@ static lv_obj_t * seqStopBtn = NULL;
 static lv_obj_t * seqSceneDrop = NULL;   // sits above the waveform
 static lv_obj_t * seqRow = NULL;         // the transport, centred at the bottom
 static lv_obj_t * seqTopRow = NULL;      // tempo, click and bars, on the scene line
+static lv_obj_t * seqSceneRow = NULL;    // the scene picker between its two arrows
 static lv_obj_t * seqEditBtn = NULL;     // the pad editor travels with the strip
 static lv_obj_t * seqToggleBtn = NULL;   // "Advanced" -- brings the strip in
 static bool seqControlsShown = false;    // the panel opens as a sampler
@@ -349,8 +350,10 @@ static void seq_sync_labels();
 static void pads_set_compact(bool compact)
 {
     if (!buttonFrame) return;
-    const int32_t btn = compact ? 16 : 25;
-    const int32_t gap = compact ? 3 : 4;
+    /* Compact is the waveform's own height: 4 * (15 + 2) + 2 is 70, which is
+     * WAVEFORM_CANVAS_HEIGHT, so the grid and the wave are the same block. */
+    const int32_t btn = compact ? 15 : 25;
+    const int32_t gap = compact ? 2 : 4;
     const int32_t side = 4 * (btn + gap) + gap;
     lv_obj_set_size(buttonFrame, side, side);
     for (int row = 0; row < 4; ++row) {
@@ -379,7 +382,7 @@ static void seq_controls_slide_cb(void * var, int32_t v)
     (void)var;
     if (seqRow)       lv_obj_set_style_translate_x(seqRow, v, 0);
     if (seqTopRow)    lv_obj_set_style_translate_x(seqTopRow, v, 0);
-    if (seqSceneDrop) lv_obj_set_style_translate_x(seqSceneDrop, v, 0);
+    if (seqSceneRow)  lv_obj_set_style_translate_x(seqSceneRow, v, 0);
     /* The pad editor is an advanced control too: a sampler you just play does
      * not need it, and leaving it on the bottom row was the one thing still
      * saying "there is more here" on a screen meant to say nothing of the kind. */
@@ -391,7 +394,7 @@ static void seq_controls_hidden_cb(lv_anim_t * a)
     (void)a;
     if (seqRow)       lv_obj_add_flag(seqRow, LV_OBJ_FLAG_HIDDEN);
     if (seqTopRow)    lv_obj_add_flag(seqTopRow, LV_OBJ_FLAG_HIDDEN);
-    if (seqSceneDrop) lv_obj_add_flag(seqSceneDrop, LV_OBJ_FLAG_HIDDEN);
+    if (seqSceneRow)  lv_obj_add_flag(seqSceneRow, LV_OBJ_FLAG_HIDDEN);
     if (seqEditBtn)   lv_obj_add_flag(seqEditBtn, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -417,16 +420,17 @@ static void seq_controls_set(bool show, bool animate)
     if (show) {
         lv_obj_remove_flag(seqRow, LV_OBJ_FLAG_HIDDEN);
         if (seqTopRow)    lv_obj_remove_flag(seqTopRow, LV_OBJ_FLAG_HIDDEN);
-        if (seqSceneDrop) lv_obj_remove_flag(seqSceneDrop, LV_OBJ_FLAG_HIDDEN);
+        if (seqSceneRow)  lv_obj_remove_flag(seqSceneRow, LV_OBJ_FLAG_HIDDEN);
         if (seqEditBtn)   lv_obj_remove_flag(seqEditBtn, LV_OBJ_FLAG_HIDDEN);
         seq_sync_labels();
     } else if (g_sampler && seqToggleBtn) {
         /* Focus cannot be left on something about to leave the screen -- but
          * it is only ours to move when it is standing on the strip. */
         lv_obj_t * focused = lv_group_get_focused(g_sampler);
-        if (focused && (focused == seqSceneDrop || focused == seqEditBtn ||
+        if (focused && (focused == seqEditBtn ||
                         lv_obj_get_parent(focused) == seqRow ||
-                        lv_obj_get_parent(focused) == seqTopRow)) {
+                        lv_obj_get_parent(focused) == seqTopRow ||
+                        lv_obj_get_parent(focused) == seqSceneRow)) {
             lv_group_focus_obj(seqToggleBtn);
         }
     }
@@ -1360,15 +1364,36 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
      * sequence you step through -- and a list says which ones exist without
      * pressing anything. The pick only queues the scene; the swap still waits
      * for the loop end, which is what the amber is for. */
-    seqSceneDrop = lv_dropdown_create(cont);
+    /* The picker between two arrows: a scene is a place in a short list, and
+     * stepping to the next one should not mean opening a list to find it. The
+     * dropdown is shorter now that it is not doing the whole job alone. */
+    seqSceneRow = lv_obj_create(cont);
+    lv_obj_remove_style_all(seqSceneRow);
+    lv_obj_set_size(seqSceneRow, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(seqSceneRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(seqSceneRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(seqSceneRow, 2, 0);
+    lv_obj_remove_flag(seqSceneRow, LV_OBJ_FLAG_SCROLLABLE);
+
+    seq_make_button(seqSceneRow, 22, 24, LV_SYMBOL_LEFT, [](lv_event_t * e) {
+        (void)e;
+        auto * sq = sequencer_or_null();
+        if (!sq) return;
+        const uint8_t n = crosspad::SequencerLimits::MAX_SEQ_INDEX + 1;
+        sq->selectScene((uint8_t)((sq->getPendingScene() + n - 1) % n));
+        seq_sync_labels();
+    });
+
+    seqSceneDrop = lv_dropdown_create(seqSceneRow);
     lv_dropdown_set_options_static(seqSceneDrop, "Seq 1\nSeq 2\nSeq 3\nSeq 4");
-    lv_obj_set_size(seqSceneDrop, WAVEFORM_CANVAS_WIDTH, 24);
+    lv_obj_set_size(seqSceneDrop, 84, 24);
     lv_obj_set_style_text_font(seqSceneDrop, &lv_font_montserrat_10, 0);
     lv_obj_set_style_pad_all(seqSceneDrop, 4, 0);
     /* -10, not -3: the pads hang from this and have to finish above the
      * transport row. Measured -- 120 px of pads from y 52 end at 172, and the
      * row starts at 174. */
-    lv_obj_align_to(seqSceneDrop, waveformCanvas, LV_ALIGN_OUT_TOP_MID, 0, -10);
+    lv_obj_align_to(seqSceneRow, waveformCanvas, LV_ALIGN_OUT_TOP_MID, 0, -10);
     lv_obj_add_event_cb(seqSceneDrop, [](lv_event_t * e) {
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1378,6 +1403,15 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     }, LV_EVENT_VALUE_CHANGED, NULL);
     apply_focus_skin(seqSceneDrop);
     if (g_sampler) lv_group_add_obj(g_sampler, seqSceneDrop);
+
+    seq_make_button(seqSceneRow, 22, 24, LV_SYMBOL_RIGHT, [](lv_event_t * e) {
+        (void)e;
+        auto * sq = sequencer_or_null();
+        if (!sq) return;
+        const uint8_t n = crosspad::SequencerLimits::MAX_SEQ_INDEX + 1;
+        sq->selectScene((uint8_t)((sq->getPendingScene() + 1) % n));
+        seq_sync_labels();
+    });
 
     /* The scene line carries what the scene is counted in: the tempo, the click
      * and the bar count, to the left of the picker. They belong with the scene
@@ -1507,7 +1541,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     });
     seqBarsLabel = lv_obj_get_child(seqBarsBtn, 0);
 
-    seqRecBtn = seq_make_button(seqRow, 30, 22, "REC", [](lv_event_t * e) {
+    seqRecBtn = seq_make_button(seqRow, 36, 26, "REC", [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1519,7 +1553,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     });
     seqRecLabel = lv_obj_get_child(seqRecBtn, 0);
 
-    seqDubBtn = seq_make_button(seqRow, 30, 22, "DUB", [](lv_event_t * e) {
+    seqDubBtn = seq_make_button(seqRow, 36, 26, "DUB", [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1529,7 +1563,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         seq_sync_labels();
     });
 
-    seqPlayBtn = seq_make_button(seqRow, 30, 22, LV_SYMBOL_PLAY, [](lv_event_t * e) {
+    seqPlayBtn = seq_make_button(seqRow, 36, 26, LV_SYMBOL_PLAY, [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1537,7 +1571,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         seq_sync_labels();
     });
 
-    seqStopBtn = seq_make_button(seqRow, 30, 22, LV_SYMBOL_STOP, [](lv_event_t * e) {
+    seqStopBtn = seq_make_button(seqRow, 36, 26, LV_SYMBOL_STOP, [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1550,8 +1584,10 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
      * waveform -- four buttons now, so the middle of the screen is the middle
      * of the row. */
     lv_obj_update_layout(cont);
-    lv_obj_align_to(seqTopRow, seqSceneDrop, LV_ALIGN_OUT_LEFT_MID, -6, 0);
-    const int32_t rowY = lv_obj_get_y(waveformCanvas) + lv_obj_get_height(waveformCanvas) + 18;
+    lv_obj_align_to(seqTopRow, seqSceneRow, LV_ALIGN_OUT_LEFT_MID, -6, 0);
+    /* +14, not +18: the transport is 26 px tall now and at +18 its bottom edge
+     * landed exactly on the row of Back / Advanced / Edit. */
+    const int32_t rowY = lv_obj_get_y(waveformCanvas) + lv_obj_get_height(waveformCanvas) + 14;
     lv_obj_align(seqRow, LV_ALIGN_TOP_MID, 0, rowY);
 
     /* "Advanced", in the gap Back and Edit leave in the middle of the bottom
@@ -1589,7 +1625,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         (void)e;
         seqRecBtn = seqRecLabel = seqClickBtn = seqBarsBtn = seqBarsLabel = NULL;
         seqDubBtn = seqPlayBtn = seqStopBtn = seqSceneDrop = seqBpmSpin = NULL;
-        seqRow = seqTopRow = seqEditBtn = seqToggleBtn = NULL;
+        seqRow = seqTopRow = seqSceneRow = seqEditBtn = seqToggleBtn = NULL;
         if (seqSyncTimer) { lv_timer_delete(seqSyncTimer); seqSyncTimer = NULL; }
     }, LV_EVENT_DELETE, NULL);
     seq_sync_labels();
