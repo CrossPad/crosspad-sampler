@@ -42,12 +42,6 @@ static inline lv_indev_t * getEncoder() {
     return crosspad_gui::getGuiPlatform().getNavigationEncoder();
 }
 
-static inline uint32_t portable_millis() {
-    auto * clk = crosspad::getPlatformServices().clock;
-    if (clk) return static_cast<uint32_t>(clk->getTimeUs() / 1000);
-    return lv_tick_get();
-}
-
 static inline KitInfo * getCurrentKit() {
     auto * mgr = crosspad::getKitManager();
     return mgr ? mgr->getCurrentKit() : nullptr;
@@ -105,8 +99,6 @@ static lv_obj_t * waveformView = NULL;
 static char currentWaveformPath[128] = {0};
 static SampleInfo waveformSampleInfo = {};
 static bool waveformInfoValid = false;
-static uint32_t waveformStartTime = 0;
-static bool waveformPlaying = false;
 
 // Step multiplier for start/end spinboxes
 static int stepMultiplierIndex = 3; // Index into multipliers array (default x1000)
@@ -438,7 +430,6 @@ static void DestroyPadEditor(lv_event_t * e) {
     currentWaveformPath[0] = '\0';
 
     waveformInfoValid = false;
-    waveformPlaying = false;
 
     lastPad = NULL;
 
@@ -910,9 +901,6 @@ void change_item_cb(lv_event_t * e) {
                     cbs.player.previewSample(fullPath, pad->samples[0].start, pad->samples[0].end,
                                              pad->volume, pad->pan);
                 }
-
-                waveformStartTime = portable_millis();
-                waveformPlaying = true;
             }
         }
         break;
@@ -947,10 +935,6 @@ static void UpdatePadEditor(lv_timer_t * e) {
      * thread; this is where it becomes UI. */
     if (const int hit = g_padPressPending.exchange(0, std::memory_order_relaxed)) {
         lv_subject_set_int(&s_pad_sampler, hit);
-        /* The pad is playing, so the waveform should say where in the sample it
-         * is -- the same playhead a click on the sample list starts. */
-        waveformStartTime = portable_millis();
-        waveformPlaying   = true;
     }
 
     // Only re-read the settings when the shown pad changed.
@@ -1079,37 +1063,6 @@ static void UpdatePadEditor(lv_timer_t * e) {
     }
 
     dontUpdateSettings = false;
-
-    if (waveformView && waveformPlaying) {
-        uint32_t now = portable_millis();
-        float progress = 0.0f;
-
-        if (waveformInfoValid && waveformSampleInfo.sampleRate > 0 && pad->GetSampleCount() > 0) {
-            uint32_t startS = pad->samples[0].start;
-            uint32_t endS = pad->samples[0].end;
-            uint32_t totalSamples = 0;
-
-            if (endS > startS) totalSamples = endS - startS;
-            else totalSamples = waveformSampleInfo.sampleCount;
-
-            if (totalSamples > 0) {
-                float totalMs = (float)totalSamples * 1000.0f / (float)waveformSampleInfo.sampleRate;
-                uint32_t elapsedMs = now - waveformStartTime;
-                progress = totalMs > 1.0f ? (float)elapsedMs / totalMs : 0.0f;
-                if (progress < 0.0f) progress = 0.0f;
-                if (progress > 1.0f) {
-                    progress = 1.0f;
-                    waveformPlaying = false; // Stop updating when done
-                }
-            }
-        }
-
-        if (waveformPlaying) {
-            waveform_view_set_playhead(waveformView, progress);
-        } else {
-            waveform_view_set_playhead(waveformView, -1.0f); // hide playhead
-        }
-    }
 }
 
 void pad_editor_destroy(lv_obj_t * editor) {
