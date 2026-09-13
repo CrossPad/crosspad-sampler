@@ -342,6 +342,32 @@ static constexpr int32_t kSeqSlideX = -330;   // past the left edge, both rows
 
 static void seq_sync_labels();
 
+/// The pad grid gives up a third of its size while the strip is out -- that is
+/// where the room for the controls comes from. createButtons() lays 4x4 of 25 px
+/// on a 4 px grid (120 px square); compact is 16 on 3 (79 px, about 65 %).
+static void pads_set_compact(bool compact)
+{
+    if (!buttonFrame) return;
+    const int32_t btn = compact ? 16 : 25;
+    const int32_t gap = compact ? 3 : 4;
+    const int32_t side = 4 * (btn + gap) + gap;
+    lv_obj_set_size(buttonFrame, side, side);
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            lv_obj_t * b = lv_obj_get_child(buttonFrame, row * 4 + col);
+            if (!b) continue;
+            lv_obj_set_size(b, btn, btn);
+            lv_obj_align(b, LV_ALIGN_TOP_LEFT, col * (btn + gap), row * (btn + gap));
+            /* The number on a 16 px face needs the smaller font; child 0 is it,
+             * child 1 is the playback-mode indicator the panel adds. */
+            if (lv_obj_t * num = lv_obj_get_child(b, 0)) {
+                lv_obj_set_style_text_font(num, compact ? &lv_font_montserrat_10
+                                                        : &lv_font_montserrat_14, 0);
+            }
+        }
+    }
+}
+
 static void seq_controls_slide_cb(void * var, int32_t v)
 {
     (void)var;
@@ -369,6 +395,8 @@ static void seq_controls_set(bool show, bool animate)
     /* An open list lives outside this panel's tree: sliding the dropdown out
      * from under it would leave it hanging over the pads. */
     if (seqSceneDrop && lv_dropdown_is_open(seqSceneDrop)) lv_dropdown_close(seqSceneDrop);
+
+    pads_set_compact(show);
 
     /* Lit while the advanced controls are out, so the button says which of the
      * two screens you are looking at without reading the rest of it. */
