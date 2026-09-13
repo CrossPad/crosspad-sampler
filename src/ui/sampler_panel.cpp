@@ -212,6 +212,19 @@ static void seq_sync_labels()
     }
 
     if (seqSceneDrop && !lv_dropdown_is_open(seqSceneDrop)) {
+        /* The list is as long as the kit's scenes, not a fixed four. Rebuilt
+         * only when the count moves -- set_options copies the string. */
+        static uint8_t shownCount = 0;
+        const uint8_t have = sq->getSceneCount();
+        if (have != shownCount && !lv_dropdown_is_open(seqSceneDrop)) {
+            std::string opts;
+            for (uint8_t i = 0; i < have; ++i) {
+                if (i) opts += '\n';
+                opts += "Seq " + std::to_string(i + 1);
+            }
+            lv_dropdown_set_options(seqSceneDrop, opts.c_str());
+            shownCount = have;
+        }
         /* Shows the scene you asked for, amber until the loop end hands it
          * over -- a switch that has not happened yet must not look like one
          * that has. Left alone while the list is open, or the sync would fight
@@ -1363,24 +1376,25 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_obj_set_style_pad_column(seqSceneRow, 2, 0);
     lv_obj_remove_flag(seqSceneRow, LV_OBJ_FLAG_SCROLLABLE);
 
-    seq_make_button(seqSceneRow, 22, 24, LV_SYMBOL_LEFT, [](lv_event_t * e) {
+    seq_make_button(seqSceneRow, 20, 24, LV_SYMBOL_LEFT, [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
-        const uint8_t n = crosspad::SequencerLimits::MAX_SEQ_INDEX + 1;
+        const uint8_t n = sq->getSceneCount();
+        if (!n) return;
         sq->selectScene((uint8_t)((sq->getPendingScene() + n - 1) % n));
         seq_sync_labels();
     });
 
     seqSceneDrop = lv_dropdown_create(seqSceneRow);
-    lv_dropdown_set_options_static(seqSceneDrop, "Seq 1\nSeq 2\nSeq 3\nSeq 4");
-    lv_obj_set_size(seqSceneDrop, 84, 24);
+    lv_dropdown_set_options(seqSceneDrop, "Seq 1");   // seq_sync_labels grows it
+    lv_obj_set_size(seqSceneDrop, 60, 24);
     lv_obj_set_style_text_font(seqSceneDrop, &lv_font_montserrat_10, 0);
     lv_obj_set_style_pad_all(seqSceneDrop, 4, 0);
     /* -10, not -3: the pads hang from this and have to finish above the
      * transport row. Measured -- 120 px of pads from y 52 end at 172, and the
      * row starts at 174. */
-    lv_obj_align_to(seqSceneRow, waveformCanvas, LV_ALIGN_OUT_TOP_MID, 0, -10);
+    lv_obj_align_to(seqSceneRow, waveformCanvas, LV_ALIGN_OUT_TOP_LEFT, 0, -10);
     lv_obj_add_event_cb(seqSceneDrop, [](lv_event_t * e) {
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1391,12 +1405,31 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     apply_focus_skin(seqSceneDrop);
     if (g_sampler) lv_group_add_obj(g_sampler, seqSceneDrop);
 
-    seq_make_button(seqSceneRow, 22, 24, LV_SYMBOL_RIGHT, [](lv_event_t * e) {
+    seq_make_button(seqSceneRow, 20, 24, LV_SYMBOL_RIGHT, [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
-        const uint8_t n = crosspad::SequencerLimits::MAX_SEQ_INDEX + 1;
+        const uint8_t n = sq->getSceneCount();
+        if (!n) return;
         sq->selectScene((uint8_t)((sq->getPendingScene() + 1) % n));
+        seq_sync_labels();
+    });
+
+    /* A kit has as many scenes as somebody made: minus drops the one on show,
+     * plus adds an empty one after the last and goes to it. The last scene
+     * never goes -- a kit has to have somewhere to record. */
+    seq_make_button(seqSceneRow, 20, 24, LV_SYMBOL_MINUS, [](lv_event_t * e) {
+        (void)e;
+        auto * sq = sequencer_or_null();
+        if (!sq) return;
+        sq->removeScene(sq->getActiveScene());
+        seq_sync_labels();
+    });
+    seq_make_button(seqSceneRow, 20, 24, LV_SYMBOL_PLUS, [](lv_event_t * e) {
+        (void)e;
+        auto * sq = sequencer_or_null();
+        if (!sq) return;
+        sq->addScene();
         seq_sync_labels();
     });
 
