@@ -316,6 +316,10 @@ static lv_obj_t * seq_make_button(lv_obj_t * parent, int w, int h, const char * 
 {
     lv_obj_t * b = lv_button_create(parent);
     lv_obj_set_size(b, w, h);
+    /* The theme pads a button by about eight pixels a side, which on a 30 px
+     * face leaves fourteen for "REC". The label is centred anyway, so the
+     * padding bought nothing and cost the text its room. */
+    lv_obj_set_style_pad_all(b, 0, 0);
     lv_obj_add_style(b, &styleButtonPressed, LV_STATE_PRESSED);
     lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t * l = lv_label_create(b);
@@ -1352,7 +1356,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_obj_set_size(seqRow, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(seqRow, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(seqRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(seqRow, 4, 0);
+    lv_obj_set_style_pad_column(seqRow, 2, 0);
     lv_obj_remove_flag(seqRow, LV_OBJ_FLAG_SCROLLABLE);
 
     /* One row under the waveform, every button the same 34x22: click, loop
@@ -1377,7 +1381,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
                                           120, seq_bpm_changed_cb, g_sampler, nullptr,
                                           &lv_font_montserrat_16);
     /* Local styles, so they beat the ones the helper added. */
-    lv_obj_set_size(seqBpmSpin, 48, 24);
+    lv_obj_set_size(seqBpmSpin, 44, 22);
     lv_obj_set_style_pad_all(seqBpmSpin, 0, 0);
     lv_obj_set_style_radius(seqBpmSpin, 5, 0);
     lv_obj_set_style_bg_color(seqBpmSpin, CP_CLICK_OFF, 0);
@@ -1431,7 +1435,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     /* Just "M". Four beat dots at 22 px high read as clutter rather than as a
      * beat -- the click is something you hear, and the colour already says
      * whether it is on. */
-    seqClickBtn = seq_make_button(seqRow, 34, 22, "M", [](lv_event_t * e) {
+    seqClickBtn = seq_make_button(seqRow, 30, 22, "M", [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1439,7 +1443,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         seq_sync_labels();
     });
 
-    seqBarsBtn = seq_make_button(seqRow, 34, 22, "4b", [](lv_event_t * e) {
+    seqBarsBtn = seq_make_button(seqRow, 30, 22, "4b", [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1451,7 +1455,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     });
     seqBarsLabel = lv_obj_get_child(seqBarsBtn, 0);
 
-    seqRecBtn = seq_make_button(seqRow, 34, 22, "REC", [](lv_event_t * e) {
+    seqRecBtn = seq_make_button(seqRow, 30, 22, "REC", [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1463,7 +1467,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     });
     seqRecLabel = lv_obj_get_child(seqRecBtn, 0);
 
-    seqDubBtn = seq_make_button(seqRow, 34, 22, "DUB", [](lv_event_t * e) {
+    seqDubBtn = seq_make_button(seqRow, 30, 22, "DUB", [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1473,7 +1477,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         seq_sync_labels();
     });
 
-    seqPlayBtn = seq_make_button(seqRow, 34, 22, LV_SYMBOL_PLAY, [](lv_event_t * e) {
+    seqPlayBtn = seq_make_button(seqRow, 30, 22, LV_SYMBOL_PLAY, [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1481,7 +1485,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         seq_sync_labels();
     });
 
-    seqStopBtn = seq_make_button(seqRow, 34, 22, LV_SYMBOL_STOP, [](lv_event_t * e) {
+    seqStopBtn = seq_make_button(seqRow, 30, 22, LV_SYMBOL_STOP, [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
