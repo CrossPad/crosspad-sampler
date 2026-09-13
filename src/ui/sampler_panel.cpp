@@ -1401,6 +1401,18 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
      * Pinned to the last digit here and re-pinned wherever it could move. */
     lv_spinbox_set_cursor_pos(seqBpmSpin, 0);
     lv_spinbox_set_step(seqBpmSpin, 1);
+    /* Centre the number in the field. A spinbox is a one-line textarea: its
+     * label is content-width and the textarea scrolls it to keep the cursor in
+     * view, which is what pushed the digits off to one side. Pinned to the
+     * field's width, centred in both directions, and the scrolling that moved
+     * it turned off. */
+    lv_obj_remove_flag(seqBpmSpin, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(seqBpmSpin, LV_DIR_NONE);
+    if (lv_obj_t * bpmLabel = lv_textarea_get_label(seqBpmSpin)) {
+        lv_obj_set_width(bpmLabel, LV_PCT(100));
+        lv_obj_set_style_text_align(bpmLabel, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(bpmLabel, LV_ALIGN_CENTER, 0, 0);
+    }
     /* Pinning the cursor sends VALUE_CHANGED (it rewrites the textarea), so it
      * is done under the sync flag: what comes back is our own doing, not a
      * tempo the player dialled. */
