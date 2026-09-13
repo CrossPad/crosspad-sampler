@@ -137,6 +137,12 @@ static void seq_bpm_changed_cb(lv_event_t * e)
 {
     auto * sq = sequencer_or_null();
     if (!sq || seqBpmSyncing) return;
+    /* No set_cursor_pos()/set_step() here, however tempting: both call
+     * lv_spinbox_updatevalue(), which sets the textarea's text, which sends
+     * VALUE_CHANGED straight back into this handler. That recursion overflowed
+     * the LVGL task's stack the moment the panel gave the spinbox its starting
+     * value -- the Sampler died on open. The cursor is pinned where it cannot
+     * recurse: on focus and on click. */
     const int32_t v = lv_spinbox_get_value((lv_obj_t *)lv_event_get_target(e));
     if ((int32_t)lroundf(sq->getBpm()) == v) return;
     sq->setBpm((float)v);
@@ -1383,6 +1389,31 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
      * text_align is what centres the number in it. */
     lv_obj_set_style_text_font(seqBpmSpin, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_align(seqBpmSpin, LV_TEXT_ALIGN_CENTER, 0);
+    /* No cursor block. The shared spinbox style paints LV_PART_CURSOR in the
+     * same white as the field, so the digit under it disappeared -- which is
+     * what made the tempo unreadable. */
+    lv_obj_set_style_bg_opa(seqBpmSpin, LV_OPA_TRANSP, LV_PART_CURSOR);
+    lv_obj_set_style_text_color(seqBpmSpin, lv_color_hex(0x000000), LV_PART_CURSOR);
+    lv_obj_set_style_text_opa(seqBpmSpin, LV_OPA_COVER, LV_PART_CURSOR);
+    /* One BPM per detent, always. A spinbox steps by whichever digit its cursor
+     * stands on -- a tap on the hundreds column and the encoder starts moving
+     * the tempo in hundreds, which is not what a tempo control should do.
+     * Pinned to the last digit here and re-pinned wherever it could move. */
+    lv_spinbox_set_cursor_pos(seqBpmSpin, 0);
+    lv_spinbox_set_step(seqBpmSpin, 1);
+    /* Pinning the cursor sends VALUE_CHANGED (it rewrites the textarea), so it
+     * is done under the sync flag: what comes back is our own doing, not a
+     * tempo the player dialled. */
+    auto pinCursor = [](lv_event_t * e) {
+        lv_obj_t * spin = (lv_obj_t *)lv_event_get_target(e);
+        const bool wasSyncing = seqBpmSyncing;
+        seqBpmSyncing = true;
+        lv_spinbox_set_cursor_pos(spin, 0);
+        lv_spinbox_set_step(spin, 1);
+        seqBpmSyncing = wasSyncing;
+    };
+    lv_obj_add_event_cb(seqBpmSpin, pinCursor, LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(seqBpmSpin, pinCursor, LV_EVENT_CLICKED, NULL);
     apply_focus_skin(seqBpmSpin);
 
     /* Just "M". Four beat dots at 22 px high read as clutter rather than as a
