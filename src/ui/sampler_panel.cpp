@@ -273,8 +273,6 @@ static bool waveformPending = false;
 static lv_obj_t * waveformPlayhead = NULL; // overlay line showing playback position
 static lv_obj_t * waveformStartMarker = NULL; // green marker for start position
 static lv_obj_t * waveformEndMarker = NULL; // red marker for end position
-static lv_obj_t * waveformDimLeft = NULL; // dimming overlay before start
-static lv_obj_t * waveformDimRight = NULL; // dimming overlay after end
 static lv_obj_t * waveformFileLabel = NULL; // sample filename under the waveform
 static lv_obj_t * waveformTimeLabel = NULL; // playback time under the waveform
 static lv_obj_t * scopeView = NULL;
@@ -1820,8 +1818,6 @@ void sampler_panel_destroy(lv_obj_t * panel)
     waveformPlayhead = nullptr;
     waveformStartMarker = nullptr;
     waveformEndMarker = nullptr;
-    waveformDimLeft = nullptr;
-    waveformDimRight = nullptr;
     waveformFileLabel = nullptr;
     waveformTimeLabel = nullptr;
     waveformModeLabel = nullptr;

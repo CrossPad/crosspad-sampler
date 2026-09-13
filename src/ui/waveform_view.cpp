@@ -46,6 +46,34 @@ static void pending_stop();
 static void pending_poll_cb(lv_timer_t*);
 static constexpr uint32_t CBUF_BYTES = LV_CANVAS_BUF_SIZE(WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT, 16, 1);
 
+/// Marker width, and the span a 0..1 position is mapped across: a marker sits
+/// left-aligned on its column, so the last one it can occupy is width - 2.
+static constexpr int32_t kMarkerW = 2;
+static constexpr int32_t kSpan    = WAVEFORM_CANVAS_WIDTH - kMarkerW;
+
+/* Where a view's trimmed region sits. The playhead is handed a position
+ * inside *that* region -- the callers divide elapsed time by the trimmed
+ * length, not by the file -- so progress 0 belongs under the start marker and
+ * progress 1 under the end one. Two views exist at most (the sampler panel's
+ * and the pad editor's); a third would simply travel the whole canvas. */
+struct ViewBand { lv_obj_t* view; float start; float end; };
+static ViewBand s_bands[4] = {};
+
+static ViewBand* band_slot(lv_obj_t* view, bool create)
+{
+    for (auto& b : s_bands) if (b.view == view) return &b;
+    if (!create) return nullptr;
+    for (auto& b : s_bands) {
+        if (!b.view) { b.view = view; b.start = 0.0f; b.end = 1.0f; return &b; }
+    }
+    return nullptr;
+}
+
+static void band_forget(lv_obj_t* view)
+{
+    for (auto& b : s_bands) if (b.view == view) b.view = nullptr;
+}
+
 // ── Helper: convert uint32_t 0xRRGGBB to lv_color_t ─────────────────────
 static lv_color_t color_from_hex(uint32_t hex)
 {
@@ -138,10 +166,29 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
     lv_obj_add_flag(pending, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(pending, LV_OBJ_FLAG_CLICKABLE);
 
+    // Everything outside start..end, children 5 and 6: the part of the file
+    // that will not be heard, greyed rather than hidden so the trim can be
+    // read against the whole sample. They never overlap the markers or the
+    // playhead, which is why they may sit on top of them in the child order.
+    for (int i = 0; i < 2; ++i) {
+        lv_obj_t* dim = lv_obj_create(cont);
+        lv_obj_set_size(dim, 1, WAVEFORM_CANVAS_HEIGHT);
+        lv_obj_set_style_bg_color(dim, lv_color_hex(0x000000), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(dim, LV_OPA_60, LV_PART_MAIN);
+        lv_obj_set_style_border_width(dim, 0, LV_PART_MAIN);
+        lv_obj_set_style_radius(dim, 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(dim, 0, LV_PART_MAIN);
+        lv_obj_align(dim, LV_ALIGN_LEFT_MID, 0, 0);
+        lv_obj_add_flag(dim, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(dim, LV_OBJ_FLAG_CLICKABLE);
+    }
+
     // The poll holds a raw pointer to this view; its owner is free to delete
-    // it at any time, and an app teardown does.
+    // it at any time, and an app teardown does. So does the band table.
     lv_obj_add_event_cb(cont, [](lv_event_t* e) {
-        if (s_pendingView == (lv_obj_t*)lv_event_get_target(e)) pending_stop();
+        lv_obj_t* target = (lv_obj_t*)lv_event_get_target(e);
+        if (s_pendingView == target) pending_stop();
+        band_forget(target);
     }, LV_EVENT_DELETE, nullptr);
 
     return cont;
@@ -276,8 +323,10 @@ void waveform_view_clear(lv_obj_t* waveformView)
 
     if (s_pendingView == waveformView) pending_stop();
 
-    // Hide the markers, the playhead and the loading label.
-    for (int i = 1; i <= 4; ++i) {
+    if (ViewBand* b = band_slot(waveformView, false)) { b->start = 0.0f; b->end = 1.0f; }
+
+    // Hide the markers, the playhead, the loading label and the dimming.
+    for (int i = 1; i <= 6; ++i) {
         lv_obj_t* child = lv_obj_get_child(waveformView, i);
         if (child) {
             lv_obj_add_flag(child, LV_OBJ_FLAG_HIDDEN);
@@ -285,22 +334,45 @@ void waveform_view_clear(lv_obj_t* waveformView)
     }
 }
 
+/// Place one dimming overlay, or hide it when it would be empty -- a trim that
+/// starts at zero has nothing to grey on the left.
+static void place_dim(lv_obj_t* dim, int32_t x, int32_t w)
+{
+    if (!dim) return;
+    if (w <= 0) { lv_obj_add_flag(dim, LV_OBJ_FLAG_HIDDEN); return; }
+    lv_obj_set_size(dim, w, WAVEFORM_CANVAS_HEIGHT);
+    lv_obj_align(dim, LV_ALIGN_LEFT_MID, x, 0);
+    lv_obj_remove_flag(dim, LV_OBJ_FLAG_HIDDEN);
+}
+
 void waveform_view_set_markers(lv_obj_t* waveformView, float startNorm, float endNorm)
 {
+    if (startNorm < 0.0f) startNorm = 0.0f;
+    if (endNorm   > 1.0f) endNorm   = 1.0f;
+    if (endNorm   < startNorm) endNorm = startNorm;
+
+    const int32_t startX = static_cast<int32_t>(startNorm * kSpan);
+    const int32_t endX   = static_cast<int32_t>(endNorm   * kSpan);
+
     lv_obj_t* startMarker = lv_obj_get_child(waveformView, 2);
     lv_obj_t* endMarker   = lv_obj_get_child(waveformView, 3);
 
     if (startMarker) {
-        int32_t x = static_cast<int32_t>(startNorm * (WAVEFORM_CANVAS_WIDTH - 2));
-        lv_obj_align(startMarker, LV_ALIGN_LEFT_MID, x, 0);
+        lv_obj_align(startMarker, LV_ALIGN_LEFT_MID, startX, 0);
         lv_obj_clear_flag(startMarker, LV_OBJ_FLAG_HIDDEN);
     }
 
     if (endMarker) {
-        int32_t x = static_cast<int32_t>(endNorm * (WAVEFORM_CANVAS_WIDTH - 2));
-        lv_obj_align(endMarker, LV_ALIGN_LEFT_MID, x, 0);
+        lv_obj_align(endMarker, LV_ALIGN_LEFT_MID, endX, 0);
         lv_obj_clear_flag(endMarker, LV_OBJ_FLAG_HIDDEN);
     }
+
+    // Up to the start marker, and from the far side of the end one.
+    place_dim(lv_obj_get_child(waveformView, 5), 0, startX);
+    place_dim(lv_obj_get_child(waveformView, 6), endX + kMarkerW,
+              WAVEFORM_CANVAS_WIDTH - (endX + kMarkerW));
+
+    if (ViewBand* b = band_slot(waveformView, true)) { b->start = startNorm; b->end = endNorm; }
 }
 
 void waveform_view_set_playhead(lv_obj_t* waveformView, float position)
@@ -308,8 +380,18 @@ void waveform_view_set_playhead(lv_obj_t* waveformView, float position)
     lv_obj_t* playhead = lv_obj_get_child(waveformView, 1);
     if (!playhead) return;
 
-    int32_t x = static_cast<int32_t>(position * (WAVEFORM_CANVAS_WIDTH - 2));
-    lv_obj_align(playhead, LV_ALIGN_LEFT_MID, x, 0);
+    // Negative is how the callers say "not playing".
+    if (position < 0.0f) { lv_obj_add_flag(playhead, LV_OBJ_FLAG_HIDDEN); return; }
+    if (position > 1.0f) position = 1.0f;
+
+    /* Progress is measured over the trimmed part, so it has to land there:
+     * a sample trimmed to its second half starts under its start marker and
+     * ends under the end one, not at the edges of the canvas. */
+    float start = 0.0f, end = 1.0f;
+    if (const ViewBand* b = band_slot(waveformView, false)) { start = b->start; end = b->end; }
+
+    const float mapped = start + position * (end - start);
+    lv_obj_align(playhead, LV_ALIGN_LEFT_MID, static_cast<int32_t>(mapped * kSpan), 0);
     lv_obj_clear_flag(playhead, LV_OBJ_FLAG_HIDDEN);
 }
 
