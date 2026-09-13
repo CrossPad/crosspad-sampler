@@ -80,6 +80,8 @@ static lv_obj_t * seqRecLabel = NULL;
 static lv_obj_t * seqClickBtn = NULL;
 static lv_obj_t * seqBarsBtn = NULL;
 static lv_obj_t * seqBarsLabel = NULL;
+static lv_obj_t * seqQuantBtn = NULL;
+static lv_obj_t * seqQuantLabel = NULL;
 static lv_obj_t * seqDubBtn = NULL;
 static lv_obj_t * seqPlayBtn = NULL;
 static lv_obj_t * seqStopBtn = NULL;
@@ -192,6 +194,23 @@ static void seq_sync_labels()
 
     const uint8_t active  = sq->getActiveScene();
     const uint8_t pending = sq->getPendingScene();
+
+    if (seqQuantBtn && seqQuantLabel) {
+        /* Off is the one worth seeing at a glance -- it is the setting that
+         * decides whether what you played is what comes back. */
+        const auto q = sq->getQuantization();
+        const bool off = q == crosspad::Quantization::Off;
+        lv_obj_set_style_bg_color(seqQuantBtn, off ? CP_CLICK_ON : CP_CLICK_OFF, 0);
+        const char * txt = "1/16";
+        switch (q) {
+            case crosspad::Quantization::Quarter:      txt = "1/4";  break;
+            case crosspad::Quantization::Eighth:       txt = "1/8";  break;
+            case crosspad::Quantization::Sixteenth:    txt = "1/16"; break;
+            case crosspad::Quantization::ThirtySecond: txt = "1/32"; break;
+            default:                                   txt = "off";  break;
+        }
+        lv_label_set_text(seqQuantLabel, txt);
+    }
 
     if (seqBarsBtn) lv_obj_set_style_bg_color(seqBarsBtn, CP_CLICK_OFF, 0);
     if (seqBarsLabel) {
@@ -1490,7 +1509,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
                                           120, seq_bpm_changed_cb, g_sampler, nullptr,
                                           &lv_font_montserrat_16);
     /* Local styles, so they beat the ones the helper added. */
-    lv_obj_set_size(seqBpmSpin, 44, 22);
+    lv_obj_set_size(seqBpmSpin, 40, 22);
     lv_obj_set_style_pad_all(seqBpmSpin, 0, 0);
     lv_obj_set_style_radius(seqBpmSpin, 5, 0);
     lv_obj_set_style_bg_color(seqBpmSpin, CP_CLICK_OFF, 0);
@@ -1544,7 +1563,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     /* Just "M". Four beat dots at 22 px high read as clutter rather than as a
      * beat -- the click is something you hear, and the colour already says
      * whether it is on. */
-    seqClickBtn = seq_make_button(seqTopRow, 30, 22, "M", [](lv_event_t * e) {
+    seqClickBtn = seq_make_button(seqTopRow, 26, 22, "M", [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1552,7 +1571,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         seq_sync_labels();
     });
 
-    seqBarsBtn = seq_make_button(seqTopRow, 30, 22, "4b", [](lv_event_t * e) {
+    seqBarsBtn = seq_make_button(seqTopRow, 26, 22, "4b", [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1563,6 +1582,30 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         seq_sync_labels();
     });
     seqBarsLabel = lv_obj_get_child(seqBarsBtn, 0);
+
+    /* Quantisation, including none of it. A take that is snapped to a grid is
+     * the default because it flatters most playing, but a part with feel in it
+     * is ruined by the same snap -- so "off" is one click away rather than a
+     * setting somewhere else. Cycles off, 1/4, 1/8, 1/16, 1/32. */
+    seqQuantBtn = seq_make_button(seqTopRow, 26, 22, "1/16", [](lv_event_t * e) {
+        (void)e;
+        auto * sq = sequencer_or_null();
+        if (!sq) return;
+        switch (sq->getQuantization()) {
+            case crosspad::Quantization::Off:
+                sq->setQuantization(crosspad::Quantization::Quarter);      break;
+            case crosspad::Quantization::Quarter:
+                sq->setQuantization(crosspad::Quantization::Eighth);       break;
+            case crosspad::Quantization::Eighth:
+                sq->setQuantization(crosspad::Quantization::Sixteenth);    break;
+            case crosspad::Quantization::Sixteenth:
+                sq->setQuantization(crosspad::Quantization::ThirtySecond); break;
+            default:
+                sq->setQuantization(crosspad::Quantization::Off);          break;
+        }
+        seq_sync_labels();
+    });
+    seqQuantLabel = lv_obj_get_child(seqQuantBtn, 0);
 
     seqRecBtn = seq_make_button(seqRow, 62, 34, "REC", [](lv_event_t * e) {
         (void)e;
@@ -1648,6 +1691,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         seqRecBtn = seqRecLabel = seqClickBtn = seqBarsBtn = seqBarsLabel = NULL;
         seqDubBtn = seqPlayBtn = seqStopBtn = seqSceneDrop = seqBpmSpin = NULL;
         seqRow = seqTopRow = seqSceneRow = seqEditBtn = seqToggleBtn = NULL;
+        seqQuantBtn = seqQuantLabel = NULL;
         if (seqSyncTimer) { lv_timer_delete(seqSyncTimer); seqSyncTimer = NULL; }
     }, LV_EVENT_DELETE, NULL);
     seq_sync_labels();
