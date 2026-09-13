@@ -344,37 +344,17 @@ static constexpr int32_t kSeqSlideX = -330;   // past the left edge, both rows
 
 static void seq_sync_labels();
 
-/// The pad grid gives up a third of its size while the strip is out -- that is
-/// where the room for the controls comes from. createButtons() lays 4x4 of 25 px
-/// on a 4 px grid (120 px square); compact is 16 on 3 (79 px, about 65 %).
-static void pads_set_compact(bool compact)
+/// The pads leave the screen while the strip is out.
+///
+/// They mirror the sixteen under your fingers, which are what you play a scene
+/// with -- on this screen they were only taking the half of it that the
+/// sequencer's own controls needed. Hidden, not resized: the space is worth
+/// more as buttons you can hit than as a smaller copy of the pads.
+static void pads_set_hidden(bool hidden)
 {
     if (!buttonFrame) return;
-    /* Compact is the waveform's own height: 4 * (15 + 2) + 2 is 70, which is
-     * WAVEFORM_CANVAS_HEIGHT, so the grid and the wave are the same block. */
-    const int32_t btn = compact ? 15 : 25;
-    const int32_t gap = compact ? 2 : 4;
-    const int32_t side = 4 * (btn + gap) + gap;
-    lv_obj_set_size(buttonFrame, side, side);
-    for (int row = 0; row < 4; ++row) {
-        for (int col = 0; col < 4; ++col) {
-            lv_obj_t * b = lv_obj_get_child(buttonFrame, row * 4 + col);
-            if (!b) continue;
-            lv_obj_set_size(b, btn, btn);
-            lv_obj_align(b, LV_ALIGN_TOP_LEFT, col * (btn + gap), row * (btn + gap));
-            /* The number on a 16 px face needs the smaller font; child 0 is it,
-             * child 1 is the playback-mode indicator the panel adds. */
-            if (lv_obj_t * num = lv_obj_get_child(b, 0)) {
-                lv_obj_set_style_text_font(num, compact ? &lv_font_montserrat_10
-                                                        : &lv_font_montserrat_14, 0);
-            }
-        }
-    }
-    /* Re-centred on the waveform: an align_to is a one-off, and the frame just
-     * changed size around its top-left corner. */
-    if (waveformCanvas) {
-        lv_obj_align_to(buttonFrame, waveformCanvas, LV_ALIGN_OUT_LEFT_MID, -10, 0);
-    }
+    if (hidden) lv_obj_add_flag(buttonFrame, LV_OBJ_FLAG_HIDDEN);
+    else        lv_obj_remove_flag(buttonFrame, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void seq_controls_slide_cb(void * var, int32_t v)
@@ -407,7 +387,7 @@ static void seq_controls_set(bool show, bool animate)
      * from under it would leave it hanging over the pads. */
     if (seqSceneDrop && lv_dropdown_is_open(seqSceneDrop)) lv_dropdown_close(seqSceneDrop);
 
-    pads_set_compact(show);
+    pads_set_hidden(show);
 
     /* Lit while the advanced controls are out, so the button says which of the
      * two screens you are looking at without reading the rest of it. */
@@ -1437,10 +1417,13 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
      * centring: the strip is 224 px against a 320 px screen, and a hand-chained
      * set of offsets would have to be recomputed every time a button changes
      * size. Order here is the order on screen. */
+    /* Two by two, in the half the pads used to hold: four buttons of 62x34
+     * where six of 36x26 used to be squeezed under the waveform. */
     seqRow = lv_obj_create(cont);
     lv_obj_remove_style_all(seqRow);
-    lv_obj_set_size(seqRow, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(seqRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_size(seqRow, 128, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(seqRow, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_style_pad_row(seqRow, 3, 0);
     lv_obj_set_flex_align(seqRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(seqRow, 2, 0);
     lv_obj_remove_flag(seqRow, LV_OBJ_FLAG_SCROLLABLE);
@@ -1541,7 +1524,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     });
     seqBarsLabel = lv_obj_get_child(seqBarsBtn, 0);
 
-    seqRecBtn = seq_make_button(seqRow, 36, 26, "REC", [](lv_event_t * e) {
+    seqRecBtn = seq_make_button(seqRow, 62, 34, "REC", [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1553,7 +1536,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     });
     seqRecLabel = lv_obj_get_child(seqRecBtn, 0);
 
-    seqDubBtn = seq_make_button(seqRow, 36, 26, "DUB", [](lv_event_t * e) {
+    seqDubBtn = seq_make_button(seqRow, 62, 34, "DUB", [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1563,7 +1546,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         seq_sync_labels();
     });
 
-    seqPlayBtn = seq_make_button(seqRow, 36, 26, LV_SYMBOL_PLAY, [](lv_event_t * e) {
+    seqPlayBtn = seq_make_button(seqRow, 62, 34, LV_SYMBOL_PLAY, [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1571,7 +1554,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         seq_sync_labels();
     });
 
-    seqStopBtn = seq_make_button(seqRow, 36, 26, LV_SYMBOL_STOP, [](lv_event_t * e) {
+    seqStopBtn = seq_make_button(seqRow, 62, 34, LV_SYMBOL_STOP, [](lv_event_t * e) {
         (void)e;
         auto * sq = sequencer_or_null();
         if (!sq) return;
@@ -1579,16 +1562,15 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         seq_sync_labels();
     });
 
-    /* The scene line first: tempo, click and bars to the left of the picker,
-     * on its centre line. Then the transport, centred on the panel below the
-     * waveform -- four buttons now, so the middle of the screen is the middle
-     * of the row. */
+    /* The left half is the sequencer's: tempo, click and bars along the top of
+     * it, on the scene picker's line, and the transport under them in the space
+     * the pads leave. The waveform and the picker keep the right half. */
     lv_obj_update_layout(cont);
-    lv_obj_align_to(seqTopRow, seqSceneRow, LV_ALIGN_OUT_LEFT_MID, -6, 0);
-    /* +14, not +18: the transport is 26 px tall now and at +18 its bottom edge
-     * landed exactly on the row of Back / Advanced / Edit. */
-    const int32_t rowY = lv_obj_get_y(waveformCanvas) + lv_obj_get_height(waveformCanvas) + 14;
-    lv_obj_align(seqRow, LV_ALIGN_TOP_MID, 0, rowY);
+    const int32_t leftX   = 8;
+    const int32_t topY    = lv_obj_get_y(seqSceneRow);
+    lv_obj_align(seqTopRow, LV_ALIGN_TOP_LEFT, leftX, topY);
+    lv_obj_align(seqRow, LV_ALIGN_TOP_LEFT, leftX,
+                 topY + lv_obj_get_height(seqTopRow) + 10);
 
     /* "Advanced", in the gap Back and Edit leave in the middle of the bottom
      * row -- the slot Edit used to reach past. A word rather than an arrow:
