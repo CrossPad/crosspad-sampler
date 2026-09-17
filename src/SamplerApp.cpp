@@ -34,8 +34,9 @@ static void sampler_back_cb() {
 static bool sampler_handle_back(lv_obj_t* app) {
     (void)app;
     const auto& cb = sampler_get_platform_callbacks().kitSelector;
-    if (!cb.openSelector) return false;
-    cb.openSelector();
+    const auto open = cb.openSelectorForBack ? cb.openSelectorForBack : cb.openSelector;
+    if (!open) return false;
+    open();
     return true;
 }
 

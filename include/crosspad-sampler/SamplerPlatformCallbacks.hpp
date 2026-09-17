@@ -185,6 +185,11 @@ struct KitSelectorAppCallbacks {
     /// at all — the sampler's own pick-kit button was a placeholder for exactly
     /// that reason. Null on a platform with no selector.
     void (*openSelector)()              = nullptr;
+    /// The same selector, opened by the power button's back from the sampler:
+    /// backing out of it goes on to the launcher. Returning to the sampler
+    /// there would bounce sampler -> selector -> sampler with no way out.
+    /// Null falls back to openSelector.
+    void (*openSelectorForBack)()       = nullptr;
 };
 
 // ---------------------------------------------------------------------------
