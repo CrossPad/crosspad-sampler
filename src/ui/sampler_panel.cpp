@@ -92,6 +92,9 @@ static lv_obj_t * seqSceneRow = NULL;    // the scene picker between its two arr
 static lv_obj_t * seqEditBtn = NULL;     // the pad editor travels with the strip
 static lv_obj_t * seqToggleBtn = NULL;   // "Advanced" -- brings the strip in
 static bool seqControlsShown = false;    // the panel opens as a sampler
+static bool seqPanelCovered = false;     // an editor is over the panel
+static crosspad::SubscriptionHandle motionSub = nullptr;  // double tap flips Advanced
+static void motion_gesture_cb(const void * data, crosspad::EventType type, void * ctx);
 static lv_obj_t * seqBpmSpin = NULL;     // the kit's tempo, in the same row
 static bool seqBpmSyncing = false;       // a sync must not read back as an edit
 static bool seqTempoDirty = false;       // tempo changed, kit.json does not have it
@@ -1172,6 +1175,11 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     s_on_back = onBack;
     g_parentContainer = NULL;
     appIsDestroying = false;
+    seqPanelCovered = false;
+    if (!motionSub) {
+        motionSub = crosspad::getEventBus().subscribe(crosspad::EventType::MotionGesture,
+                                                      motion_gesture_cb, nullptr);
+    }
 
     // Waveform data provider, reading the cache the loader task fills.
     waveform_view_set_provider([](uint8_t padIdx, uint8_t sampleSlot,
@@ -1774,8 +1782,26 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     return cont;
 }
 
+bool sampler_panel_toggle_advanced()
+{
+    if (!seqToggleBtn || seqPanelCovered) return false;
+    seq_controls_set(!seqControlsShown, true);
+    return true;
+}
+
+/* The board's own double tap is the second way in and out of the advanced
+ * controls: it arrives on the event bus from whichever motion sensor the
+ * platform has, off the LVGL thread, so the flip is deferred to it. */
+static void motion_gesture_cb(const void * data, crosspad::EventType, void *)
+{
+    auto * d = static_cast<const crosspad::MotionGestureData *>(data);
+    if (!d || d->gesture != crosspad::MotionGesture::DoubleTap) return;
+    lv_async_call([](void *) { sampler_panel_toggle_advanced(); }, nullptr);
+}
+
 void sampler_panel_set_covered(bool covered)
 {
+    seqPanelCovered = covered;
     if (timerPad)     { if (covered) lv_timer_pause(timerPad);     else lv_timer_resume(timerPad); }
     if (seqSyncTimer) { if (covered) lv_timer_pause(seqSyncTimer); else lv_timer_resume(seqSyncTimer); }
     /* Hidden objects do not invalidate, which is the only handle on the VU:
@@ -1795,6 +1821,11 @@ void sampler_panel_set_covered(bool covered)
 void sampler_panel_destroy(lv_obj_t * panel)
 {
     appIsDestroying = true;
+
+    if (motionSub) {
+        crosspad::getEventBus().unsubscribe(motionSub);
+        motionSub = nullptr;
+    }
 
     // "Sampler" stays registered on purpose — it is the system instrument
     // (sampler_service_init), so the pads keep playing after the app closes.
