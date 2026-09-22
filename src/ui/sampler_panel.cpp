@@ -91,6 +91,9 @@ static lv_obj_t * seqTopRow = NULL;      // tempo, click and bars, on the scene 
 static lv_obj_t * seqSceneRow = NULL;    // the scene picker between its two arrows
 static lv_obj_t * seqEditBtn = NULL;     // the pad editor travels with the strip
 static lv_obj_t * seqToggleBtn = NULL;   // "Advanced" -- brings the strip in
+static lv_obj_t * fullLevelBtn = NULL;   // Full level / 16 levels, under the waveform
+static lv_obj_t * levelsBtn    = NULL;
+static lv_obj_t * levelsLabel  = NULL;
 static bool seqControlsShown = false;    // the panel opens as a sampler
 static bool seqPanelCovered = false;     // an editor is over the panel
 static crosspad::SubscriptionHandle motionSub = nullptr;  // double tap flips Advanced
@@ -119,6 +122,27 @@ static lv_timer_t * seqSyncTimer = NULL;
 #define CP_CLICK_ON   lv_color_hex(0xE8B33A)   /* metronome while it counts  */
 #define CP_FOCUS_BG   lv_color_hex(0xBBD6FF)
 #define CP_FOCUS_EDGE lv_color_hex(0x2F6BFF)
+
+/* The two performance switches read their state from the pad logic, so a
+ * mode changed from anywhere else (a kit reload, a later CDC verb) shows
+ * up here too. "16 levels" names the source pad while it is on. */
+static void perf_modes_sync()
+{
+    auto& logic = getSamplerPadLogic();
+    if (fullLevelBtn) {
+        lv_obj_set_style_bg_color(fullLevelBtn, logic.fullLevel() ? CP_CLICK_ON : CP_CLICK_OFF, 0);
+    }
+    if (levelsBtn) {
+        lv_obj_set_style_bg_color(levelsBtn, logic.sixteenLevels() ? CP_CLICK_ON : CP_CLICK_OFF, 0);
+    }
+    if (levelsLabel) {
+        if (logic.sixteenLevels()) {
+            lv_label_set_text_fmt(levelsLabel, "16 lv: pad %u", (unsigned)logic.sixteenLevelsSource() + 1);
+        } else {
+            lv_label_set_text(levelsLabel, "16 levels");
+        }
+    }
+}
 
 static void apply_focus_skin(lv_obj_t * o)
 {
@@ -1392,6 +1416,47 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
 
     waveformCanvas = waveform_view_create(cont);
     lv_obj_align(waveformCanvas, LV_ALIGN_RIGHT_MID, -25, -10);
+
+    /* Full level / 16 levels, under the waveform: performance switches, so
+     * they stay in reach while the Advanced strip covers the pads. Lit the
+     * way the metronome is lit while it counts. */
+    fullLevelBtn = lv_button_create(cont);
+    lv_obj_set_size(fullLevelBtn, 72, 22);
+    lv_obj_align_to(fullLevelBtn, waveformCanvas, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 8);
+    lv_obj_add_style(fullLevelBtn, &styleButtonPressed, LV_STATE_PRESSED);
+    lv_obj_set_style_radius(fullLevelBtn, 5, 0);
+    lv_obj_set_style_pad_all(fullLevelBtn, 0, 0);
+    lv_obj_add_event_cb(fullLevelBtn, [](lv_event_t *) {
+        auto& logic = getSamplerPadLogic();
+        logic.setFullLevel(!logic.fullLevel());
+        perf_modes_sync();
+    }, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * fullLevelLabel = lv_label_create(fullLevelBtn);
+    lv_label_set_text(fullLevelLabel, "Full level");
+    lv_obj_set_style_text_font(fullLevelLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(fullLevelLabel, lv_color_hex(0x101010), 0);
+    lv_obj_center(fullLevelLabel);
+    apply_focus_skin(fullLevelBtn);
+    if (g_sampler) lv_group_add_obj(g_sampler, fullLevelBtn);
+
+    levelsBtn = lv_button_create(cont);
+    lv_obj_set_size(levelsBtn, 72, 22);
+    lv_obj_align_to(levelsBtn, waveformCanvas, LV_ALIGN_OUT_BOTTOM_RIGHT, 0, 8);
+    lv_obj_add_style(levelsBtn, &styleButtonPressed, LV_STATE_PRESSED);
+    lv_obj_set_style_radius(levelsBtn, 5, 0);
+    lv_obj_set_style_pad_all(levelsBtn, 0, 0);
+    lv_obj_add_event_cb(levelsBtn, [](lv_event_t *) {
+        auto& logic = getSamplerPadLogic();
+        logic.setSixteenLevels(!logic.sixteenLevels());
+        perf_modes_sync();
+    }, LV_EVENT_CLICKED, NULL);
+    levelsLabel = lv_label_create(levelsBtn);
+    lv_obj_set_style_text_font(levelsLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(levelsLabel, lv_color_hex(0x101010), 0);
+    lv_obj_center(levelsLabel);
+    apply_focus_skin(levelsBtn);
+    if (g_sampler) lv_group_add_obj(g_sampler, levelsBtn);
+    perf_modes_sync();
     lv_obj_add_event_cb(waveformCanvas, waveform_mode_click_cb, LV_EVENT_CLICKED, nullptr);
 
     scopeView = create_scope_view(cont, WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT);
@@ -1865,6 +1930,7 @@ void sampler_panel_destroy(lv_obj_t * panel)
     // Other globals into UI objects, to survive the async deletion.
     buttonFrame = nullptr;
     pickKitBtn = nullptr;
+    fullLevelBtn = levelsBtn = levelsLabel = nullptr;
     waveformCanvas = nullptr;
     waveformPlayhead = nullptr;
     waveformStartMarker = nullptr;

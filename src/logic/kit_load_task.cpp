@@ -171,6 +171,9 @@ static void progress_poll_timer_cb(lv_timer_t* timer) {
         crosspad_gui::statusbar_process_loader_status(100, true, true, s_error);
     }
     getPadColorManager().endKitSwap();
+    // The swap ends on the kit's colours; under 16 levels the ramp belongs on
+    // top, recomputed from the new kit's source-pad colour.
+    if (getSamplerPadLogic().sixteenLevels()) getSamplerPadLogic().refreshColors();
 
     s_loading = false;
     lv_timer_delete(timer);

@@ -110,16 +110,29 @@ void SamplerPadLogic::onPadPress(crosspad::PadManager& padManager,
     if (padIdx >= PAD_COUNT) return;
 
     // The velocity is already post-curve (the STM32 applies the per-pad
-    // response), so it passes through linearly.
+    // response), so it passes through linearly — unless a performance mode
+    // overrides it. Under 16 levels the pad hit only picks the velocity; what
+    // sounds (and what goes out over MIDI) is the source pad. The pad hit
+    // still gets the press feedback and the held state, so the ramp lights
+    // where the finger is.
+    uint8_t soundPad = padIdx;
+    if (sixteenLevels_) {
+        soundPad = levelsSource_;
+        velocity = levelVelocity(padIdx);
+    } else {
+        lastPad_ = padIdx;
+    }
+    if (fullLevel_) velocity = 127;
+
     crosspad::getEventBus().postSamplePlayback(
-        padIdx, /*wavIdx=*/0, /*isOn=*/true, crosspad::EventSource::App, velocity);
+        soundPad, /*wavIdx=*/0, /*isOn=*/true, crosspad::EventSource::App, velocity);
 
     padManager.notifyNoteOn(padIdx, velocity, /*fromSampler=*/true);
 
     if (padMidiEnabled()) {
-        crosspad::getMidiOutput().sendNoteOn(padManager.getMidiNoteForPad(padIdx),
+        crosspad::getMidiOutput().sendNoteOn(padManager.getMidiNoteForPad(soundPad),
                                              velocity,
-                                             padManager.getPadChannel(padIdx));
+                                             padManager.getPadChannel(soundPad));
     }
 }
 
@@ -127,23 +140,39 @@ void SamplerPadLogic::onPadRelease(crosspad::PadManager& padManager,
                                     uint8_t padIdx) {
     if (padIdx >= PAD_COUNT) return;
 
+    const uint8_t soundPad = sixteenLevels_ ? levelsSource_ : padIdx;
+
     padManager.notifyNoteOff(padIdx, /*fromSampler=*/true);
 
     if (padMidiEnabled()) {
-        crosspad::getMidiOutput().sendNoteOff(padManager.getMidiNoteForPad(padIdx),
+        crosspad::getMidiOutput().sendNoteOff(padManager.getMidiNoteForPad(soundPad),
                                               /*velocity=*/0,
-                                              padManager.getPadChannel(padIdx));
+                                              padManager.getPadChannel(soundPad));
     }
 
     // Hold mode: the release has to tell the engine to cut playback.
     crosspad::IKitManager* kitMgr = crosspad::getKitManager();
     if (kitMgr) {
         crosspad::KitInfo* kit = kitMgr->getCurrentKit();
-        if (kit && kit->parsed && kit->pads[padIdx].playbackMode == 1) {
+        if (kit && kit->parsed && kit->pads[soundPad].playbackMode == 1) {
             crosspad::getEventBus().postSamplePlayback(
-                padIdx, /*wavIdx=*/0, /*isOn=*/false, crosspad::EventSource::App);
+                soundPad, /*wavIdx=*/0, /*isOn=*/false, crosspad::EventSource::App);
         }
     }
+}
+
+// ── Performance modes ────────────────────────────────────────────────────────
+
+void SamplerPadLogic::setSixteenLevels(bool on) {
+    if (on == sixteenLevels_) return;
+    sixteenLevels_ = on;
+    if (on) levelsSource_ = lastPad_;
+    refreshColors();
+}
+
+void SamplerPadLogic::refreshColors() {
+    if (sixteenLevels_) loadLevelsColors();
+    else                loadKitColors(crosspad::getPadManager());
 }
 
 void SamplerPadLogic::onPadPressure(crosspad::PadManager& /*padManager*/,
@@ -161,12 +190,36 @@ void SamplerPadLogic::loadKitColors(crosspad::PadManager& padManager) {
     crosspad::KitInfo* kit = kitMgr->getCurrentKit();
     if (!kit || !kit->parsed) return;
 
+    if (sixteenLevels_) {
+        loadLevelsColors();
+        return;
+    }
+
     auto& ledCtrl = crosspad::getPadLedController();
     for (int i = 0; i < PAD_COUNT; ++i) {
         ledCtrl.setPadColor(i, colorFromUint32(kit->pads[i].color));
         ledCtrl.setPadPressedColor(i, colorFromUint32(kit->pads[i].color_pressed));
         // Playing: the pad's default colour, dimmed.
         ledCtrl.setPadPlayingColor(i, colorFromUint32(kit->pads[i].color).Dim(127));
+    }
+}
+
+void SamplerPadLogic::loadLevelsColors() {
+    crosspad::IKitManager* kitMgr = crosspad::getKitManager();
+    crosspad::KitInfo* kit = kitMgr ? kitMgr->getCurrentKit() : nullptr;
+    // No kit: a white ramp still says which pad plays how loud.
+    const crosspad::RgbColor base = (kit && kit->parsed)
+        ? colorFromUint32(kit->pads[levelsSource_].color) : crosspad::RgbColor(255, 255, 255);
+    const crosspad::RgbColor pressed = (kit && kit->parsed)
+        ? colorFromUint32(kit->pads[levelsSource_].color_pressed) : crosspad::RgbColor(255, 255, 255);
+
+    auto& ledCtrl = crosspad::getPadLedController();
+    for (uint8_t i = 0; i < PAD_COUNT; ++i) {
+        // Dim() takes 0..255; the softest pad keeps a floor so it is not off.
+        const uint8_t brightness = static_cast<uint8_t>(40 + (215 * i) / (PAD_COUNT - 1));
+        ledCtrl.setPadColor(i, base.Dim(brightness));
+        ledCtrl.setPadPressedColor(i, pressed);
+        ledCtrl.setPadPlayingColor(i, base.Dim(brightness / 2));
     }
 }
 
