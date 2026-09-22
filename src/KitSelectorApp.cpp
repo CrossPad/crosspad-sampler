@@ -85,6 +85,7 @@ static crosspad::AppEntry kit_selector_get_entry() {
     entry.createLVGL  = lv_CreateKitSelector;
     entry.destroyLVGL = lv_KitSelector_destroy;
     entry.priority    = 50;
+    entry.recolorIcon = true;  // notepick.png is a black glyph
     return entry;
 }
 
