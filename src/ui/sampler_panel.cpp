@@ -798,6 +798,27 @@ static void set_live_scope_capture(bool enabled) {
     }
 }
 
+static void waveform_mode_click_cb(lv_event_t*);
+static void sync_engine_view();
+
+/// (Re)create the scope view if it doesn't exist yet. create_scope_view()
+/// needs a ~21 KB contiguous PSRAM block; a fragmented heap at panel-create
+/// time (e.g. right after browsing 40 kits' thumbnails in the selector) can
+/// fail it silently, and every guard below reads that as "no scope, ever" —
+/// the waveform click then does nothing, permanently, for the rest of the
+/// app's lifetime. Retrying on click costs nothing when it already exists,
+/// and gives a click made after memory freed up elsewhere a real chance.
+static void ensure_scope_view() {
+    if (scopeView || !waveformCanvas) return;
+    lv_obj_t* cont = lv_obj_get_parent(waveformCanvas);
+    scopeView = create_scope_view(cont, WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT);
+    if (!scopeView) return;
+    lv_obj_align(scopeView, LV_ALIGN_RIGHT_MID, -25, -10);
+    lv_obj_add_flag(scopeView, LV_OBJ_FLAG_HIDDEN);
+    scope_view_set_active(scopeView, false);
+    lv_obj_add_event_cb(scopeView, waveform_mode_click_cb, LV_EVENT_CLICKED, nullptr);
+}
+
 static void apply_waveform_display_mode() {
     if (!scopeView || !waveformCanvas) return;
 
@@ -835,6 +856,11 @@ static void apply_waveform_display_mode() {
 }
 
 static void waveform_mode_click_cb(lv_event_t*) {
+    if (!scopeView) {
+        ensure_scope_view();
+        if (!scopeView) return;   // still no contiguous PSRAM for it
+        sync_engine_view();       // never ran while scopeView was null
+    }
     if (scopeSourceKind < 0) {
         waveformDisplayMode = WaveformDisplayMode::File;
     } else if (waveformDisplayMode == WaveformDisplayMode::File) {
@@ -1459,13 +1485,8 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     perf_modes_sync();
     lv_obj_add_event_cb(waveformCanvas, waveform_mode_click_cb, LV_EVENT_CLICKED, nullptr);
 
-    scopeView = create_scope_view(cont, WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT);
-    if (scopeView) {
-        lv_obj_align(scopeView, LV_ALIGN_RIGHT_MID, -25, -10);
-        lv_obj_add_flag(scopeView, LV_OBJ_FLAG_HIDDEN);
-        scope_view_set_active(scopeView, false);
-        lv_obj_add_event_cb(scopeView, waveform_mode_click_cb, LV_EVENT_CLICKED, nullptr);
-    }
+    scopeView = nullptr;
+    ensure_scope_view();
     scopeSourceKind = -2;
     waveformDisplayMode = WaveformDisplayMode::File;
 
@@ -1812,7 +1833,10 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_subject_init_int(&s_audio_idx, 0);
     lv_subject_init_string(&s_audio_name, audio_name, audio_name_prev, 32, "Press any pad");
     lv_label_bind_text(fileLabel, &s_audio_name, NULL);
-    lv_obj_align_to(fileLabel, waveformCanvas, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 0);
+    lv_obj_set_style_text_font(fileLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(fileLabel, lv_color_hex(0x00FF88), 0);
+    lv_obj_set_style_text_opa(fileLabel, LV_OPA_70, 0);
+    lv_obj_align_to(fileLabel, waveformCanvas, LV_ALIGN_BOTTOM_LEFT, 2, -2);
     waveformFileLabel = fileLabel;
 
     lv_obj_t * timeLabel = lv_label_create(cont);
@@ -1820,7 +1844,10 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     static char audio_time_prev[10];
     lv_subject_init_string(&s_audio_time, audio_time, audio_time_prev, 10, "0:00:0");
     lv_label_bind_text(timeLabel, &s_audio_time, NULL);
-    lv_obj_align_to(timeLabel, waveformCanvas, LV_ALIGN_OUT_BOTTOM_RIGHT, 0, 0);
+    lv_obj_set_style_text_font(timeLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(timeLabel, lv_color_hex(0x00FF88), 0);
+    lv_obj_set_style_text_opa(timeLabel, LV_OPA_70, 0);
+    lv_obj_align_to(timeLabel, waveformCanvas, LV_ALIGN_BOTTOM_RIGHT, -2, -2);
     waveformTimeLabel = timeLabel;
 
     timerPad = lv_timer_create(check_pad_timer_cb, 50, NULL); // 50ms = 20fps

@@ -122,7 +122,7 @@ void SamplerPadLogic::onPadPress(crosspad::PadManager& padManager,
     } else {
         lastPad_ = padIdx;
     }
-    if (fullLevel_) velocity = 127;
+    if (fullLevel_ && !sixteenLevels_) velocity = 127;
 
     crosspad::getEventBus().postSamplePlayback(
         soundPad, /*wavIdx=*/0, /*isOn=*/true, crosspad::EventSource::App, velocity);
