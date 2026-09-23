@@ -98,6 +98,10 @@ static bool seqControlsShown = false;    // the panel opens as a sampler
 static bool seqPanelCovered = false;     // an editor is over the panel
 static crosspad::SubscriptionHandle motionSub = nullptr;  // double tap flips Advanced
 static void motion_gesture_cb(const void * data, crosspad::EventType type, void * ctx);
+/* Subscribed on the first open and kept: the clock publishes only changes, so
+ * a panel opened while the host already drives must find the flag current. */
+static crosspad::SubscriptionHandle tempoSub = nullptr;
+static std::atomic<bool> tempoFromHost{false};
 static lv_obj_t * seqBpmSpin = NULL;     // the kit's tempo, in the same row
 static bool seqBpmSyncing = false;       // a sync must not read back as an edit
 static bool seqTempoDirty = false;       // tempo changed, kit.json does not have it
@@ -175,10 +179,26 @@ static int32_t seqStartupBpm()
     return v > 0 ? v : 120;
 }
 
+/* Event-bus task: remember who drives the tempo; seq_sync_labels() (LVGL
+ * timer) shows it. */
+static void tempo_changed_cb(const void * data, crosspad::EventType, void *)
+{
+    const auto * d = static_cast<const crosspad::TempoChangedData *>(data);
+    tempoFromHost.store(d->source == crosspad::EventSource::MidiInput, std::memory_order_relaxed);
+}
+
 static void seq_bpm_changed_cb(lv_event_t * e)
 {
     auto * sq = sequencer_or_null();
     if (!sq || seqBpmSyncing) return;
+    if (tempoFromHost.load(std::memory_order_relaxed)) {
+        /* The DAW's clock owns the tempo: put the field back and touch neither
+         * the kit nor sequences.json. */
+        seqBpmSyncing = true;
+        lv_spinbox_set_value((lv_obj_t *)lv_event_get_target(e), (int32_t)lroundf(sq->getBpm()));
+        seqBpmSyncing = false;
+        return;
+    }
     /* No set_cursor_pos()/set_step() here, however tempting: both call
      * lv_spinbox_updatevalue(), which sets the textarea's text, which sends
      * VALUE_CHANGED straight back into this handler. That recursion overflowed
@@ -265,6 +285,11 @@ static void seq_sync_labels()
             lv_spinbox_set_value(seqBpmSpin, shown);
             seqBpmSyncing = false;
         }
+        /* Blue while the host's clock drives the tempo, the usual click
+         * colour otherwise. */
+        lv_obj_set_style_bg_color(seqBpmSpin,
+                                  tempoFromHost.load(std::memory_order_relaxed)
+                                      ? lv_color_hex(0x4FC3F7) : CP_CLICK_OFF, 0);
     }
 
     if (seqSceneDrop && !lv_dropdown_is_open(seqSceneDrop)) {
@@ -1229,6 +1254,10 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     if (!motionSub) {
         motionSub = crosspad::getEventBus().subscribe(crosspad::EventType::MotionGesture,
                                                       motion_gesture_cb, nullptr);
+    }
+    if (!tempoSub) {
+        tempoSub = crosspad::getEventBus().subscribe(crosspad::EventType::TempoChanged,
+                                                     tempo_changed_cb, nullptr);
     }
 
     // Waveform data provider, reading the cache the loader task fills.
