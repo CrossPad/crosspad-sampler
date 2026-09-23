@@ -912,7 +912,7 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
     sync_engine_view();
 
     static long lastTime = 0;
-    static char time_str[24]; // Increased buffer for "M:SS:T / M:SS:T" format
+    static char time_str[40]; // "M:SS:T / M:SS:T", sized for the widest ints snprintf can emit
     static crosspad::KitInfo * lastKit = NULL; // last kit
 
     for (uint8_t pad = 0; pad < 16; pad++) {
