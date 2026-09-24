@@ -14,6 +14,9 @@
 
 namespace crosspad_sampler {
 
+// MSVC's <cmath> defines M_PI only under _USE_MATH_DEFINES.
+constexpr float kPi = 3.14159265358979f;
+
 // ── dB-like scaling (sqrt approximation) ────────────────────────────────
 
 static inline int fast_db_scale(int16_t amplitude, int channelHeight) {
@@ -236,9 +239,9 @@ void waveform_draw_empty(lv_obj_t* canvas) {
     int prevL = lCy, prevR = rCy;
 
     for (int x = 1; x < width; x++) {
-        float a = (x / (float)width) * freq * 2.0f * (float)M_PI;
+        float a = (x / (float)width) * freq * 2.0f * kPi;
         int curL = lCy + (int)(sinf(a) * (ch / 2.5f));
-        int curR = rCy + (int)(sinf(a + (float)M_PI / 4.0f) * (ch / 2.5f));
+        int curR = rCy + (int)(sinf(a + kPi / 4.0f) * (ch / 2.5f));
 
         dsc.p1.x = x - 1; dsc.p1.y = prevL; dsc.p2.x = x; dsc.p2.y = curL;
         lv_draw_line(&layer, &dsc);
