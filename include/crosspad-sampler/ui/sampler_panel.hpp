@@ -31,12 +31,6 @@ void sampler_panel_destroy(lv_obj_t* panel);
 /// stuttering, because the editor is what gets repainted there.
 void sampler_panel_set_covered(bool covered);
 
-/// Flip between the sampler and its advanced controls, as the "Advanced"
-/// button does. For callers that are not a click on it -- the board's own
-/// double tap, which is why it exists.
-/// @return false when there is no panel to flip, or something covers it.
-bool sampler_panel_toggle_advanced();
-
 /// Access the shared SamplerPadLogic instance.
 SamplerPadLogic& getSamplerPadLogic();
 
