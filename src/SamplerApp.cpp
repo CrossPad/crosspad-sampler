@@ -65,6 +65,7 @@ void sampler_service_init() {
     auto& pads = crosspad::getPadManager();
     pads.registerPadLogic("Sampler", logic);
     pads.setBasePadLogic("Sampler");
+    crosspad::getPlatformServices().padMix = &sampler_pad_mix();
 }
 
 void sampler_register() {

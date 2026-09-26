@@ -16,6 +16,7 @@
 #include <crosspad/led/RgbColor.hpp>
 #include <crosspad/midi/IMidiOutput.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
+#include <crosspad/sequencer/SequencerController.hpp>
 #include <crosspad/settings/CrosspadSettings.hpp>
 
 namespace crosspad_sampler {
@@ -108,6 +109,17 @@ void SamplerPadLogic::onPadPress(crosspad::PadManager& padManager,
                                   uint8_t padIdx,
                                   uint8_t velocity) {
     if (padIdx >= PAD_COUNT) return;
+
+    /* Erase held in the sequencer: a player's hit only names the pad to take
+     * out of the scene. The LED still answers, so you see which one went. The
+     * loop's own playback is not a hit and keeps sounding -- silencing it too
+     * turned held erase into a mute. */
+    auto* seq = crosspad::getPlatformServices().sequencer;
+    if (seq && seq->isErasing() &&
+        padManager.pressSource(padIdx) != crosspad::EventSource::SequencerCallback) {
+        padManager.notifyNoteOn(padIdx, velocity, /*fromSampler=*/true);
+        return;
+    }
 
     // The velocity is already post-curve (the STM32 applies the per-pad
     // response), so it passes through linearly — unless a performance mode

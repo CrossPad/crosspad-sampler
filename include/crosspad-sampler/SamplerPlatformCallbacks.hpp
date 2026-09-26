@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 
+#include <crosspad/pad/IPadMix.hpp>
 #include <cstdint>
 #include <cstddef>
 
@@ -209,6 +210,12 @@ void sampler_set_platform_callbacks(const SamplerPlatformCallbacks& cb);
 
 /// Retrieve the currently registered platform callbacks.
 const SamplerPlatformCallbacks& sampler_get_platform_callbacks();
+
+/// The pads' level and pan in whichever engine plays the current kit: the
+/// pitched instrument for a pitched kit, the platform's sample player
+/// (player.setVolume / setPan) otherwise. sampler_service_init() puts it in
+/// PlatformServices::padMix.
+crosspad::IPadMix& sampler_pad_mix();
 
 /// Register the engine-to-sampler callbacks (NoteOn/NoteOff from audio engine).
 SamplerEngineCallbacks sampler_get_engine_callbacks();
