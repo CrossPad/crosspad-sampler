@@ -9,6 +9,7 @@
 
 #include "crosspad-sampler/SamplerConfig.hpp"
 #include "crosspad-sampler/SamplerPlatformCallbacks.hpp"
+#include "crosspad-sampler/logic/kit_load_task.hpp"
 #include "crosspad-sampler/ui/pitched_editor.hpp"
 #include "crosspad-sampler/ui/sampler_panel.hpp"
 #include "crosspad-sampler/ui/waveform_view.hpp"
@@ -58,6 +59,10 @@ int currentPad() {
     return (pad >= 0 && pad < KIT_PADS) ? pad : 0;
 }
 
+/// Set while the kit loader rebuilds the bank. The bank being replaced is freed
+/// on the loader's thread, so nothing here reads it until the load reports.
+bool s_bankPending = false;
+
 crosspad::PitchedInstrument* instrument() {
     return crosspad::getPlatformServices().pitchedInstrument;
 }
@@ -65,7 +70,7 @@ crosspad::PitchedInstrument* instrument() {
 /// The zone the engine actually built for @p idx, or null when no bank is
 /// installed. Its rootMidi is the detected pitch of an "auto" zone.
 const crosspad::Zone* bankZone(uint8_t idx) {
-    auto* inst = instrument();
+    auto* inst = s_bankPending ? nullptr : instrument();
     auto* bank = inst ? inst->bank() : nullptr;
     if (!bank || idx >= bank->zoneCount()) return nullptr;
     return &bank->zone(idx);
@@ -213,7 +218,7 @@ void showZoneWaveform(int zoneIdx) {
 /// Push the selected zone's root and loop into the bank that is playing.
 void applyZoneEdit() {
     KitInfo* kit = currentKit();
-    auto* inst = instrument();
+    auto* inst = s_bankPending ? nullptr : instrument();
     if (!kit || !inst || s_zoneSel < 0 || s_zoneSel >= (int)kit->instrument.zones.size()) return;
 
     const InstrumentZoneSpec& spec = kit->instrument.zones[s_zoneSel];
@@ -229,7 +234,7 @@ void applyZoneEdit() {
 
 void applyParams() {
     KitInfo* kit = currentKit();
-    auto* inst = instrument();
+    auto* inst = s_bankPending ? nullptr : instrument();
     if (!kit || !inst) return;
     crosspad::InstrumentParams p;
     p.maxVoices = kit->instrument.maxVoices;
@@ -239,10 +244,17 @@ void applyParams() {
 }
 
 /// Rebuild the bank from the current zone list. The pitched engine builds the
-/// whole bank on pad 0; the other fifteen pads carry no per-engine state.
+/// whole bank on pad 0; the other fifteen pads carry no per-engine state. The
+/// build reads every zone off the card and runs its FFT -- seconds for a long
+/// take -- so it goes to the kit loader, never this thread. updateCb() picks
+/// the result up.
 void rebuildBank() {
+    KitInfo* kit = currentKit();
     auto& cbs = sampler_get_platform_callbacks();
-    if (cbs.audio.reloadPad) cbs.audio.reloadPad(0);
+    if (!kit || !cbs.audio.startLoadKit) return;
+    kit->pads[0].dirty = true;
+    s_bankPending = true;
+    cbs.audio.startLoadKit(-1, true);
 }
 
 // ── Zone list ───────────────────────────────────────────────────────────
@@ -354,7 +366,7 @@ void showNoteAndZone(int note) {
 
     const char* file = "-";
     float root = 0.0f;
-    auto* inst = instrument();
+    auto* inst = s_bankPending ? nullptr : instrument();
     auto* bank = inst ? inst->bank() : nullptr;
     if (bank) {
         const crosspad::Zone* nearest = bank->nearestZone((float)note);
@@ -578,6 +590,13 @@ void browseCb(lv_event_t*) {
 // ── Periodic refresh ────────────────────────────────────────────────────
 
 void updateCb(lv_timer_t*) {
+    if (s_bankPending && !kit_load_task_is_loading()) {
+        s_bankPending = false;
+        if (KitInfo* kit = currentKit()) kit->pads[0].dirty = false;
+        syncInstrumentTab();
+        refreshZoneList();
+        showZoneWaveform(s_zoneSel);
+    }
     if (s_tab == 0) {
         const int pad = currentPad();
         if (pad != s_lastPad) {
