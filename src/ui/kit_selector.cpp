@@ -6,6 +6,11 @@
 // artwork is what a kit ships beside its JSON (cover.png 122x122, thumb.png
 // 20x20), and a kit without any gets a lettered chip. Loading goes through the
 // same platform callback as every other way into a kit change.
+//
+// Two lists, LEGACY and USER, switched on the status bar: the kits a board
+// ships with, and the ones made on it (KitInfo::isUser(), the Slicer's). A row
+// is a place in the list shown, s_kitOf[row] the kit it stands for; the
+// browser opens on the list the loaded kit is in.
 
 #ifdef USE_LVGL
 
@@ -109,6 +114,22 @@ lv_group_t*  s_group       = nullptr;
 lv_group_t*  s_prevGroup   = nullptr;
 
 std::vector<Row> s_rows;
+std::vector<int> s_kitOf;   ///< row -> kit id in the manager, for the list shown
+
+enum class Segment : uint8_t { Legacy, User };
+Segment   s_segment = Segment::Legacy;
+lv_obj_t* s_segBtn[2] = {};
+
+crosspad::KitInfo* kit_of_row(int row) {
+    auto* mgr = crosspad::getKitManager();
+    if (!mgr || row < 0 || row >= (int)s_kitOf.size()) return nullptr;
+    return mgr->getKit(s_kitOf[row]);
+}
+
+int row_of_kit(int kitId) {
+    for (int r = 0; r < (int)s_kitOf.size(); ++r) if (s_kitOf[r] == kitId) return r;
+    return -1;
+}
 int  s_winFirst  = 0;    ///< rows [s_winFirst, s_winLast] have objects
 int  s_winLast   = -1;
 int  s_selected  = -1;   ///< row under the highlight
@@ -239,8 +260,7 @@ void thumb_defer() {
  * and the next scroll decodes those again at draw time, inside the refresh,
  * which is what made a single click of the encoder take a third of a second. */
 void cover_show(int idx) {
-    auto* mgr = crosspad::getKitManager();
-    auto* kit = mgr ? mgr->getKit(idx) : nullptr;
+    auto* kit = kit_of_row(idx);
     if (!kit || !s_coverImg || !s_coverLetter) return;
 
     const std::string path = crosspad::kitAssetPath(kit->path, "cover.png");
@@ -395,8 +415,7 @@ void select_row(int idx) {
     s_selected = idx;
     ensure_window(idx);
 
-    auto* mgr = crosspad::getKitManager();
-    auto* kit = mgr ? mgr->getKit(idx) : nullptr;
+    auto* kit = kit_of_row(idx);
     if (kit) {
         lv_label_set_text(s_coverName, kit->name.c_str());
         lv_label_set_text(s_coverAuthor, kit->author.c_str());
@@ -448,10 +467,10 @@ void busy_hide() {
     if (s_busy) lv_obj_add_flag(s_busy, LV_OBJ_FLAG_HIDDEN);
 }
 
-void load_kit(int kitId) {
-    auto* mgr = crosspad::getKitManager();
-    auto* kit = mgr ? mgr->getKit(kitId) : nullptr;
+void load_row(int row) {
+    auto* kit = kit_of_row(row);
     if (!kit) return;
+    const int kitId = s_kitOf[row];
 
     const auto& cb = sampler_get_platform_callbacks();
     if (!cb.audio.startLoadKit) return;
@@ -462,7 +481,7 @@ void load_kit(int kitId) {
     cb.audio.startLoadKit(kitId, false);
     s_loadingStarted = true;
     busy_show();
-    row_mark_loaded(kitId);
+    row_mark_loaded(row);
     if (s_statusLabel) lv_label_set_text(s_statusLabel, kit->name.c_str());
 }
 
@@ -526,7 +545,7 @@ void row_focused_cb(lv_event_t* e) {
 void row_clicked_cb(lv_event_t* e) {
     const int idx = (int)(intptr_t)lv_event_get_user_data(e);
     select_row(idx);
-    load_kit(idx);
+    load_row(idx);
 }
 
 /* A touch flick lands wherever it lands; the rows there have to exist. */
@@ -583,8 +602,7 @@ void back_clicked_cb(lv_event_t*) {
 
 /// Widgets for row `idx`, placed at its slot. The entry in s_rows must exist.
 void build_row(int idx) {
-    auto* mgr = crosspad::getKitManager();
-    auto* kitp = mgr ? mgr->getKit(idx) : nullptr;
+    auto* kitp = kit_of_row(idx);
     if (!kitp || idx < 0 || idx >= (int)s_rows.size() || s_rows[idx].obj) return;
     const crosspad::KitInfo& kit = *kitp;
     void* tag = (void*)(intptr_t)idx;
@@ -666,6 +684,7 @@ void group_reorder() {
     lv_obj_t* focused = lv_group_get_focused(s_group);
     lv_group_remove_all_objs(s_group);
     if (s_backBtn) lv_group_add_obj(s_group, s_backBtn);
+    for (lv_obj_t* b : s_segBtn) if (b) lv_group_add_obj(s_group, b);
     for (int i = s_winFirst; i <= s_winLast; ++i) {
         if (s_rows[i].obj) lv_group_add_obj(s_group, s_rows[i].obj);
     }
@@ -674,7 +693,13 @@ void group_reorder() {
 
 void build_rows() {
     auto* mgr = crosspad::getKitManager();
-    const int count = mgr ? mgr->getKitCount() : 0;
+    const int all = mgr ? mgr->getKitCount() : 0;
+    s_kitOf.clear();
+    for (int i = 0; i < all; ++i) {
+        const auto* kit = mgr->getKit(i);
+        if (kit && kit->isUser() == (s_segment == Segment::User)) s_kitOf.push_back(i);
+    }
+    const int count = (int)s_kitOf.size();
 
     s_building = true;
     s_rows.clear();
@@ -687,7 +712,7 @@ void build_rows() {
     s_moreCard = nullptr;
 
     for (int i = 0; i < count; ++i) {
-        if (auto* kit = mgr->getKit(i)) {
+        if (auto* kit = kit_of_row(i)) {
             s_rows[i].thumbPath = crosspad::kitAssetPath(kit->path, "thumb.png");
         }
     }
@@ -723,7 +748,7 @@ void build_rows() {
         lv_obj_set_width(moreBody, LV_PCT(100));
         lv_label_set_text(moreBody, "Put kit folders in\ncrosspad/kits\non the SD card.");
     }
-    const int current = mgr->getCurrentKitId();
+    const int current = mgr ? row_of_kit(mgr->getCurrentKitId()) : -1;
     ensure_window(current >= 0 && current < count ? current : 0);
     s_building = false;
 
@@ -731,12 +756,23 @@ void build_rows() {
 
     if (s_rows.empty()) {
         lv_obj_t* msg = lv_label_create(s_list);
-        lv_label_set_text(msg, "No kits found\non the SD card");
+        lv_label_set_text(msg, s_segment == Segment::User ? "No kits of your own yet.\nMake one in the Slicer:\nSAVE KIT."
+                                                          : "No kits found\non the SD card");
         lv_obj_set_style_text_opa(msg, LV_OPA_50, 0);
         lv_obj_set_style_text_align(msg, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_center(msg);
+        /* Nothing selected: no frame, no caret, no cover of a kit from the
+         * other list. */
+        if (s_frame) lv_obj_add_flag(s_frame, LV_OBJ_FLAG_HIDDEN);
+        if (s_caret) lv_obj_add_flag(s_caret, LV_OBJ_FLAG_HIDDEN);
+        if (s_coverImg) lv_obj_add_flag(s_coverImg, LV_OBJ_FLAG_HIDDEN);
+        if (s_coverLetter) lv_label_set_text(s_coverLetter, "");
+        if (s_coverName) lv_label_set_text(s_coverName, "");
+        if (s_coverAuthor) lv_label_set_text(s_coverAuthor, "");
+        s_coverShown = -1;
         return;
     }
+    if (s_frame) lv_obj_remove_flag(s_frame, LV_OBJ_FLAG_HIDDEN);
 
     if (current >= 0 && current < (int)s_rows.size()) row_mark_loaded(current);
 
@@ -747,6 +783,54 @@ void build_rows() {
     select_row(first);
     cover_show(first);
     thumb_warm();
+}
+
+/// The active list lit, the other plain.
+void segment_paint() {
+    for (int i = 0; i < 2; ++i) {
+        lv_obj_t* b = s_segBtn[i];
+        if (!b) continue;
+        const bool on = (int)s_segment == i;
+        lv_obj_set_style_bg_color(b, on ? CROSSPAD_THEME_PRIMARY : CROSSPAD_THEME_CARD_DEEP, 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_color(lv_obj_get_child(b, 0), on ? CROSSPAD_THEME_BG_DEEP : lv_color_white(), 0);
+    }
+}
+
+/// The other list: the rows are rebuilt for it, the frame and the cover follow.
+void segment_cb(lv_event_t* e) {
+    const Segment seg = (Segment)(intptr_t)lv_event_get_user_data(e);
+    if (seg == s_segment || !s_list) return;
+    s_segment = seg;
+    segment_paint();
+    s_building = true;
+    lv_obj_clean(s_list);
+    s_winFirst = 0; s_winLast = -1;
+    if (s_caret) lv_obj_add_flag(s_caret, LV_OBJ_FLAG_HIDDEN);
+    build_rows();
+    group_reorder();
+    /* The focus stays on the switch: build_rows() put it on a row, and the
+     * encoder's click is still being read -- its ENTER then landed on that row
+     * and loaded the kit. A turn takes it into the list. */
+    if (lv_obj_t* b = s_segBtn[(int)seg]) lv_group_focus_obj(b);
+}
+
+lv_obj_t* segment_button(lv_obj_t* parent, const char* text, Segment seg, int32_t x) {
+    lv_obj_t* b = lv_obj_create(parent);
+    lv_obj_remove_style_all(b);
+    lv_obj_set_size(b, 58, kStatusH - 7);
+    lv_obj_align(b, LV_ALIGN_LEFT_MID, x, 0);
+    lv_obj_set_style_radius(b, 5, 0);
+    lv_obj_set_style_outline_color(b, lv_color_white(), LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_width(b, 2, LV_STATE_FOCUSED);
+    lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(b, segment_cb, LV_EVENT_CLICKED, (void*)(intptr_t)seg);
+    lv_obj_t* l = lv_label_create(b);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
+    lv_label_set_text(l, text);
+    lv_obj_center(l);
+    return b;
 }
 
 void reset_state();
@@ -812,6 +896,18 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     lv_label_set_text(backLabel, LV_SYMBOL_LEFT "  KITS");
     lv_obj_set_style_text_letter_space(backLabel, 1, 0);
     lv_obj_center(backLabel);
+
+    /* The list the loaded kit is in, so it is there, marked, when the browser opens. */
+    {
+        auto* mgr = crosspad::getKitManager();
+        auto* cur = mgr ? mgr->getKit(mgr->getCurrentKitId()) : nullptr;
+        s_segment = cur && cur->isUser() ? Segment::User : Segment::Legacy;
+    }
+    s_segBtn[0] = segment_button(status, "LEGACY", Segment::Legacy, 82);
+    s_segBtn[1] = segment_button(status, "USER", Segment::User, 144);
+    lv_group_add_obj(s_group, s_segBtn[0]);
+    lv_group_add_obj(s_group, s_segBtn[1]);
+    segment_paint();
 
     s_statusLabel = lv_label_create(status);
     lv_obj_set_style_text_font(s_statusLabel, &lv_font_montserrat_10, 0);
@@ -951,6 +1047,8 @@ void reset_state() {
     if (s_group) { lv_group_delete(s_group); s_group = nullptr; }
 
     s_rows.clear();
+    s_kitOf.clear();
+    s_segBtn[0] = s_segBtn[1] = nullptr;
     s_winFirst = 0; s_winLast = -1;
     s_selected = s_loaded = -1;
     s_coverWanted = s_coverShown = -1;
