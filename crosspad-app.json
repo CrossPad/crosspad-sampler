@@ -1,17 +1,18 @@
 {
   "name": "Sampler",
   "id": "sampler",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Sample player with 16 pads, waveform editing, kit management",
   "category": "music",
   "icon": "audio.png",
   "component_path": "components/crosspad-sampler",
   "platforms": ["esp-idf", "arduino"],
   "requires": {
-    "crosspad-core": ">=1.29.0",
+    "crosspad-core": ">=1.31.0",
     "crosspad-gui": ">=0.2.1"
   },
   "changelog": [
+    "0.5.0: the pad editor laid out as the Recorder is -- the pad in its colour (turned: the colour), its sample, REV, the mode, COPY; VOL, PAN, PITCH, HP, LP, CHOKE; the sample drawn with the trim lit; START/END turned column then millisecond with a zoom; PLAY, LOOP (with a playhead), FULL, DEL. REV (backwards, and drawn so -- mirrored in the editor and the panel, START on the left over the sample's end, turned the way it is heard), PITCH -12..+12 semitones (varispeed), HP and LP 12 dB/octave filters in thirds of an octave: the player can do none of it, so such a pad plays a copy rendered once in .fx/ beside its sample (by the editor when the values settle, by the kit load task when one is missing); kit.json keeps pitch, hp, lp, reverse. The colour is saved now, and a new or removed sample asks to be saved; requires core 1.31; a value being turned reads dark on the accent: the text colour sits on the button, which is the only thing ever EDITED, not on its label",
     "0.4.0: the kit browser in two lists, LEGACY (the kits a board ships with) and USER (made on it: KitInfo::isUser(), the Slicer's), switched on the status bar; it opens on the list the loaded kit is in; requires core 1.29",
     "0.2.1: Fix pad editor file browser off-screen, params panel scroll, pad-editor playback silence, live start/end trim preview",
     "0.2.0: Wire SamplerPadLogic, EventBus audio bridge, kit load task, end=0 normalization",

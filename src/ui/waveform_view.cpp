@@ -56,7 +56,7 @@ static constexpr int32_t kSpan    = WAVEFORM_CANVAS_WIDTH - kMarkerW;
  * length, not by the file -- so progress 0 belongs under the start marker and
  * progress 1 under the end one. Two views exist at most (the sampler panel's
  * and the pad editor's); a third would simply travel the whole canvas. */
-struct ViewBand { lv_obj_t* view; float start; float end; };
+struct ViewBand { lv_obj_t* view; float start; float end; bool reversed; };
 static ViewBand s_bands[4] = {};
 
 static ViewBand* band_slot(lv_obj_t* view, bool create)
@@ -64,7 +64,7 @@ static ViewBand* band_slot(lv_obj_t* view, bool create)
     for (auto& b : s_bands) if (b.view == view) return &b;
     if (!create) return nullptr;
     for (auto& b : s_bands) {
-        if (!b.view) { b.view = view; b.start = 0.0f; b.end = 1.0f; return &b; }
+        if (!b.view) { b.view = view; b.start = 0.0f; b.end = 1.0f; b.reversed = false; return &b; }
     }
     return nullptr;
 }
@@ -226,6 +226,8 @@ static void set_pending_label(lv_obj_t* waveformView, bool pending)
 
 static void draw_from_buffer(lv_obj_t* waveformView, uint32_t actualSamples)
 {
+    const ViewBand* band = band_slot(waveformView, false);
+    const bool reversed = band && band->reversed;
     lv_obj_t* canvas = lv_obj_get_child(waveformView, 0);
     if (!canvas) return;
 
@@ -254,7 +256,8 @@ static void draw_from_buffer(lv_obj_t* waveformView, uint32_t actualSamples)
         int32_t mag = static_cast<int32_t>((v < 0 ? -v : v) * scale);
         if (mag < 1) mag = 1;
 
-        int32_t x   = static_cast<int32_t>(i);
+        /* A reversed sample is drawn as it is heard: its end first. */
+        int32_t x   = static_cast<int32_t>(reversed ? actualSamples - 1 - i : i);
         int32_t yTop = midY - mag;
         int32_t yBot = midY + mag;
 
@@ -345,11 +348,23 @@ static void place_dim(lv_obj_t* dim, int32_t x, int32_t w)
     lv_obj_remove_flag(dim, LV_OBJ_FLAG_HIDDEN);
 }
 
+void waveform_view_set_reversed(lv_obj_t* waveformView, bool reversed)
+{
+    if (ViewBand* b = band_slot(waveformView, true)) b->reversed = reversed;
+}
+
 void waveform_view_set_markers(lv_obj_t* waveformView, float startNorm, float endNorm)
 {
     if (startNorm < 0.0f) startNorm = 0.0f;
     if (endNorm   > 1.0f) endNorm   = 1.0f;
     if (endNorm   < startNorm) endNorm = startNorm;
+    /* Reversed, the picture is mirrored: what is heard first -- the trim's
+     * end -- is on the left, under the start marker. */
+    if (const ViewBand* b = band_slot(waveformView, false); b && b->reversed) {
+        const float s = 1.0f - endNorm;
+        endNorm = 1.0f - startNorm;
+        startNorm = s;
+    }
 
     const int32_t startX = static_cast<int32_t>(startNorm * kSpan);
     const int32_t endX   = static_cast<int32_t>(endNorm   * kSpan);

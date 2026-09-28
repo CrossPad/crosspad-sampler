@@ -26,6 +26,8 @@
 #include <crosspad-sampler/logic/pad_color_manager.hpp>
 
 #include <crosspad/kit/IKitManager.hpp>
+#include <crosspad/kit/KitPathUtils.hpp>
+#include <crosspad/sampletools/ISampleTools.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
 #include <crosspad/platform/IClock.hpp>
 #include <crosspad/pad/PadManager.hpp>
@@ -38,6 +40,8 @@
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 #include <freertos/idf_additions.h>
+
+#include <sys/stat.h>
 #include <esp_heap_caps.h>
 
 #include <atomic>
@@ -122,6 +126,8 @@ static constexpr uint32_t kDeferPollMs      = 5;
 static constexpr uint32_t kDeferDeadlineMs  = 4000;   // after the parse
 static constexpr uint32_t kLastPadGraceMs   = 1000;   // the last sounding pad may finish on its own
 static constexpr uint32_t kForceQuietWaitMs = 200;    // NoteOff → voice gone
+static constexpr uint32_t kRenderPollMs    = 20;     // a pad's fx copy being rendered
+static constexpr uint32_t kRenderWaitMs    = 60000;  // longest a load waits for one
 
 static bool pad_sounding(uint8_t pad) {
     auto& cb = sampler_get_platform_callbacks();
@@ -142,6 +148,33 @@ static bool reload_pad(uint8_t pad, KitSwapRecord& rec, bool onlyIfIdle) {
     // The pad now plays the incoming kit, and may say so in its color.
     getPadColorManager().markPadReloaded(pad);
     return true;
+}
+
+/// A pad with pitch, filters or reverse plays its sample rendered with them --
+/// the player can do none of it; see crosspad::renderedSamplePath(). A copy the card
+/// does not have yet (a first load, a kit edited on a computer) is rendered
+/// here, off the UI thread, through the sample tools, which run one job at a
+/// time.
+static void render_fx(const crosspad::KitInfo& kit, const crosspad::Pad& pad) {
+    auto* st = crosspad::getPlatformServices().sampleTools;
+    const crosspad::SampleFx fx{pad.pitch, pad.hp, pad.lp, pad.reverse};
+    if (!st || !fx.any()) return;
+    for (uint8_t i = 0; i < pad.sampleCount; ++i) {
+        const std::string src = crosspad::resolveKitSamplePath(kit.path, pad.samples[i].sample);
+        const std::string out = crosspad::kitFsPath(crosspad::renderedSamplePath(src, fx));
+        struct stat sb;
+        if (stat(out.c_str(), &sb) == 0) continue;
+        uint32_t waited = 0;
+        while (!st->requestRendered(crosspad::kitFsPath(src), out, fx)) {   // another job runs
+            if (waited >= kRenderWaitMs) return;
+            vTaskDelay(pdMS_TO_TICKS(kRenderPollMs));
+            waited += kRenderPollMs;
+        }
+        while (st->job() == crosspad::ToolJob::Busy && waited < kRenderWaitMs) {
+            vTaskDelay(pdMS_TO_TICKS(kRenderPollMs));
+            waited += kRenderPollMs;
+        }
+    }
 }
 
 // Stop the pad's voices and give them a moment to go: the reload after this
@@ -260,6 +293,14 @@ static void run_one_load(bool onlyModified, int kitId) {
     }
     const int total = __builtin_popcount(todo);
     int done = 0;
+
+    /* Copies of pads with pitch or filters first, while the outgoing kit still
+     * plays: a pad swapped before its copy exists would come back plain. */
+    if (kit->engine == crosspad::KitEngine::Sampler) {
+        for (uint8_t padIdx = 0; padIdx < PAD_COUNT; ++padIdx) {
+            if (todo & (1u << padIdx)) render_fx(*kit, kit->pads[padIdx]);
+        }
+    }
 
     // Until each of those pads is reloaded it still plays the outgoing kit;
     // dimmed and breathing is what that looks like.

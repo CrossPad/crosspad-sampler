@@ -74,7 +74,14 @@ void waveform_view_load_file(lv_obj_t* waveformView, const char* path);
 /// Clear the canvas to the background color and hide all markers.
 void waveform_view_clear(lv_obj_t* waveformView);
 
-/// Position the start/end trim markers.
+/// Draw the view's sample reversed, as a reversed pad plays it: the picture
+/// mirrored on the next load, the trim markers mirrored (the start marker on
+/// the trim's end, which is heard first), and the playhead's 0..1 running
+/// left to right over what is heard. Set it before loading and placing the
+/// markers.
+void waveform_view_set_reversed(lv_obj_t* waveformView, bool reversed);
+
+/// Position the start/end trim markers, in the sample's own direction.
 /// @param startNorm  Normalised start position in [0.0, 1.0].
 /// @param endNorm    Normalised end   position in [0.0, 1.0].
 void waveform_view_set_markers(lv_obj_t* waveformView, float startNorm, float endNorm);

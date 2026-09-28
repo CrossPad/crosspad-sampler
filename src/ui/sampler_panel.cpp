@@ -23,6 +23,7 @@
 #include <crosspad/kit/IKitManager.hpp>
 #include <crosspad/kit/KitInfo.hpp>
 #include <crosspad/kit/KitPathUtils.hpp>
+#include <crosspad/sampletools/SliceMath.hpp>
 #include "crosspad-sampler/PreviewPlayer.hpp"
 #include <string>
 #include <crosspad/kit/KitPathUtils.hpp>
@@ -800,6 +801,7 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
                 lv_subject_copy_string(&s_audio_name, samplePath.c_str());
 
                 if (waveformCanvas) {
+                    waveform_view_set_reversed(waveformCanvas, kit2->pads[pad - 1].reverse);
                     waveform_view_load(waveformCanvas, pad - 1, sampleIdx);
 
                     if (sampleInfoValid && currentSampleInfo.sampleCount > 0) {
@@ -817,15 +819,22 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
                 }
             } else if (waveformCanvas && sampleInfoValid
                        && currentSampleInfo.sampleCount > 0) {
-                /* Same pad, but its trim may have moved -- the editor writes
-                 * start and end straight into the kit, and this panel is what
-                 * you look at when you come back out of it. Redrawn only when
-                 * the numbers actually change. */
+                /* Same pad, but its trim or its reverse may have changed --
+                 * the editor writes them straight into the kit, and this panel
+                 * is what you look at when you come back out of it. Redrawn
+                 * only when they actually change. */
                 static uint32_t lastStart = 0xFFFFFFFFu;
                 static uint32_t lastEnd   = 0xFFFFFFFFu;
+                static bool     lastRev   = false;
                 const uint32_t startS = kit2->pads[pad - 1].samples[sampleIdx].start;
                 const uint32_t endS   = kit2->pads[pad - 1].samples[sampleIdx].end;
-                if (startS != lastStart || endS != lastEnd) {
+                const bool     rev    = kit2->pads[pad - 1].reverse;
+                if (startS != lastStart || endS != lastEnd || rev != lastRev) {
+                    if (rev != lastRev) {
+                        lastRev = rev;
+                        waveform_view_set_reversed(waveformCanvas, rev);
+                        waveform_view_load(waveformCanvas, pad - 1, sampleIdx);
+                    }
                     lastStart = startS;
                     lastEnd   = endS;
                     const uint32_t total = currentSampleInfo.sampleCount;
@@ -881,7 +890,9 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
             if (sampleInfoValid && currentSampleInfo.sampleRate > 0) {
                 crosspad::KitInfo* kitP = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
                 uint32_t startS = 0, endS = 0;
+                double ratio = 1.0;   // a pitched pad plays faster or slower (varispeed)
                 if (kitP && (padIdxTime < KIT_PADS) && !kitP->pads[padIdxTime].samples.empty()) {
+                    ratio = crosspad::SliceMath::pitchRatio(kitP->pads[padIdxTime].pitch);
                     uint8_t sIdx = currentSampleIndex[padIdxTime];
                     if (sIdx >= kitP->pads[padIdxTime].samples.size()) sIdx = 0;
                     startS = kitP->pads[padIdxTime].samples[sIdx].start;
@@ -892,7 +903,7 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
                 else totalSamples = currentSampleInfo.sampleCount; // fallback: whole file
 
                 if (totalSamples > 0) {
-                    float totalMs = (float)totalSamples * 1000.0f / (float)currentSampleInfo.sampleRate;
+                    float totalMs = (float)((double)totalSamples * 1000.0 / currentSampleInfo.sampleRate / ratio);
                     int elapsedMs = now - startPlayTime;
                     if (elapsedMs < 0) elapsedMs = 0;
                     progress = totalMs > 1.0f ? (float)elapsedMs / totalMs : 0.0f;

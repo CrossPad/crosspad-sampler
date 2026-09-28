@@ -1,15 +1,44 @@
 #ifdef USE_LVGL
 
-// overlay for the pad, samples settings
+/**
+ * @file pad_editor.cpp
+ * @brief The pad editor -- one pad's sample, its trim and its settings, laid
+ *        out as the Recorder is: the same rows, the same picture, the same
+ *        START and END.
+ *
+ *   top     back, the pad in its colour (hit a pad to edit that one; turned,
+ *           the colour), its sample (tap: pick another), REV (the sample
+ *           backwards, and drawn so: the picture mirrored, START on the left
+ *           where the pad now begins -- the sample's end -- and turned the way
+ *           it is heard), the mode (clicked through one shot, hold and loop),
+ *           COPY (then hit the pad to copy it onto)
+ *   params  VOL, PAN, PITCH, HP, LP and CHOKE are turned. PITCH is -12..+12
+ *           semitones, varispeed as in the Slicer; HP and LP are 12 dB/octave
+ *           filters stepped in thirds of an octave, OFF at their open end. The
+ *           player can neither transpose, filter nor reverse, so the pad plays
+ *           a copy of its sample rendered once the values stop moving
+ *           (crosspad::renderedSamplePath) -- PLAY and LOOP play them at once.
+ *   wave    the sample: what the pad plays between START and END lit, the
+ *           rest dimmed, and the playhead while LOOP plays
+ *   tools   START and END are turned: the first click moves the marker a
+ *           column of the picture per detent, the second a millisecond with
+ *           the picture zoomed in round it, the third is done. PLAY plays the
+ *           trim once, LOOP round and round, FULL puts the markers back at the ends, DEL -- twice --
+ *           takes the sample off the pad.
+ *
+ * Every change lands on the kit at once and is saved with it; the pad is
+ * reloaded once a marker stops moving, not per detent. The picture and LOOP
+ * go through crosspad::ISampleTools, as the Recorder's do.
+ */
 
 #include <lvgl.h>
 #include "crosspad-sampler/SamplerPlatformCallbacks.hpp"
 #include "crosspad-sampler/SamplerConfig.hpp"
+#include "crosspad-sampler/ui/pad_editor.hpp"
 #include "crosspad-sampler/ui/sampler_panel.hpp"
-#include "crosspad-sampler/ui/waveform_view.hpp"
-#include "crosspad-sampler/waveform/waveform_cache.hpp"
 
 #include "crosspad-gui/crosspad_gui.h"
+#include "crosspad-gui/widgets/gui_helpers.h"
 
 #include <crosspad/led/ColorList.hpp>
 #include <crosspad/led/HtmlColor.hpp>
@@ -18,1060 +47,1250 @@
 #include <crosspad/kit/KitInfo.hpp>
 #include <crosspad/kit/KitPathUtils.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
-#include <crosspad/platform/IClock.hpp>
+#include <crosspad/sampletools/ISampleTools.hpp>
+#include <crosspad/sampletools/SliceMath.hpp>
 #include <crosspad/status/CrosspadStatus.hpp>
 
+#include <algorithm>
 #include <atomic>
-#include <string>
+#include <cctype>
 #include <cstdio>
-#include <cstring>
 #include <cstdlib>
-#include <vector>
+#include <cstring>
+#include <string>
 
 using crosspad::ColorList;
-using crosspad::Pad;
-using crosspad::SampleSlot;
 using crosspad::KitInfo;
-
-// Global scope — referenced by kit_selector_overlay.cpp
-lv_style_t stylePadEditorContSel;
+using crosspad::Pad;
 
 namespace crosspad_sampler {
 
-static inline lv_indev_t * getEncoder() {
-    return crosspad_gui::getGuiPlatform().getNavigationEncoder();
-}
+extern lv_subject_t s_pad_sampler; // the pad on show, 1-based (sampler_panel.cpp)
+/// A pad hit while the editor is up, stamped by the pad thread and taken here,
+/// on the LVGL thread.
+extern std::atomic<int> g_padPressPending;
 
-static inline KitInfo * getCurrentKit() {
-    auto * mgr = crosspad::getKitManager();
+namespace {
+
+constexpr uint16_t kCols       = 300;     // columns of the picture
+constexpr uint32_t kTickMs     = 50;
+constexpr uint32_t kZoomFrames = 12000;   // each side of a marker in fine mode, ~0.25 s
+constexpr uint32_t kSettleMs   = 150;     // a marker still this long: the pad reloads, a loop restarts
+constexpr uint32_t kFxSettleMs = 400;     // PITCH, HP, LP still this long: the pad's copy is rendered
+
+/* The Recorder's colours. */
+const lv_color_t kBg     = lv_color_hex(0x16181B);
+const lv_color_t kPanel  = lv_color_hex(0x20242A);
+const lv_color_t kText   = lv_color_hex(0xE8EAED);
+const lv_color_t kDim    = lv_color_hex(0x7B828B);
+const lv_color_t kInk    = lv_color_hex(0x16181B);
+const lv_color_t kAccent = lv_color_hex(0xC6FF47);
+const lv_color_t kRec    = lv_color_hex(0xFF5C5C);
+const lv_color_t kLoopBg = lv_color_hex(0x263019);
+const lv_color_t kWave   = lv_color_hex(0x9FD63A);
+const lv_color_t kWaveOff= lv_color_hex(0x4A515B);
+const lv_color_t kHead   = lv_color_hex(0xFFFFFF);
+const lv_color_t kStartC = lv_color_hex(0x4FE0B0);
+
+const char* const kModes[] = {"1-SHOT", "HOLD", "LOOP"};   // Pad::playbackMode
+
+/// How a marker is being turned.
+enum class Edit : uint8_t { None, Coarse, Fine };
+
+lv_obj_t* s_cont = nullptr;
+lv_obj_t* s_wave = nullptr;
+lv_obj_t* s_info = nullptr;
+lv_obj_t* s_padBtn = nullptr;            // the pad, in its colour; turned, the colour
+lv_obj_t* s_fileBtn = nullptr;
+lv_obj_t* s_revBtn = nullptr;
+lv_obj_t* s_copyBtn = nullptr;
+lv_obj_t* s_volBtn = nullptr;
+lv_obj_t* s_panBtn = nullptr;
+lv_obj_t* s_pitchBtn = nullptr;
+lv_obj_t* s_hpBtn = nullptr;
+lv_obj_t* s_lpBtn = nullptr;
+lv_obj_t* s_chokeBtn = nullptr;
+lv_obj_t* s_modeBtn = nullptr;
+lv_obj_t* s_startBtn = nullptr;
+lv_obj_t* s_endBtn = nullptr;
+lv_obj_t* s_loopBtn = nullptr;
+lv_obj_t* s_delBtn = nullptr;
+lv_obj_t* s_overlay = nullptr;
+lv_timer_t* s_timer = nullptr;
+lv_group_t* s_group = nullptr;
+lv_group_t* s_priorGroup = nullptr;       // restored on destroy
+lv_group_t* s_overlayGroup = nullptr;
+uint32_t s_backToken = 0;
+crosspad_gui::ILvglApp* s_app = nullptr;
+
+int      s_pad = -1;                      // 0-based, the pad on screen
+std::string s_sample;                     // its sample as the kit and the player name it; "" = none
+std::string s_file;                       // the same on the filesystem, for the picture and LOOP
+uint32_t s_frames = 0;
+uint32_t s_rate = 48000;
+uint32_t s_start = 0, s_end = 0;          // what the pad plays
+crosspad::WaveOverview s_ov;              // the picture drawn
+bool     s_ovPending = false;
+bool     s_viewWanted = false;            // a picture asked for while a job ran
+uint32_t s_wantA = 0, s_wantB = 0;
+bool     s_loading = false;               // the markers take the pad's trim when the picture comes
+Edit     s_editStart = Edit::None, s_editEnd = Edit::None;
+bool     s_looping = false;               // LOOP: round and round
+bool     s_playing = false;               // PLAY: once
+bool     s_fxMoved = false;               // PITCH, HP or LP turned; the copy is asked for once it settles
+uint32_t s_fxAt = 0;
+bool     s_renderWanted = false;          // a copy to render, waiting for the tools
+bool     s_renderPending = false;         // the tools are rendering it
+int      s_renderPad = -1;                // whose copy
+std::string s_renderSrc, s_renderOut;     // filesystem paths: the sample, its transposed copy
+bool     s_moved = false;                 // a marker moved; the pad is reloaded once it settles
+uint32_t s_movedAt = 0;
+int32_t  s_headX = -1;                    // playhead column as drawn, -1 = none
+bool     s_copying = false;               // COPY: the next pad hit is the target
+int      s_copyFrom = -1, s_copyTo = -1;
+bool     s_delArmed = false;              // DEL clicked once
+int      s_color = 0;                     // index into ColorList, the COLOR button's
+
+inline lv_indev_t* encoder() { return crosspad_gui::getGuiPlatform().getNavigationEncoder(); }
+inline crosspad::ISampleTools* tools() { return crosspad::getPlatformServices().sampleTools; }
+
+KitInfo* kit()
+{
+    auto* mgr = crosspad::getKitManager();
     return mgr ? mgr->getCurrentKit() : nullptr;
 }
 
-static inline crosspad::CrosspadStatus * getStatus() {
-    return crosspad::getPlatformServices().status;
-}
-
-// Set when the shown pad changed, so the reload is not pushed again.
-static bool dontUpdateSettings = false;
-
-
-
-static uint32_t s_backToken = 0;   // power-button back registration
-lv_group_t * pad_editor_group; // single flat group: settings widgets, list items, then bottom buttons
-static lv_group_t * s_priorEncoderGroup = nullptr; // restored on destroy so encoder doesn't dangle
-
-static crosspad_gui::ILvglApp * thisApp = NULL; // current app instance
-static lv_obj_t * s_padEditorCont = NULL; // editor's own container — correctly bounded below the status bar
-
-// settings subjects
-lv_subject_t s_Color;
-lv_subject_t s_ColorPressed;
-lv_subject_t s_ColorPlaying;
-lv_subject_t s_ChokeGroup;
-lv_subject_t s_Pitch;
-lv_subject_t s_Volume;
-lv_subject_t s_Pan;
-
-extern lv_subject_t s_pad_sampler; // subject for the last pressed pad (defined in sampler_panel.cpp)
-/// A pad hit while the editor is up, stamped by the pad thread. Consumed here,
-/// on the LVGL thread: the subject drives labels, and labels are not something
-/// another thread may touch.
-extern std::atomic<int> g_padPressPending;
-
-lv_obj_t * list = NULL; // samples list
-lv_timer_t * t_padUpdate;
-
-static Pad * lastPad = NULL;
-const int maxSamples = 1;
-
-// Duplicate pad state
-static bool g_duplicateMode = false;
-static int g_duplicateSourcePadIdx = -1;  // 0-based
-static lv_obj_t * g_duplicateBtn = NULL;
-
-static lv_obj_t * panSpinbox = NULL;
-static lv_obj_t * volumeSpinbox = NULL;
-static lv_obj_t * chokeSpinbox = NULL;
-static lv_obj_t * startSpinbox = NULL;
-static lv_obj_t * endSpinbox = NULL;
-
-static lv_obj_t * waveformView = NULL;
-static char currentWaveformPath[128] = {0};
-static SampleInfo waveformSampleInfo = {};
-static bool waveformInfoValid = false;
-
-// Step multiplier for start/end spinboxes
-static int stepMultiplierIndex = 3; // Index into multipliers array (default x1000)
-static const int stepMultipliers[] = {1, 10, 100, 1000, 10000}; // Available multipliers
-static const int stepMultipliersCount = 5;
-static lv_obj_t * stepMultiplierBtn = NULL; // Button showing current multiplier
-
-// declarations
-static lv_obj_t * lv_CreatePadEditorContext(lv_obj_t *parent);
-static void Browse_button_cb(lv_event_t * e);
-static void UpdatePadEditor(lv_timer_t * e);
-static void DestroyPadEditor(lv_event_t * e);
-static void UpdateWaveformMarkers();
-static void ShowDuplicateConfirmation(int sourcePadIdx, int targetPadIdx);
-static void ExitDuplicateMode();
-
-// Exit duplicate mode and reset button style
-static void ExitDuplicateMode()
+Pad* pad()
 {
-    g_duplicateMode = false;
-    g_duplicateSourcePadIdx = -1;
-    if (g_duplicateBtn) {
-        lv_obj_set_style_bg_color(g_duplicateBtn, lv_color_hex(0x000000), 0);  // reset to default
-        lv_obj_set_style_bg_opa(g_duplicateBtn, LV_OPA_TRANSP, 0);            // let style handle it
-        lv_obj_remove_local_style_prop(g_duplicateBtn, LV_STYLE_BG_COLOR, 0);
-        lv_obj_remove_local_style_prop(g_duplicateBtn, LV_STYLE_BG_OPA, 0);
-    }
+    KitInfo* k = kit();
+    return k && s_pad >= 0 && s_pad < KIT_PADS ? &k->pads[s_pad] : nullptr;
 }
 
-// Stable addresses for the confirmation dialog's lambda captures.
-static int s_dupSourceIdx = 0;
-static int s_dupTargetIdx = 0;
-
-// Show confirmation dialog for duplicating a pad
-static void ShowDuplicateConfirmation(int sourcePadIdx, int targetPadIdx)
+/// What pad @p idx is played with; nothing when there is no such pad.
+crosspad::SampleFx pad_fx(int idx)
 {
-    if (sourcePadIdx == targetPadIdx) {
-        ExitDuplicateMode();
-        return;
+    KitInfo* k = kit();
+    if (!k || idx < 0 || idx >= KIT_PADS) return {};
+    const Pad& p = k->pads[idx];
+    return crosspad::SampleFx{p.pitch, p.hp, p.lp, p.reverse};
+}
+
+/// A cutoff as a button says it: 200, 1k, 1.3k, 12.5k.
+std::string fmt_hz(uint16_t hz)
+{
+    char buf[12];
+    if (hz < 1000)            std::snprintf(buf, sizeof(buf), "%u", (unsigned)hz);
+    else if (hz % 1000 == 0)  std::snprintf(buf, sizeof(buf), "%uk", (unsigned)(hz / 1000));
+    else                      std::snprintf(buf, sizeof(buf), "%.1fk", hz / 1000.0);
+    return buf;
+}
+
+/// @p hz's place among the knob's cutoffs, the nearest one.
+int cutoff_index(uint16_t hz)
+{
+    int best = 0;
+    for (int i = 1; i < crosspad::kFxCutoffCount; ++i) {
+        if (std::abs((int)crosspad::kFxCutoffs[i] - hz) < std::abs((int)crosspad::kFxCutoffs[best] - hz)) best = i;
     }
-
-    s_dupSourceIdx = sourcePadIdx;
-    s_dupTargetIdx = targetPadIdx;
-
-    lv_obj_t * mbox = lv_msgbox_create(lv_layer_top());
-    lv_msgbox_add_title(mbox, "Copy Pad");
-
-    char msg[80];
-    snprintf(msg, sizeof(msg), "Copy Pad %d to Pad %d?\nTarget will be overwritten.", sourcePadIdx + 1, targetPadIdx + 1);
-    lv_msgbox_add_text(mbox, msg);
-
-    lv_obj_t * okBtn = lv_msgbox_add_footer_button(mbox, "OK");
-    lv_obj_t * cancelBtn = lv_msgbox_add_footer_button(mbox, "Cancel");
-
-    lv_obj_add_event_cb(okBtn, [](lv_event_t * e) {
-        KitInfo * kit = getCurrentKit();
-        if (kit == NULL) return;
-
-        Pad * source = &kit->pads[s_dupSourceIdx];
-        Pad * target = &kit->pads[s_dupTargetIdx];
-
-        auto & cbs = sampler_get_platform_callbacks();
-        if (cbs.player.wipeOut) cbs.player.wipeOut(s_dupTargetIdx);
-        target->CopyFrom(*source);
-
-        if (cbs.audio.reloadPad) cbs.audio.reloadPad(s_dupTargetIdx);
-
-        crosspad::getPadManager().setPadColor(s_dupTargetIdx, crosspad::HtmlColor(target->color));
-
-        LV_LOG_INFO("Pad %d copied to Pad %d", s_dupSourceIdx + 1, s_dupTargetIdx + 1);
-
-        lv_subject_set_int(&s_pad_sampler, s_dupTargetIdx + 1);
-        lastPad = NULL; // force UI refresh
-
-        lv_obj_t * btn = (lv_obj_t *)lv_event_get_target(e);
-        lv_obj_t * mbox = lv_obj_get_parent(lv_obj_get_parent(btn));
-        if (mbox) lv_msgbox_close(mbox);
-
-        ExitDuplicateMode();
-    }, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_add_event_cb(cancelBtn, [](lv_event_t * e) {
-        lv_obj_t * btn = (lv_obj_t *)lv_event_get_target(e);
-        lv_obj_t * mbox = lv_obj_get_parent(lv_obj_get_parent(btn));
-        if (mbox) lv_msgbox_close(mbox);
-        ExitDuplicateMode();
-    }, LV_EVENT_CLICKED, NULL);
+    return best;
 }
 
-/* The power button's short click inside the pad editor closes the editor and
- * goes back to the sampler panel — one level, not the whole app. */
-static bool padEditorBack_cb(void *) {
-    if (!s_padEditorCont) return false;
-    lv_obj_delete_async(s_padEditorCont);   // DestroyPadEditor runs from DELETE
-    return true;
+std::string base_of(const std::string& p)
+{
+    const size_t s = p.find_last_of('/');
+    return s == std::string::npos ? p : p.substr(s + 1);
 }
 
-lv_obj_t * pad_editor_create(lv_obj_t *parent, crosspad_gui::ILvglApp * a) {
-    thisApp = a;
-    /* The panel behind is fully covered from here on; leaving it polling costs
-     * a repaint of whatever the editor draws over it, twenty times a second. */
-    sampler_panel_set_covered(true);
+void set_text(lv_obj_t* l, const char* t)
+{
+    if (l && std::strcmp(lv_label_get_text(l), t) != 0) lv_label_set_text(l, t);
+}
 
+void set_bg(lv_obj_t* o, lv_color_t c)
+{
+    if (o && !lv_color_eq(lv_obj_get_style_bg_color(o, LV_PART_MAIN), c)) lv_obj_set_style_bg_color(o, c, 0);
+}
 
-    lv_obj_t * cont = lv_obj_create(parent);
-    lv_obj_set_size(cont, lv_obj_get_content_width(parent), lv_obj_get_content_height(parent));
-    lv_obj_center(cont);
-    lv_obj_add_style(cont, &styleAppContainer, 0);
-    s_padEditorCont = cont;
-    lv_obj_add_event_cb(cont, DestroyPadEditor, LV_EVENT_DELETE, NULL);
-    lv_obj_add_event_cb(cont, [](lv_event_t * e) {
-        // A click on the container is a click on blank space: defocus.
-        LV_LOG_TRACE("Container clicked");
-        lv_indev_set_group(getEncoder(), pad_editor_group);
-    }, LV_EVENT_CLICKED, NULL); // consume the click event
+void set_ink(lv_obj_t* l, lv_color_t c)
+{
+    if (l && !lv_color_eq(lv_obj_get_style_text_color(l, LV_PART_MAIN), c)) lv_obj_set_style_text_color(l, c, 0);
+}
 
-    // Once: lv_style_init() on an initialised style orphans its property
-    // array, and the editor is opened on every pad visit.
-    static bool s_contSelStyleReady = false;
-    if (!s_contSelStyleReady) {
-        lv_style_init(&stylePadEditorContSel);
-        lv_style_set_border_color(&stylePadEditorContSel, lv_color_white());
-        lv_style_set_border_width(&stylePadEditorContSel, 3);
-        lv_style_set_border_opa(&stylePadEditorContSel, LV_OPA_COVER);
-        s_contSelStyleReady = true;
+/// The name ColorList gives colour @p i, upper case.
+std::string color_name(int i)
+{
+    ColorList cl;
+    const char* s = cl.Get();
+    for (int n = 0; n < i && s; ++n) {
+        s = std::strchr(s, '\n');
+        if (s) ++s;
     }
-
-    pad_editor_group = lv_group_create();
-    lv_group_set_wrap(pad_editor_group, true);
-
-    // Remembered so destroy can restore it.
-    s_priorEncoderGroup = lv_indev_get_group(getEncoder());
-    lv_indev_set_group(getEncoder(), pad_editor_group);
-
-    lv_obj_update_layout(parent); // refresh layout
-    const int buttonYoffset = -8;
-
-    lv_obj_t * closeBtn = lv_button_create(cont);
-    lv_obj_align(closeBtn, LV_ALIGN_BOTTOM_LEFT, 10, buttonYoffset);
-    lv_obj_add_event_cb(closeBtn, [](lv_event_t * e) {
-        LV_LOG_WARN("Close button clicked");
-        // DestroyPadEditor runs from LV_EVENT_DELETE on the container.
-        lv_obj_t * editor = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
-        if (editor) lv_obj_delete_async(editor);
-    }, LV_EVENT_CLICKED, cont);
-    lv_obj_add_style(closeBtn, &styleButton, 0);
-    lv_obj_add_style(closeBtn, &styleButtonPressed, LV_STATE_PRESSED);
-    lv_obj_add_style(closeBtn, &styleButtonInactive, LV_STATE_DISABLED);
-    lv_obj_t * closeLabel = lv_label_create(closeBtn);
-    lv_label_set_text(closeLabel, "Close");
-    lv_obj_set_style_text_color(closeLabel, lv_color_hex(0x000000), 0);
-
-    g_duplicateBtn = lv_button_create(cont);
-    lv_obj_align(g_duplicateBtn, LV_ALIGN_BOTTOM_MID, 0, buttonYoffset);
-    lv_obj_add_event_cb(g_duplicateBtn, [](lv_event_t * e) {
-        if (g_duplicateMode) {
-            ExitDuplicateMode();
-            return;
-        }
-        KitInfo * kit = getCurrentKit();
-        if (kit == NULL) return;
-        int padId = lv_subject_get_int(&s_pad_sampler);
-        if (padId <= 0 || padId > 16) return;
-
-        Pad * pad = &kit->pads[padId - 1];
-        if (pad->GetSampleCount() == 0) return; // nothing to copy
-
-        g_duplicateSourcePadIdx = padId - 1;
-        g_duplicateMode = true;
-
-        if (g_duplicateBtn) {
-            lv_obj_set_style_bg_color(g_duplicateBtn, lv_color_hex(0xFF8800), 0);
-            lv_obj_set_style_bg_opa(g_duplicateBtn, LV_OPA_COVER, 0);
-        }
-
-        LV_LOG_INFO("Duplicate mode: source Pad %d, tap target pad", padId);
-    }, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_style(g_duplicateBtn, &styleButton, 0);
-    lv_obj_add_style(g_duplicateBtn, &styleButtonPressed, LV_STATE_PRESSED);
-    lv_obj_add_style(g_duplicateBtn, &styleButtonInactive, LV_STATE_DISABLED);
-    lv_obj_t * dupLabel = lv_label_create(g_duplicateBtn);
-    lv_label_set_text(dupLabel, "Copy");
-    lv_obj_set_style_text_color(dupLabel, lv_color_hex(0x000000), 0);
-
-    lv_obj_t * browseBtn = lv_button_create(cont);
-    lv_obj_align(browseBtn, LV_ALIGN_BOTTOM_RIGHT, -10, buttonYoffset);
-    lv_obj_add_event_cb(browseBtn, Browse_button_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_style(browseBtn, &styleButton, 0);
-    lv_obj_add_style(browseBtn, &styleButtonPressed, LV_STATE_PRESSED);
-    lv_obj_add_style(browseBtn, &styleButtonInactive, LV_STATE_DISABLED);
-    lv_obj_t * browseLabel = lv_label_create(browseBtn);
-    lv_label_set_text(browseLabel, "Browse");
-    lv_obj_set_style_text_color(browseLabel, lv_color_hex(0x000000), 0);
-
-    const int panelTopMargin = 4; // no title above the panel anymore, keep this tight
-    const int panelBottomMargin = 27; // clears the Close/Copy/Browse footer band
-    const int panelHeight = lv_obj_get_content_height(cont) - panelTopMargin - panelBottomMargin;
-    const int panelWidth = (lv_obj_get_content_width(cont) / 2) - 15;
-    const int panelXoffset = 5; // from the wall
-
-    // Anchored top and stretched down, so the params fit without scrolling.
-    lv_obj_t * settingsContext = lv_CreatePadEditorContext(cont);
-    lv_obj_align(settingsContext, LV_ALIGN_TOP_LEFT, panelXoffset, panelTopMargin);
-    lv_obj_set_size(settingsContext, panelWidth, panelHeight);
-
-    waveformView = waveform_view_create(cont);
-    lv_obj_align(waveformView, LV_ALIGN_RIGHT_MID, -5, 0);
-
-    // Sample list, a thin strip above the waveform.
-    list = lv_list_create(cont);
-    lv_obj_add_style(list, &styleFileExplorerList, 0);
-    lv_obj_add_style(list, &styleFileExplorerScrollbar, LV_PART_SCROLLBAR);
-    lv_obj_set_width(list, lv_obj_get_width(waveformView)); // Match waveform width
-    lv_obj_set_style_max_height(list, 30, 0); // Thin strip - 30px height
-    lv_obj_align_to(list, waveformView, LV_ALIGN_OUT_TOP_MID, 0, -5); // Position above waveform
-    lv_list_add_button(list, LV_SYMBOL_WARNING, "Select pad"); // default item
-
-    // Appended last, so the encoder cycles Close → Copy → Browse → wrap.
-    lv_group_add_obj(pad_editor_group, closeBtn);
-    lv_group_add_obj(pad_editor_group, g_duplicateBtn);
-    lv_group_add_obj(pad_editor_group, browseBtn);
-
-    if (chokeSpinbox) lv_group_focus_obj(chokeSpinbox);
-
-    t_padUpdate = lv_timer_create(UpdatePadEditor, 200, list);
-    s_backToken = crosspad_gui::ui_back_push(padEditorBack_cb, nullptr);
-    return cont;
+    std::string name;
+    for (; s && *s && *s != '\n'; ++s) name += (char)std::toupper((unsigned char)*s);
+    return name;
 }
 
-/// The source file's numbers, taken from the waveform cache the loader fills.
-///
-/// This runs on the LVGL thread, and the card is shared with the streamer: the
-/// fopen that used to be here blocked the UI for as long as the card was busy
-/// -- up to the FatFs timeout -- so hitting pads in the editor froze the screen
-/// once per pad. A miss here is not an error, it is "not read yet": the
-/// waveform request is already queued, and the cache generation brings the
-/// editor back to this the moment it lands.
-static bool RefreshSourceInfo(const char * fullPath) {
-    if (!fullPath) { waveformInfoValid = false; return false; }
-
-    WaveformCacheEntry * entry = waveform_cache_find(fullPath);
-    if (entry && entry->valid && entry->srcFrames != 0) {
-        waveformSampleInfo.sampleCount      = entry->srcFrames;
-        waveformSampleInfo.sampleRate       = entry->srcSampleRate;
-        waveformSampleInfo.numberOfChannels = entry->srcChannels;
-        waveformSampleInfo.bitsPerSample    = entry->srcBitDepth;
-        waveformInfoValid = true;
-        return true;
+/// The pad's colour's place in ColorList; 0 when it is not one of them.
+int color_index(uint32_t rgb)
+{
+    ColorList cl;
+    for (int i = 0; i < (int)cl.GetCount(); ++i) {
+        if ((uint32_t)cl.Get(i) == rgb) return i;
     }
+    return 0;
+}
 
-    /* Nothing cached yet -- ask the player, which has the file open already and
-     * gives up after 30 ms rather than waiting on the card. Without this the
-     * markers and the playhead waited for the waveform loader to come round,
-     * and on a pad whose sample had not been warmed they never appeared at
-     * all. */
-    auto & cbs = sampler_get_platform_callbacks();
-    if (cbs.player.getSampleInfo) {
-        SampleInfo info = {};
-        if (cbs.player.getSampleInfo(fullPath, &info) && info.sampleCount > 0) {
-            waveformSampleInfo = info;
-            waveformInfoValid = true;
-            return true;
-        }
+// ── the picture ────────────────────────────────────────────────────────────
+
+void request_view(uint32_t a, uint32_t b)
+{
+    auto* st = tools();
+    if (!st || s_file.empty()) return;
+    if (st->requestOverview(s_file, a, b, kCols)) {
+        s_ovPending = true;
+        s_viewWanted = false;
+    } else {
+        s_viewWanted = true;           // a job is running; asked again from the timer
+        s_wantA = a;
+        s_wantB = b;
     }
-    waveformInfoValid = false;
-    return false;
 }
 
-static void UpdateWaveformMarkers() {
-    if (!waveformView || !waveformInfoValid || waveformSampleInfo.sampleCount == 0) return;
-
-    KitInfo * kit = getCurrentKit();
-    if (!kit) return;
-    int padId = lv_subject_get_int(&s_pad_sampler) - 1;
-    if (padId < 0 || padId >= 16) return;
-    Pad * pad = &kit->pads[padId];
-    if (!pad->GetSampleCount()) return;
-
-    uint32_t startS = pad->samples[0].start;
-    uint32_t endS = pad->samples[0].end;
-    uint32_t totalSamples = waveformSampleInfo.sampleCount;
-
-    // end == 0 or past the end means "the whole file".
-    if (endS == 0 || endS > totalSamples) endS = totalSamples;
-
-    float startPos = totalSamples > 0 ? (float)startS / (float)totalSamples : 0.0f;
-    float endPos = totalSamples > 0 ? (float)endS / (float)totalSamples : 1.0f;
-
-    waveform_view_set_markers(waveformView, startPos, endPos);
+void fill(lv_layer_t* layer, int32_t x1, int32_t y1, int32_t x2, int32_t y2, lv_color_t c)
+{
+    lv_draw_rect_dsc_t d;
+    lv_draw_rect_dsc_init(&d);
+    d.bg_color = c;
+    d.bg_opa = LV_OPA_COVER;
+    lv_area_t a = {x1, y1, x2, y2};
+    lv_draw_rect(layer, &d, &a);
 }
 
-static void DestroyPadEditor(lv_event_t * e) {
-    sampler_panel_set_covered(false);   // the panel is on show again
-    crosspad_gui::ui_back_remove(s_backToken);
-    s_backToken = 0;
+bool reversed()
+{
+    const Pad* p = pad();
+    return p && p->reverse;
+}
 
-    lv_timer_delete(t_padUpdate);
+/// Where frame @p f of the picture's range is drawn in @p box: mirrored when
+/// the pad plays the sample backwards, so the picture reads as it is heard.
+int32_t frame_x(uint32_t f, const lv_area_t& box, bool rev)
+{
+    const int32_t w = lv_area_get_width(&box);
+    const uint32_t a = s_ov.start, len = s_ov.end - s_ov.start;
+    int32_t x;
+    if (f <= a) x = box.x1;
+    else if (f >= s_ov.end) x = box.x2;
+    else x = box.x1 + (int32_t)((uint64_t)(f - a) * w / len);
+    return rev ? box.x1 + box.x2 - x : x;
+}
 
-    lv_subject_deinit(&s_Color);
-    lv_subject_deinit(&s_ColorPressed);
-    lv_subject_deinit(&s_ColorPlaying);
-    lv_subject_deinit(&s_ChokeGroup);
-    lv_subject_deinit(&s_Pitch);
-    lv_subject_deinit(&s_Volume);
-    lv_subject_deinit(&s_Pan);
-
-    // Before deleting our groups, or the indev dereferences freed memory on
-    // its next read. Guarded, because this teardown is also reached from the
-    // app's own destruction, which deletes the sampler panel's group first:
-    // restoring it unguarded put a freed pointer on the encoder and the next
-    // read panicked in lv_group_get_focused().
-    lv_indev_restore_group(getEncoder(), s_priorEncoderGroup);
-    s_priorEncoderGroup = nullptr;
-
-    lv_group_remove_all_objs(pad_editor_group);
-    lv_group_delete(pad_editor_group);
-    pad_editor_group = nullptr;
-
-
-    s_padEditorCont = NULL;
-
-    g_duplicateMode = false;
-    g_duplicateSourcePadIdx = -1;
-    g_duplicateBtn = NULL;
-
-    waveformView = NULL;
-    stepMultiplierBtn = NULL;
-    stepMultiplierIndex = 3; // Reset to x1000
-    currentWaveformPath[0] = '\0';
-
-    waveformInfoValid = false;
-
-    lastPad = NULL;
-
-    // Undo the dim-others effect.
-    {
-        KitInfo * kit = getCurrentKit();
-        if (kit) {
-            auto & pm = crosspad::getPadManager();
-            for (int i = 0; i < 16; i++) {
-                pm.setPadColor((uint8_t)i, crosspad::HtmlColor(kit->pads[i].color));
-            }
-        }
+void wave_draw_cb(lv_event_t* e)
+{
+    lv_layer_t* layer = lv_event_get_layer(e);
+    lv_obj_t* obj = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    if (!layer || s_ov.lo.empty() || s_ov.end <= s_ov.start) return;
+    lv_area_t box;
+    lv_obj_get_content_coords(obj, &box);
+    const int32_t w = lv_area_get_width(&box);
+    const int32_t h = lv_area_get_height(&box);
+    const int32_t mid = box.y1 + h / 2;
+    const uint32_t a = s_ov.start, len = s_ov.end - s_ov.start;
+    const bool rev = reversed();
+    /* What the pad plays lit, the rest dimmed. */
+    const int32_t xs = frame_x(s_start, box, rev), xe = frame_x(s_end, box, rev);
+    if (xs != xe) fill(layer, std::min(xs, xe), box.y1, std::max(xs, xe), box.y2, kLoopBg);
+    const size_t cols = s_ov.lo.size();
+    for (size_t c = 0; c < cols; ++c) {
+        int32_t x = box.x1 + (int32_t)(c * w / cols);
+        if (rev) x = box.x1 + box.x2 - x;
+        const uint32_t f = a + (uint32_t)((uint64_t)c * len / cols);
+        const int32_t y1 = mid - (int32_t)s_ov.hi[c] * (h / 2) / 128;
+        const int32_t y2 = mid - (int32_t)s_ov.lo[c] * (h / 2) / 128;
+        fill(layer, x, std::min(y1, y2), x, std::max(y1, y2), f >= s_start && f < s_end ? kWave : kWaveOff);
     }
-
-    // Only for changes that need a sampler re-setup: volume, pan and colour
-    // are applied immediately.
-    auto & cbs = sampler_get_platform_callbacks();
-    if (cbs.audio.reloadPads) cbs.audio.reloadPads();
-
-    // The sampler is the only entry point, so its logic is what to restore.
-    crosspad::getPadManager().setActivePadLogic("Sampler");
-    auto * st = getStatus();
-    if (st) st->isSamplerPlaying = true; // re-enable sampler direct playback
-    LV_LOG_INFO("Pad editor destroyed");
+    /* START where the pad begins, END where it stops: reversed, those are the
+     * sample's end and start. */
+    const uint32_t begin = rev ? s_end : s_start, stop = rev ? s_start : s_end;
+    const int32_t xb = rev ? xe : xs, xt = rev ? xs : xe;
+    if (begin >= a && begin <= s_ov.end) fill(layer, xb, box.y1, xb + 1, box.y2, kStartC);
+    if (stop >= a && stop <= s_ov.end) fill(layer, xt - 1, box.y1, xt, box.y2, kRec);
+    if (s_headX >= 0) fill(layer, s_headX, box.y1, s_headX, box.y2, kHead);
 }
 
-lv_obj_t * lv_CreateSpinnboxParam(lv_obj_t * label, char * txt, int xOffset, lv_subject_t *subject, int min, int max) {
+/// The playhead's screen x, -1 when LOOP is not playing or it is off the
+/// picture. Only its old and new columns are redrawn while it moves.
+int32_t head_x()
+{
+    auto* st = tools();
+    if (!st || !s_wave || !(s_looping || s_playing) || !st->previewing() || s_ov.end <= s_ov.start) return -1;
+    const uint32_t p = st->previewFrame();
+    if (p < s_ov.start || p > s_ov.end) return -1;
+    lv_area_t box;
+    lv_obj_get_content_coords(s_wave, &box);
+    return frame_x(p, box, reversed());
+}
 
-    lv_label_set_text(label, txt);
-    lv_subject_init_int(subject, min);
+void move_head()
+{
+    const int32_t x = head_x();
+    if (x == s_headX || !s_wave) return;
+    lv_area_t box;
+    lv_obj_get_content_coords(s_wave, &box);
+    for (int32_t at : {s_headX, x}) {
+        if (at < 0) continue;
+        lv_area_t ar = {at - 1, box.y1, at + 1, box.y2};
+        lv_obj_invalidate_area(s_wave, &ar);
+    }
+    s_headX = x;
+}
 
-    auto value_change_cb = [](lv_event_t * e) {
-        lv_obj_t * spinbox = (lv_obj_t*)lv_event_get_target(e);
-        int32_t value = lv_spinbox_get_value(spinbox);
-        lv_subject_t * subject = (lv_subject_t*)lv_event_get_user_data(e);
-        lv_subject_set_int(subject, value);
-        LV_LOG_INFO("Spinbox value changed: %d", value);
+// ── what the screen says ───────────────────────────────────────────────────
+
+void show_info()
+{
+    if (!s_info) return;
+    char buf[112];
+    Pad* p = pad();
+    if (!p) {
+        std::snprintf(buf, sizeof(buf), "Hit a pad to edit it.");
+    } else if (s_copying) {
+        std::snprintf(buf, sizeof(buf), "COPY: hit the pad to copy PAD %d onto -- COPY again to stop.", s_copyFrom + 1);
+    } else if (s_renderWanted || s_renderPending || s_fxMoved) {
+        auto* st = tools();
+        std::snprintf(buf, sizeof(buf), "The pad's copy with its pitch, filters, reverse is being made ... %u%%",
+                      s_renderPending && st ? (unsigned)st->jobProgress() : 0u);
+    } else if (s_delArmed) {
+        std::snprintf(buf, sizeof(buf), "DEL again takes %s off PAD %d.", base_of(s_file).c_str(), s_pad + 1);
+    } else if (s_file.empty()) {
+        std::snprintf(buf, sizeof(buf), "PAD %d has no sample -- the file button picks one.", s_pad + 1);
+    } else if (!s_frames) {
+        std::snprintf(buf, sizeof(buf), "%s  reading ...", base_of(s_file).c_str());
+    } else {
+        std::snprintf(buf, sizeof(buf), "%s  %.2f s | plays %.3f %s %.3f s (%.3f s)", base_of(s_file).c_str(),
+                      (double)s_frames / s_rate, (double)(p->reverse ? s_end : s_start) / s_rate,
+                      p->reverse ? "back to" : "-", (double)(p->reverse ? s_start : s_end) / s_rate,
+                      (double)(s_end - s_start) / s_rate);
+    }
+    set_text(s_info, buf);
+}
+
+void show_marker_labels()
+{
+    auto label = [](lv_obj_t* b, const char* name, Edit e) {
+        if (!b) return;
+        char buf[16];
+        if (e == Edit::None) std::snprintf(buf, sizeof(buf), "%s", name);
+        else std::snprintf(buf, sizeof(buf), "%c %s", name[0], e == Edit::Coarse ? "<>" : "fine");
+        set_text(lv_obj_get_child(b, 0), buf);
     };
-
-    lv_obj_t * spinbox = lv_CreateStandardSpinbox(lv_obj_get_parent(label), min, max,
-                         lv_subject_get_int(subject), value_change_cb,
-                         pad_editor_group, subject, &lv_font_montserrat_14);
-
-    // Pan can be negative, so the field needs room for the sign.
-    if (min < 0) {
-        uint8_t digits = CalcDigits(LV_MAX(LV_ABS(min), LV_ABS(max)));
-        lv_obj_set_width(spinbox, 5 + (8 * digits) + 8); // +8 for minus sign
-    }
-
-    lv_obj_align_to(spinbox, label, LV_ALIGN_OUT_RIGHT_MID, xOffset, 0);
-    lv_group_add_obj(pad_editor_group, spinbox); // settings group
-
-    return spinbox;
+    label(s_startBtn, "START", s_editStart);
+    label(s_endBtn, "END", s_editEnd);
 }
 
-void ColorRollerCb(lv_event_t * e) {
-    ColorList colorList;
-    static char buf[16]; // option name from roller
-    lv_obj_t * roller = (lv_obj_t *)lv_event_get_target(e);
-    int selected = lv_roller_get_selected(roller); // idx
-    bool withTheSame = lv_roller_get_option_count(roller) != colorList.GetCount(); // with "The same" option available
-    LV_LOG_TRACE("withTheSame: %d, roller opt: %d, colorList: %d", withTheSame, lv_roller_get_option_count(roller), colorList.GetCount());
-    lv_roller_get_selected_str(roller, buf, sizeof(buf));
-    bool theSame = strcmp(buf, "The same") == 0; // if "The same" is selected
-    if (!theSame && withTheSame) selected--; // fix offset
-    lv_style_t * style = (lv_style_t *)lv_event_get_user_data(e);
-    auto color = lv_color_hex(colorList.Get(selected));
-    if (lv_color_eq(color, lv_color_black())) color = lv_color_hex(0x202020); // avoid pure black
-    lv_style_set_text_color(style, color);
-    lv_obj_report_style_change(style);
-    lv_obj_invalidate(roller);
-    LV_LOG_USER("Selected color: %s id: %d", buf, selected);
-    crosspad::getPadManager().setPadColor(lv_subject_get_int(&s_pad_sampler) - 1, crosspad::HtmlColor(colorList.Get(selected)));
-
-    // The colour applies instantly, but still has to be saved.
-    if (!dontUpdateSettings) {
-        KitInfo * kit = getCurrentKit();
-        if (kit != NULL) {
-            int padId = lv_subject_get_int(&s_pad_sampler) - 1;
-            if (padId >= 0 && padId < 16) {
-                kit->pads[padId].dirtyModified = true;
-            }
-        }
-    }
-}
-
-lv_obj_t * lv_CreateColorRoler(lv_obj_t *parent, lv_style_t * styleSelectedColor, bool withTheSame) {
-    lv_obj_t * collorRoller = lv_roller_create(parent);
-    lv_obj_set_style_text_line_space(collorRoller, 4, 0); // between entries
-    lv_obj_add_style(collorRoller, &styleAppContainer, 0);
-    lv_obj_add_style(collorRoller, &styleAppContainer, LV_PART_SELECTED);
-    lv_obj_add_style(collorRoller, styleSelectedColor, LV_PART_SELECTED);
-    lv_obj_set_style_bg_opa(collorRoller, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_bg_opa(collorRoller, LV_OPA_TRANSP, LV_PART_SELECTED);
-    ColorList colorList; // list of colors from kit library
-    if (withTheSame) lv_roller_set_options(collorRoller, colorList.GetPressed(), LV_ROLLER_MODE_NORMAL);
-    else lv_roller_set_options(collorRoller, colorList.Get(), LV_ROLLER_MODE_NORMAL);
-    lv_roller_set_visible_row_count(collorRoller, 1);
-    lv_obj_add_event_cb(collorRoller, ColorRollerCb, LV_EVENT_VALUE_CHANGED, styleSelectedColor);
-    lv_obj_add_event_cb(collorRoller, ColorRollerCb, LV_EVENT_KEY, styleSelectedColor);
-    return collorRoller;
-}
-
-static lv_obj_t * lv_CreatePadEditorContext(lv_obj_t *parent)
+/// Every button that shows a value of the pad.
+void show_pad()
 {
-    dontUpdateSettings = true; // prevent updating settings while creating the context
-    lv_obj_t * cont = lv_obj_create(parent);
-    lv_obj_add_style(cont, &styleAppContainer, 0);
-    lv_obj_set_style_bg_opa(cont, LV_OPA_TRANSP, 0);
-    lv_obj_set_scroll_dir(cont, LV_DIR_VER);
-
-    crosspad::getPadManager().setActivePadLogic("Pad editor");
-    auto * st = getStatus();
-    if (st) st->isSamplerPlaying = false; // ensure that sampler is inactive for preview mode
-    const int entryYoffset = 4; // offset between entries
-    const int entryXoffset = 5; // offset from the wall
-    static lv_style_t styleSelectedColor;
-    static lv_style_t styleSelectedColorPressed;
-    static bool s_selectedStylesReady = false;
-    if (!s_selectedStylesReady) {
-        lv_style_init(&styleSelectedColor);
-        lv_style_init(&styleSelectedColorPressed);
-        lv_style_set_text_color(&styleSelectedColor, lv_color_white());
-        lv_style_set_text_color(&styleSelectedColorPressed, lv_color_white());
-        s_selectedStylesReady = true;
+    Pad* p = pad();
+    char buf[32];
+    if (s_padBtn) {
+        /* Turned, it says which colour; otherwise which pad, in that colour. */
+        if (lv_obj_has_state(s_padBtn, LV_STATE_EDITED)) std::snprintf(buf, sizeof(buf), "%s", color_name(s_color).c_str());
+        else if (p) std::snprintf(buf, sizeof(buf), "PAD %d", s_pad + 1);
+        else        std::snprintf(buf, sizeof(buf), "PAD -");
+        set_text(lv_obj_get_child(s_padBtn, 0), buf);
+        const uint32_t c = p ? p->color : 0;
+        const lv_color_t bg = c ? lv_color_hex(c) : kPanel;
+        set_bg(s_padBtn, bg);
+        lv_obj_set_style_bg_color(s_padBtn, bg, LV_STATE_EDITED);
+        const uint32_t luma = ((c >> 16) & 0xFF) * 299 + ((c >> 8) & 0xFF) * 587 + (c & 0xFF) * 114;
+        const lv_color_t ink = c && luma > 128000 ? kInk : kText;
+        /* On the label: the pad's colour is the background in both states. */
+        set_ink(lv_obj_get_child(s_padBtn, 0), ink);
     }
-
-    lv_obj_t * color = lv_label_create(cont);
-    lv_obj_align(color, LV_ALIGN_TOP_LEFT, entryXoffset, entryYoffset/2);
-    lv_label_set_text(color, "Color: ");
-    lv_obj_t * colorRoller = lv_CreateColorRoler(cont, &styleSelectedColor, false);
-    lv_group_add_obj(pad_editor_group, colorRoller); // settings group
-    lv_obj_align_to(colorRoller, color, LV_ALIGN_OUT_RIGHT_MID, 2, 0);
-
-    // Scroll to top on focus, for wrap-around navigation.
-    lv_obj_add_event_cb(colorRoller, [](lv_event_t * e) {
-        if (lv_event_get_code(e) == LV_EVENT_FOCUSED) {
-            lv_obj_t * roller = (lv_obj_t*)lv_event_get_target(e);
-            lv_obj_t * cont = lv_obj_get_parent(roller);
-            lv_obj_scroll_to_y(cont, 0, LV_ANIM_ON);
-            LV_LOG_INFO("Color roller focused - scrolling to top");
-        }
-    }, LV_EVENT_FOCUSED, NULL);
-
-    lv_obj_t * labelChoke = lv_label_create(cont);
-    lv_obj_align_to(labelChoke, color, LV_ALIGN_OUT_BOTTOM_LEFT, 0, entryYoffset);
-    chokeSpinbox = lv_CreateSpinnboxParam(labelChoke, (char *)"Choke: ", 2, &s_ChokeGroup, 0, 7);
-    lv_obj_add_event_cb(chokeSpinbox, [](lv_event_t * e) {
-        int value = lv_spinbox_get_value((lv_obj_t*)lv_event_get_target(e));
-        LV_LOG_INFO("Choke group changed to: %d", value);
-        if (dontUpdateSettings) return;
-        KitInfo * kit = getCurrentKit();
-        if (kit == NULL) return;
-        Pad * pad = &kit->pads[lv_subject_get_int(&s_pad_sampler) - 1];
-        pad->choke_group = value;
-        pad->dirty = true; // needs reload
-        pad->dirtyModified = true; // modified
-        auto & cbs = sampler_get_platform_callbacks();
-        if (cbs.audio.reloadPad) cbs.audio.reloadPad(lv_subject_get_int(&s_pad_sampler) - 1);
-    }, LV_EVENT_VALUE_CHANGED, NULL);
-
-    lv_obj_t * labelVolume = lv_label_create(cont);
-    lv_obj_align_to(labelVolume, labelChoke, LV_ALIGN_OUT_BOTTOM_LEFT, 0, entryYoffset);
-    volumeSpinbox = lv_CreateSpinnboxParam(labelVolume, (char *)"Volume: ", 2, &s_Volume, 0, 127);
-    lv_obj_add_event_cb(volumeSpinbox, [](lv_event_t * e) {
-        int value = lv_spinbox_get_value((lv_obj_t*)lv_event_get_target(e));
-        LV_LOG_INFO("Volume changed to: %d", value);
-        if (dontUpdateSettings) return;
-        KitInfo * kit = getCurrentKit();
-        if (kit == NULL) return;
-        int padId = lv_subject_get_int(&s_pad_sampler) - 1;
-        Pad * pad = &kit->pads[padId];
-        pad->volume = value;
-        pad->dirtyModified = true; // modified (instant-apply, no reload needed)
-        auto & cbs = sampler_get_platform_callbacks();
-        if (cbs.player.setVolume) cbs.player.setVolume(padId, value);
-    }, LV_EVENT_VALUE_CHANGED, NULL);
-
-    // The kit file stores pan signed with 0 = centre, which the spinbox shows
-    // directly; toPlayerPan() makes the player's 0..127 at the boundary.
-    lv_obj_t * labelPan = lv_label_create(cont);
-    lv_obj_align_to(labelPan, labelVolume, LV_ALIGN_OUT_BOTTOM_LEFT, 0, entryYoffset);
-    panSpinbox = lv_CreateSpinnboxParam(labelPan, (char *)"Pan: ", 2, &s_Pan, -64, 63);
-    lv_obj_add_event_cb(panSpinbox, [](lv_event_t * e) {
-        int value = lv_spinbox_get_value((lv_obj_t*)lv_event_get_target(e));
-        LV_LOG_INFO("Pan changed to: %d", value);
-        if (dontUpdateSettings) return;
-        KitInfo * kit = getCurrentKit();
-        if (kit == NULL) return;
-        int padId = lv_subject_get_int(&s_pad_sampler) - 1;
-        Pad * pad = &kit->pads[padId];
-        pad->pan = value;
-        pad->dirtyModified = true; // modified (instant-apply, no reload needed)
-        auto & cbs = sampler_get_platform_callbacks();
-        if (cbs.player.setPan) cbs.player.setPan(padId, pad->pan);
-    }, LV_EVENT_VALUE_CHANGED, NULL);
-
-    lv_obj_t * modeLabel = lv_label_create(cont);
-    lv_obj_align_to(modeLabel, labelPan, LV_ALIGN_OUT_BOTTOM_LEFT, 0, entryYoffset);
-    lv_label_set_text(modeLabel, "Mode: ");
-    lv_obj_t * modeDropdown = lv_dropdown_create(cont);
-    lv_dropdown_set_options(modeDropdown, "One Shot\nHold\nLoop");
-    lv_obj_set_width(modeDropdown, 85);
-    lv_obj_add_style(modeDropdown, &styleAppContainer, 0);
-    lv_obj_align_to(modeDropdown, modeLabel, LV_ALIGN_OUT_RIGHT_MID, 0, 0);
-    lv_group_add_obj(pad_editor_group, modeDropdown);
-    lv_obj_add_event_cb(modeDropdown, [](lv_event_t * e){
-        if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
-        if (dontUpdateSettings) return;
-        KitInfo * kit = getCurrentKit();
-        if (!kit) return;
-        int padId = lv_subject_get_int(&s_pad_sampler) - 1;
-        if (padId < 0 || padId >= 16) return;
-        uint16_t sel = lv_dropdown_get_selected((lv_obj_t*)lv_event_get_target(e));
-        kit->pads[padId].playbackMode = sel; // 0=one shot,1=hold,2=loop
-        kit->pads[padId].dirty = true; // needs reload
-        kit->pads[padId].dirtyModified = true; // modified
-        auto & cbs = sampler_get_platform_callbacks();
-        if (sel == 2) { // Loop mode
-            if (cbs.player.setLoopEnd) cbs.player.setLoopEnd(padId, SAMPLE_END_MAX);
-        } else {
-            if (cbs.player.clearLoop) cbs.player.clearLoop(padId);
-        }
-        LV_LOG_INFO("Pad %d playbackMode set to %u", padId, sel);
-    }, LV_EVENT_VALUE_CHANGED, NULL);
-
-    // Start offset; the values are filled in when a pad is selected.
-    lv_obj_t * startLabel = lv_label_create(cont);
-    lv_obj_align_to(startLabel, modeLabel, LV_ALIGN_OUT_BOTTOM_LEFT, 0, entryYoffset);
-    lv_label_set_text(startLabel, "Start: ");
-    startSpinbox = lv_CreateStandardSpinbox(lv_obj_get_parent(startLabel), 0, INT32_MAX/16,
-                                 0, NULL, pad_editor_group, NULL, &lv_font_montserrat_14);
-    lv_obj_align_to(startSpinbox, startLabel, LV_ALIGN_OUT_RIGHT_MID, 2, 0);
-    lv_obj_add_event_cb(startSpinbox, [](lv_event_t * e) {
-        int value = lv_spinbox_get_value((lv_obj_t*)lv_event_get_target(e));
-        LV_LOG_INFO("Start offset changed to: %d", value);
-        if (dontUpdateSettings) return;
-        KitInfo * kit = getCurrentKit();
-        if (kit == NULL) return;
-        int padId = lv_subject_get_int(&s_pad_sampler) - 1;
-        Pad * pad = &kit->pads[padId];
-        if (!pad->GetSampleCount()) return;
-        SampleSlot * sample = &pad->samples[0]; // only one sample supported
-        sample->start = value;
-        pad->dirty = true; // needs reload
-        pad->dirtyModified = true; // modified
-        // Reload now, so a pad press reflects the trim before the next save.
-        auto & cbs = sampler_get_platform_callbacks();
-        if (cbs.audio.reloadPad) cbs.audio.reloadPad(padId);
-        UpdateWaveformMarkers();
-    }, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_spinbox_set_step(startSpinbox, stepMultipliers[stepMultiplierIndex]); // Initial step
-
-    lv_obj_t * endLabel = lv_label_create(cont);
-    lv_obj_align_to(endLabel, startLabel, LV_ALIGN_OUT_BOTTOM_LEFT, 0, entryYoffset);
-    lv_label_set_text(endLabel, "End: ");
-    endSpinbox = lv_CreateStandardSpinbox(lv_obj_get_parent(endLabel), 0, INT32_MAX/16,
-                                 0, NULL, pad_editor_group, NULL, &lv_font_montserrat_14);
-    lv_obj_align_to(endSpinbox, endLabel, LV_ALIGN_OUT_RIGHT_MID, 2, 0);
-    lv_obj_add_event_cb(endSpinbox, [](lv_event_t * e) {
-        int value = lv_spinbox_get_value((lv_obj_t*)lv_event_get_target(e));
-        LV_LOG_USER("End offset changed to: %d", value);
-        if (dontUpdateSettings) return;
-        KitInfo * kit = getCurrentKit();
-        if (kit == NULL) return;
-        int padId = lv_subject_get_int(&s_pad_sampler) - 1;
-        Pad * pad = &kit->pads[padId];
-        if (!pad->GetSampleCount()) return;
-        SampleSlot * sample = &pad->samples[0]; // only one sample supported
-        if (value <= (int)sample->start) return; // ensure end > start
-        sample->end = value;
-        pad->dirty = true; // needs reload
-        pad->dirtyModified = true; // modified
-        // Reload now, so a pad press reflects the trim before the next save.
-        auto & cbs = sampler_get_platform_callbacks();
-        if (cbs.audio.reloadPad) cbs.audio.reloadPad(padId);
-        UpdateWaveformMarkers();
-    }, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_spinbox_set_step(endSpinbox, stepMultipliers[stepMultiplierIndex]); // Initial step
-
-    lv_obj_t * stepLabel = lv_label_create(cont);
-    lv_obj_align_to(stepLabel, endLabel, LV_ALIGN_OUT_BOTTOM_LEFT, 0, entryYoffset);
-    lv_label_set_text(stepLabel, "Step:");
-
-    stepMultiplierBtn = lv_button_create(cont);
-    lv_obj_align_to(stepMultiplierBtn, stepLabel, LV_ALIGN_OUT_RIGHT_MID, 2, 0);
-    lv_obj_add_style(stepMultiplierBtn, &styleSpinbox, 0);
-    lv_obj_add_style(stepMultiplierBtn, &styleButtonPressed, LV_STATE_PRESSED);
-    lv_group_add_obj(pad_editor_group, stepMultiplierBtn);
-
-    lv_obj_t * stepValueLabel = lv_label_create(stepMultiplierBtn);
-    lv_label_set_text_fmt(stepValueLabel, "x%d", stepMultipliers[stepMultiplierIndex]);
-    lv_obj_center(stepValueLabel);
-    lv_obj_set_style_text_font(stepValueLabel, &lv_font_montserrat_14, 0);
-
-    uint8_t digits = 4; // "x1000" = 5 chars but we use 4 for padding
-    lv_obj_set_width(stepMultiplierBtn, 5 + (8 * digits));
-
-    lv_obj_add_event_cb(stepMultiplierBtn, [](lv_event_t * e) {
-        stepMultiplierIndex = (stepMultiplierIndex + 1) % stepMultipliersCount;
-        int newStep = stepMultipliers[stepMultiplierIndex];
-
-        lv_obj_t * btn = (lv_obj_t*)lv_event_get_target(e);
-        lv_obj_t * label = lv_obj_get_child(btn, 0);
-        if (label) {
-            lv_label_set_text_fmt(label, "x%d", newStep);
-        }
-
-        if (startSpinbox) lv_spinbox_set_step(startSpinbox, newStep);
-        if (endSpinbox) lv_spinbox_set_step(endSpinbox, newStep);
-
-        LV_LOG_INFO("Step multiplier changed to x%d", newStep);
-    }, LV_EVENT_CLICKED, NULL);
-
-    return cont;
+    if (s_fileBtn) {
+        const std::string name = s_file.empty() ? std::string(LV_SYMBOL_DIRECTORY " pick a sample")
+                                                : std::string(LV_SYMBOL_AUDIO " ") + base_of(s_file);
+        set_text(lv_obj_get_child(s_fileBtn, 0), name.c_str());
+    }
+    if (s_volBtn) {
+        std::snprintf(buf, sizeof(buf), "VOL %d", p ? p->volume : 0);
+        set_text(lv_obj_get_child(s_volBtn, 0), buf);
+    }
+    if (s_panBtn) {
+        const int pan = p ? p->pan : 0;
+        if (!pan)         std::snprintf(buf, sizeof(buf), "PAN C");
+        else              std::snprintf(buf, sizeof(buf), "PAN %c%d", pan < 0 ? 'L' : 'R', pan < 0 ? -pan : pan);
+        set_text(lv_obj_get_child(s_panBtn, 0), buf);
+    }
+    if (s_pitchBtn) {
+        if (p && p->pitch) std::snprintf(buf, sizeof(buf), "PITCH %+d", p->pitch);
+        else               std::snprintf(buf, sizeof(buf), "PITCH 0");
+        set_text(lv_obj_get_child(s_pitchBtn, 0), buf);
+    }
+    if (s_hpBtn) {
+        const std::string v = p && p->hp ? fmt_hz(p->hp) : std::string("OFF");
+        std::snprintf(buf, sizeof(buf), "HP %s", v.c_str());
+        set_text(lv_obj_get_child(s_hpBtn, 0), buf);
+    }
+    if (s_lpBtn) {
+        const std::string v = p && p->lp ? fmt_hz(p->lp) : std::string("OFF");
+        std::snprintf(buf, sizeof(buf), "LP %s", v.c_str());
+        set_text(lv_obj_get_child(s_lpBtn, 0), buf);
+    }
+    if (s_chokeBtn) {
+        if (p && p->choke_group) std::snprintf(buf, sizeof(buf), "CHOKE %d", p->choke_group);
+        else                     std::snprintf(buf, sizeof(buf), "CHOKE -");
+        set_text(lv_obj_get_child(s_chokeBtn, 0), buf);
+    }
+    if (s_modeBtn) set_text(lv_obj_get_child(s_modeBtn, 0), kModes[p && p->playbackMode < 3 ? p->playbackMode : 0]);
+    if (s_revBtn) {
+        const bool rev = p && p->reverse;
+        set_bg(s_revBtn, rev ? kAccent : kPanel);
+        set_ink(lv_obj_get_child(s_revBtn, 0), rev ? kInk : kText);
+    }
+    if (s_copyBtn) {
+        set_bg(s_copyBtn, s_copying ? kAccent : kPanel);
+        set_ink(lv_obj_get_child(s_copyBtn, 0), s_copying ? kInk : kText);
+    }
+    if (s_loopBtn) {
+        set_bg(s_loopBtn, s_looping ? kAccent : kPanel);
+        set_ink(lv_obj_get_child(s_loopBtn, 0), s_looping ? kInk : kText);
+    }
+    if (s_delBtn) {
+        set_bg(s_delBtn, s_delArmed ? kRec : kPanel);
+        set_ink(lv_obj_get_child(s_delBtn, 0), s_delArmed ? kInk : kText);
+    }
 }
 
+/// The selected pad at full colour on the LEDs, the rest dimmed.
+void light_pads()
+{
+    KitInfo* k = kit();
+    if (!k) return;
+    auto& pm = crosspad::getPadManager();
+    for (int i = 0; i < KIT_PADS; i++) {
+        const uint32_t c = k->pads[i].color;
+        if (i == s_pad) pm.setPadColor((uint8_t)i, crosspad::HtmlColor(c));
+        else pm.setPadColor((uint8_t)i, ((c >> 16) & 0xFF) / 16, ((c >> 8) & 0xFF) / 16, (c & 0xFF) / 16);
+    }
+}
 
-// Browser Load: close it and put the sample on the selected pad.
-void Load_button_cb(lv_event_t * e) {
+void stop_loop()
+{
+    if (s_looping || s_playing) {
+        if (auto* st = tools()) st->stopPreview();
+        s_looping = s_playing = false;
+    }
+}
 
-    LV_LOG_WARN("Load button pressed, closing file browser");
-    lv_obj_t * obj = (lv_obj_t *)lv_event_get_target(e);
-    lv_obj_delete_async(lv_obj_get_parent(obj));
-    lv_indev_set_group(getEncoder(), pad_editor_group); // switch encoder nav back
+/// What PLAY and LOOP play: the trim, transposed and filtered as the pad is.
+crosspad::PreviewSound pad_sound()
+{
+    crosspad::PreviewSound s;
+    if (Pad* p = pad()) {
+        s.semitones = (int8_t)p->pitch;
+        s.hpHz = p->hp;
+        s.lpHz = p->lp;
+        s.reverse = p->reverse;
+    }
+    return s;
+}
 
-    crosspad_gui::FileItem currentFile = GetCurrentFile();
-    if (currentFile.path.empty() || currentFile.name.empty() || currentFile.isFolder) {
-        LV_LOG_ERROR("No file selected, closing file browser!");
-        lv_timer_resume(t_padUpdate);
+/// Pad @p idx on screen: its settings, its sample, its trim.
+void open_pad(int idx)
+{
+    stop_loop();
+    s_pad = idx;
+    s_editStart = s_editEnd = Edit::None;
+    s_delArmed = false;
+    s_moved = false;
+    s_sample.clear();
+    s_file.clear();
+    s_frames = 0;
+    s_ov = crosspad::WaveOverview{};
+    s_ovPending = s_viewWanted = false;
+    s_loading = false;
+    Pad* p = pad();
+    KitInfo* k = kit();
+    if (p && k && p->GetSampleCount()) {
+        s_sample = crosspad::resolveKitSamplePath(k->path, p->samples[0].sample);
+        s_file = crosspad::kitFsPath(s_sample);
+        s_start = p->samples[0].start;
+        s_end = p->samples[0].end;
+        s_loading = true;
+        request_view(0, 0);
+    }
+    s_color = p ? color_index(p->color) : 0;
+    if (s_group) lv_group_set_editing(s_group, false);
+    light_pads();
+    show_pad();
+    show_marker_labels();
+    show_info();
+    if (s_wave) lv_obj_invalidate(s_wave);
+}
+
+// ── editing ────────────────────────────────────────────────────────────────
+
+/// The encoder's detent on a turned button, 0 for anything else; a click
+/// starts or ends turning it.
+int number_step(lv_event_t* e)
+{
+    lv_obj_t* b = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+    lv_group_t* g = b ? lv_obj_get_group(b) : nullptr;
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        if (g) {
+            const bool editing = lv_group_get_editing(g) && lv_group_get_focused(g) == b;
+            lv_group_focus_obj(b);
+            lv_group_set_editing(g, !editing);
+        }
+        return 0;
+    }
+    const uint32_t key = lv_event_get_key(e);
+    return key == LV_KEY_RIGHT || key == LV_KEY_UP ? 1 : (key == LV_KEY_LEFT || key == LV_KEY_DOWN ? -1 : 0);
+}
+
+void vol_cb(lv_event_t* e)
+{
+    const int d = number_step(e);
+    Pad* p = pad();
+    if (!d || !p) return;
+    p->volume = std::max(0, std::min(127, p->volume + d));
+    p->dirtyModified = true;               // applied at once, no reload
+    auto& cbs = sampler_get_platform_callbacks();
+    if (cbs.player.setVolume) cbs.player.setVolume((uint8_t)s_pad, p->volume);
+    show_pad();
+}
+
+/// Kept signed with 0 the centre, as the kit file has it; the player gets its
+/// own 0..127 at its boundary.
+void pan_cb(lv_event_t* e)
+{
+    const int d = number_step(e);
+    Pad* p = pad();
+    if (!d || !p) return;
+    p->pan = std::max(-64, std::min(63, p->pan + d));
+    p->dirtyModified = true;
+    auto& cbs = sampler_get_platform_callbacks();
+    if (cbs.player.setPan) cbs.player.setPan((uint8_t)s_pad, p->pan);
+    show_pad();
+}
+
+void choke_cb(lv_event_t* e)
+{
+    const int d = number_step(e);
+    Pad* p = pad();
+    if (!d || !p) return;
+    p->choke_group = std::max(0, std::min(7, p->choke_group + d));
+    p->dirty = true;                       // the engine takes it on a reload
+    p->dirtyModified = true;
+    auto& cbs = sampler_get_platform_callbacks();
+    if (cbs.audio.reloadPad) cbs.audio.reloadPad((uint8_t)s_pad);
+    show_pad();
+}
+
+void mode_cb(lv_event_t*)
+{
+    Pad* p = pad();
+    if (!p) return;
+    p->playbackMode = (uint8_t)((p->playbackMode + 1) % 3);
+    p->dirty = true;
+    p->dirtyModified = true;
+    auto& cbs = sampler_get_platform_callbacks();
+    if (p->playbackMode == 2) { if (cbs.player.setLoopEnd) cbs.player.setLoopEnd((uint8_t)s_pad, SAMPLE_END_MAX); }
+    else if (cbs.player.clearLoop) cbs.player.clearLoop((uint8_t)s_pad);
+    show_pad();
+}
+
+/// The pad button, turned: its colour. The click that starts or ends turning
+/// it switches what it says (the colour's name, the pad), so it is shown
+/// either way.
+void color_cb(lv_event_t* e)
+{
+    const int d = number_step(e);
+    Pad* p = pad();
+    if (!p) return;
+    if (d) {
+        ColorList cl;
+        s_color = std::max(0, std::min((int)cl.GetCount() - 1, s_color + d));
+        p->color = (uint32_t)cl.Get(s_color);
+        p->dirtyModified = true;
+        light_pads();
+    }
+    show_pad();
+}
+
+/// The markers onto the pad: END at the file's end is "to the end", as a kit
+/// says it. The engine is reloaded once they stop moving.
+void write_trim()
+{
+    Pad* p = pad();
+    if (!p || !p->GetSampleCount()) return;
+    p->samples[0].start = s_start;
+    p->samples[0].end = s_end >= s_frames ? 0 : s_end;
+    p->dirty = true;
+    p->dirtyModified = true;
+    s_moved = true;
+    s_movedAt = lv_tick_get();
+}
+
+void marker_moved(uint32_t at, Edit e)
+{
+    if (e == Edit::Fine && (at < s_ov.start + kZoomFrames / 4 || at > s_ov.end - kZoomFrames / 4)) {
+        request_view(at > kZoomFrames ? at - kZoomFrames : 0, std::min(s_frames, at + kZoomFrames));
+    }
+    write_trim();
+    show_info();
+    if (s_wave) lv_obj_invalidate(s_wave);
+}
+
+/// START and END are where the pad begins and stops. Reversed, those are the
+/// sample's end and start, and turning right moves them the way it is heard --
+/// back through the sample.
+void marker_cb(lv_event_t* e)
+{
+    const bool isStart = lv_event_get_user_data(e) != nullptr;
+    const bool rev = reversed();
+    const bool movesStart = isStart != rev;          // which of the sample's own markers
+    Edit& edit = isStart ? s_editStart : s_editEnd;
+    uint32_t& m = movesStart ? s_start : s_end;
+    lv_obj_t* b = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+    lv_group_t* g = lv_obj_get_group(b);
+    const lv_event_code_t code = lv_event_get_code(e);
+    if (!s_frames) return;
+    if (code == LV_EVENT_FOCUSED) {
+        /* The encoder's first click puts the button in edit mode; LVGL says
+         * so with FOCUSED, not CLICKED. */
+        const bool editing = g && lv_group_get_editing(g);
+        if (editing && edit == Edit::None) edit = Edit::Coarse;
+        else if (!editing && edit != Edit::None) {
+            if (edit == Edit::Fine) request_view(0, 0);
+            edit = Edit::None;
+        }
+        show_marker_labels();
         return;
     }
+    if (code == LV_EVENT_CLICKED) {
+        if (edit == Edit::Coarse) {
+            edit = Edit::Fine;
+            request_view(m > kZoomFrames ? m - kZoomFrames : 0, std::min(s_frames, m + kZoomFrames));
+            if (g) lv_group_set_editing(g, true);
+        } else if (edit == Edit::Fine) {
+            edit = Edit::None;
+            request_view(0, 0);
+            if (g) lv_group_set_editing(g, false);
+        } else {
+            edit = Edit::Coarse;       // a tap: turn it with the encoder now
+            if (g) { lv_group_focus_obj(b); lv_group_set_editing(g, true); }
+        }
+        show_marker_labels();
+        return;
+    }
+    const uint32_t key = lv_event_get_key(e);
+    int dir = key == LV_KEY_RIGHT || key == LV_KEY_UP ? 1 : (key == LV_KEY_LEFT || key == LV_KEY_DOWN ? -1 : 0);
+    if (!dir || edit == Edit::None) return;
+    if (rev) dir = -dir;
+    const uint32_t viewLen = s_ov.end > s_ov.start ? s_ov.end - s_ov.start : s_frames;
+    const uint32_t step = edit == Edit::Coarse ? std::max<uint32_t>(1, viewLen / kCols)
+                                               : std::max<uint32_t>(1, s_rate / 1000);
+    int64_t v = (int64_t)m + (int64_t)dir * step;
+    const int64_t lo = movesStart ? 0 : (int64_t)s_start + 1;
+    const int64_t hi = movesStart ? (int64_t)s_end - 1 : (int64_t)s_frames;
+    v = std::max(lo, std::min(hi, v));
+    m = (uint32_t)v;
+    marker_moved(m, edit);
+}
 
-    LV_LOG_USER("Loading sample...");
-    KitInfo * kit = getCurrentKit();
-    if (kit == NULL) return;
-    uint8_t padId = s_pad_sampler.value.num;
-    if (0 == padId) return; // no pad selected, leave default settings
-    Pad * pad = &kit->pads[padId - 1];
+// ── actions ────────────────────────────────────────────────────────────────
 
-    pad->RemoveAllSamples(); // remove all samples
-    auto & cbs = sampler_get_platform_callbacks();
-    if (cbs.player.wipeOut) cbs.player.wipeOut(pad->number);
-    if (pad->GetSampleCount() >= maxSamples) return; // max samples reached
+void close_cb(lv_event_t*)
+{
+    if (s_cont) lv_obj_delete_async(s_cont);   // everything else goes from its DELETE
+}
+
+/// PLAY: the trim once, through the sampler, at the pad's volume and pan.
+/// PLAY: the trim once, transposed as the pad is -- at once, before the
+/// pad's own copy is rendered.
+void play_cb(lv_event_t*)
+{
+    auto* st = tools();
+    if (!st || !s_frames) return;
+    stop_loop();
+    s_playing = st->previewAs(s_file, s_start, s_end, false, pad_sound());
+    show_pad();
+}
+
+void loop_cb(lv_event_t*)
+{
+    auto* st = tools();
+    if (!st || !s_frames) return;
+    if (s_looping) { st->stopPreview(); s_looping = false; }
+    else { s_playing = false; s_looping = st->previewAs(s_file, s_start, s_end, true, pad_sound()); }
+    show_pad();
+}
+
+/// PITCH, HP or LP moved on @p p: a loop plays it at once, the pad's own copy
+/// is rendered once nothing has moved for kFxSettleMs.
+void fx_moved(Pad* p)
+{
+    p->dirty = true;
+    p->dirtyModified = true;
+    s_fxMoved = true;
+    s_fxAt = lv_tick_get();
+    s_renderPad = s_pad;
+    auto* st = tools();
+    if (st && s_looping) st->previewAs(s_file, s_start, s_end, true, pad_sound());
+    show_pad();
+    show_info();
+}
+
+/// PITCH: turned, in semitones.
+void pitch_cb(lv_event_t* e)
+{
+    const int d = number_step(e);
+    Pad* p = pad();
+    if (!d || !p) return;
+    p->pitch = std::max(-crosspad::SliceMath::kMaxSemitones,
+                        std::min(crosspad::SliceMath::kMaxSemitones, p->pitch + d));
+    fx_moved(p);
+}
+
+/// REV: the sample backwards, on or off.
+void rev_cb(lv_event_t*)
+{
+    Pad* p = pad();
+    if (!p || !p->GetSampleCount()) return;
+    p->reverse = !p->reverse;
+    fx_moved(p);
+    if (s_wave) lv_obj_invalidate(s_wave);          // drawn the other way round now
+}
+
+/// HP: turned up from OFF through the cutoffs.
+void hp_cb(lv_event_t* e)
+{
+    const int d = number_step(e);
+    Pad* p = pad();
+    if (!d || !p) return;
+    const int i = std::max(-1, std::min(crosspad::kFxCutoffCount - 1, (p->hp ? cutoff_index(p->hp) : -1) + d));
+    p->hp = i < 0 ? 0 : crosspad::kFxCutoffs[i];
+    fx_moved(p);
+}
+
+/// LP: turned down from OFF through the cutoffs.
+void lp_cb(lv_event_t* e)
+{
+    const int d = number_step(e);
+    Pad* p = pad();
+    if (!d || !p) return;
+    const int n = crosspad::kFxCutoffCount;
+    const int i = std::max(0, std::min(n, (p->lp ? cutoff_index(p->lp) : n) + d));
+    p->lp = i >= n ? 0 : crosspad::kFxCutoffs[i];
+    fx_moved(p);
+}
+
+void full_cb(lv_event_t*)
+{
+    if (!s_frames) return;
+    s_start = 0;
+    s_end = s_frames;
+    s_editStart = s_editEnd = Edit::None;
+    if (s_ov.start != 0 || s_ov.end != s_frames) request_view(0, 0);
+    write_trim();
+    show_marker_labels();
+    show_info();
+    if (s_wave) lv_obj_invalidate(s_wave);
+}
+
+void del_cb(lv_event_t*)
+{
+    Pad* p = pad();
+    if (!p || !p->GetSampleCount()) return;
+    if (!s_delArmed) {
+        s_delArmed = true;
+        show_pad();
+        show_info();
+        return;
+    }
+    stop_loop();
+    auto& cbs = sampler_get_platform_callbacks();
+    if (cbs.player.wipeOut) cbs.player.wipeOut((uint8_t)s_pad);
+    p->RemoveAllSamples();
+    p->dirtyModified = true;
+    if (cbs.audio.reloadPad) cbs.audio.reloadPad((uint8_t)s_pad);
+    open_pad(s_pad);
+}
+
+void copy_cb(lv_event_t*)
+{
+    Pad* p = pad();
+    if (s_copying) {
+        s_copying = false;
+    } else if (p && p->GetSampleCount()) {
+        s_copying = true;
+        s_copyFrom = s_pad;
+    }
+    show_pad();
+    show_info();
+}
+
+// ── windows over the editor ────────────────────────────────────────────────
+
+void close_overlay()
+{
+    if (!s_overlay) return;
+    lv_indev_set_group(encoder(), s_group);
+    lv_group_delete_deferred(s_overlayGroup);     // the click that closed it is still being read
+    s_overlayGroup = nullptr;
+    lv_obj_delete_async(s_overlay);
+    s_overlay = nullptr;
+}
+
+void open_overlay(const char* title)
+{
+    s_overlay = lv_obj_create(s_cont);
+    lv_obj_remove_style_all(s_overlay);
+    lv_obj_set_size(s_overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_add_flag(s_overlay, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_style_bg_color(s_overlay, kBg, 0);
+    lv_obj_set_style_bg_opa(s_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(s_overlay, 6, 0);
+    lv_obj_set_style_pad_row(s_overlay, 3, 0);
+    lv_obj_set_flex_flow(s_overlay, LV_FLEX_FLOW_COLUMN);
+    s_overlayGroup = lv_group_create();
+    lv_indev_set_group(encoder(), s_overlayGroup);
+    lv_obj_t* t = lv_label_create(s_overlay);
+    lv_obj_set_style_text_color(t, kText, 0);
+    lv_label_set_text(t, title);
+}
+
+lv_obj_t* overlay_item(const char* text, lv_event_cb_t cb, bool accent = false)
+{
+    lv_obj_t* b = lv_button_create(s_overlay);
+    lv_obj_set_size(b, LV_PCT(100), 24);
+    lv_obj_set_style_radius(b, 6, 0);
+    lv_obj_set_style_shadow_width(b, 0, 0);
+    lv_obj_set_style_bg_color(b, accent ? kAccent : kPanel, 0);
+    lv_obj_set_style_outline_color(b, kHead, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_outline_width(b, 2, LV_STATE_FOCUS_KEY);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* l = lv_label_create(b);
+    lv_obj_set_style_text_color(l, accent ? kInk : kText, 0);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(l, LV_PCT(100));
+    lv_label_set_text(l, text);
+    lv_obj_center(l);
+    lv_group_add_obj(s_overlayGroup, b);
+    return b;
+}
+
+/// COPY's target hit: asked once more, "Keep" first.
+void ask_copy(int to)
+{
+    s_copyTo = to;
+    char title[48];
+    std::snprintf(title, sizeof(title), "Copy PAD %d onto PAD %d?", s_copyFrom + 1, to + 1);
+    open_overlay(title);
+    lv_obj_t* hint = lv_label_create(s_overlay);
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, kDim, 0);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(hint, LV_PCT(100));
+    lv_label_set_text(hint, "Its sample, trim and settings take the place of what is on it now.");
+    overlay_item(LV_SYMBOL_LEFT " Keep it", [](lv_event_t*) {
+        close_overlay();
+        s_copying = false;
+        show_pad();
+        show_info();
+    }, true);
+    overlay_item(LV_SYMBOL_COPY " Copy", [](lv_event_t*) {
+        close_overlay();
+        s_copying = false;
+        KitInfo* k = kit();
+        if (!k || s_copyFrom < 0 || s_copyTo < 0) return;
+        auto& cbs = sampler_get_platform_callbacks();
+        if (cbs.player.wipeOut) cbs.player.wipeOut((uint8_t)s_copyTo);
+        k->pads[s_copyTo].CopyFrom(k->pads[s_copyFrom]);
+        if (cbs.audio.reloadPad) cbs.audio.reloadPad((uint8_t)s_copyTo);
+        lv_subject_set_int(&s_pad_sampler, s_copyTo + 1);
+        open_pad(s_copyTo);
+    });
+}
+
+// ── the sample ─────────────────────────────────────────────────────────────
+
+/// The browser's Load: the file onto the pad.
+void load_cb(lv_event_t* e)
+{
+    lv_obj_t* obj = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    lv_obj_delete_async(lv_obj_get_parent(obj));      // the browser; its DELETE brings the editor back
+    const crosspad_gui::FileItem f = GetCurrentFile();
+    Pad* p = pad();
+    if (!p || f.path.empty() || f.name.empty() || f.isFolder) return;
+    auto& cbs = sampler_get_platform_callbacks();
+    if (cbs.player.wipeOut) cbs.player.wipeOut((uint8_t)s_pad);
+    p->RemoveAllSamples();
     if (cbs.player.getFreeSlotCount && cbs.player.getFreeSlotCount() <= 0) {
         LV_LOG_ERROR("No free sample slots available!");
         return;
     }
-
-    pad->AddSample(currentFile.path);
-    if (cbs.audio.reloadPad) cbs.audio.reloadPad(lv_subject_get_int(&s_pad_sampler)-1); // only this pad
-    lastPad = NULL; // force update on next timer tick
-    lv_timer_resume(t_padUpdate);
+    p->AddSample(f.path);
+    p->dirtyModified = true;
+    if (cbs.audio.reloadPad) cbs.audio.reloadPad((uint8_t)s_pad);
+    open_pad(s_pad);
 }
 
-// Open the browser; the pad update timer stops to avoid conflicts.
-static void Browse_button_cb(lv_event_t * e) {
-    LV_LOG_ERROR("Browse samples button pressed");
-    lv_obj_t * parent = thisApp ? thisApp->getAppContainer() : s_padEditorCont;
-    lv_obj_t * explorer = lv_CreateFileExplorer(parent, FILTER_AUDIO, DEFAULT_KIT_PATH,
-                                                Load_button_cb, lv_event_get_user_data(e));
-    lv_timer_pause(t_padUpdate);
-
-    /* Nothing under a full-screen browser needs drawing. The editor and the
-     * sampler panel beneath it stay in the tree, and LVGL was redrawing both
-     * under every frame of the list -- three screens' worth of work for one
-     * click of the encoder. Hidden while the browser is up, back when it goes.
-     * Only when the browser is a sibling: opened as the editor's own child it
-     * would go with it. */
-    lv_obj_t * panel = s_padEditorCont ? lv_obj_get_parent(s_padEditorCont) : nullptr;
-    if (explorer && panel && parent != s_padEditorCont) {
-        lv_obj_add_flag(panel, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_event_cb(explorer, [](lv_event_t *) {
-            lv_obj_t * p = s_padEditorCont ? lv_obj_get_parent(s_padEditorCont) : nullptr;
-            if (p) lv_obj_remove_flag(p, LV_OBJ_FLAG_HIDDEN);
-        }, LV_EVENT_DELETE, nullptr);
-    }
+/// The file button: the card's browser. Nothing under it needs drawing, so
+/// the sampler panel behind the editor is hidden while it is up.
+void file_cb(lv_event_t*)
+{
+    if (!pad() || s_overlay) return;
+    stop_loop();
+    lv_obj_t* parent = s_app ? s_app->getAppContainer() : s_cont;
+    lv_obj_t* explorer = lv_CreateFileExplorer(parent, FILTER_AUDIO, DEFAULT_KIT_PATH, load_cb, nullptr);
+    if (!explorer) return;
+    lv_timer_pause(s_timer);
+    lv_obj_t* panel = lv_obj_get_parent(s_cont);
+    const bool sibling = parent != s_cont;
+    if (sibling && panel) lv_obj_add_flag(panel, LV_OBJ_FLAG_HIDDEN);
+    /* Load, Close or an app exit: whichever way it goes, the editor wakes. */
+    lv_obj_add_event_cb(explorer, [](lv_event_t*) {
+        if (!s_cont) return;
+        if (lv_obj_t* p = lv_obj_get_parent(s_cont)) lv_obj_remove_flag(p, LV_OBJ_FLAG_HIDDEN);
+        if (s_timer) lv_timer_resume(s_timer);
+        lv_indev_set_group(encoder(), s_group);
+    }, LV_EVENT_DELETE, nullptr);
 }
 
-static bool isMoving = false;
-static bool areYouSure = false;
-static lv_obj_t * areYouSureItem = NULL;
-static lv_obj_t * adderItem = NULL;
-static lv_obj_t * deleterItem = NULL;
+// ── the timer ──────────────────────────────────────────────────────────────
 
-void startMoving(lv_obj_t * list, lv_obj_t * item) {
-    isMoving = true;
-    if (adderItem) lv_obj_set_hidden(adderItem, true);
-    if (deleterItem) lv_obj_set_hidden(deleterItem, false);
-    if (areYouSureItem) lv_obj_set_hidden(areYouSureItem, true);
-}
-
-void endMoving(lv_obj_t * list) {
-    isMoving = false;
-    if (deleterItem) lv_obj_set_hidden(deleterItem, true);
-    if (adderItem) lv_obj_set_hidden(adderItem, false);
-    // hide areYouSure
-    if (areYouSureItem) lv_obj_set_hidden(areYouSureItem, true);
-    areYouSure = false; // reset the flag
-}
-
-void isMovingCb(lv_obj_t * list, lv_obj_t * item) {
-    if (isMoving) {
-        int * diff = (int *)lv_indev_get_user_data(getEncoder());
-        int index = lv_obj_get_index(item);
-        if (diff == NULL || index < 0) return;
-        if (*diff < 0) {
-            LV_LOG_WARN("Item moving up");
-            if (index < 1) return; // can't move up the first item , 0 is background
-            lv_obj_move_to_index(item, lv_obj_get_index(item) - 1);
-            lastPad->SwapSamples(index, index - 1);
-            int padId = lv_subject_get_int(&s_pad_sampler) - 1;
-            auto & cbs = sampler_get_platform_callbacks();
-            if (cbs.audio.reloadPad) cbs.audio.reloadPad(padId); // only this pads
-        }
-        else if (*diff > 0) {
-            LV_LOG_WARN("Item moving down");
-            // Moving down: the last position is where an item is deleted.
-            if (index == lv_obj_get_child_count(list) - 3) {
-                if (areYouSure) {
-                    LV_LOG_WARN("Item %s deleted", lv_list_get_button_text(list, item));
-                    lv_obj_delete(item);
-                    if (areYouSureItem) lv_obj_set_hidden(areYouSureItem, true);
-                    if(lastPad != NULL) {
-                        lastPad->RemoveSample(index);
-                        auto & cbs = sampler_get_platform_callbacks();
-                        if (cbs.audio.reloadPad) cbs.audio.reloadPad(lv_subject_get_int(&s_pad_sampler) - 1); // only this pads
-                    }
-                    endMoving(list);
-                    return;
-                } // else
-                areYouSure = true;
-                lv_obj_set_hidden(areYouSureItem, false);
-                lv_obj_scroll_to_view(areYouSureItem, LV_ANIM_ON);
-            }
-            else {
-                lv_obj_move_to_index(item, lv_obj_get_index(item) + 1);
-                lastPad->SwapSamples(index, index + 1);
-            }
-            int padId = lv_subject_get_int(&s_pad_sampler);
-            auto & cbs = sampler_get_platform_callbacks();
-            if (cbs.audio.reloadPad) cbs.audio.reloadPad(padId - 1); // only this pads
-        }
-        else LV_LOG_INFO("No movement");
-        lv_obj_scroll_to_view(item, LV_ANIM_ON);
-        *diff = 0;
-    }
-}
-
-void change_item_cb(lv_event_t * e) {
-    lv_obj_t * list = (lv_obj_t *)lv_event_get_user_data(e);
-    lv_obj_t * item = (lv_obj_t *)lv_event_get_target(e);
-    lv_event_code_t code = lv_event_get_code(e);
-    switch (code) {
-    case LV_EVENT_CLICKED: {
-        LV_LOG_INFO("Item clicked");
-        if (isMoving) break; // already moving
-        KitInfo * kit = getCurrentKit();
-        if (kit != NULL) {
-            LV_LOG_TRACE("Button: %s", lv_list_get_button_text(list, item));
-            auto & cbs = sampler_get_platform_callbacks();
-            std::string resolved = crosspad::resolveKitSamplePath(kit->path, lv_list_get_button_text(list, item));
-            const char * fullPath = resolved.empty() ? nullptr : resolved.c_str();
-            if (fullPath) {
-                LV_LOG_INFO("Playing sample: %s", fullPath);
-                Pad * pad = &kit->pads[lv_subject_get_int(&s_pad_sampler) - 1];
-
-                if (cbs.player.previewSample) {
-                    cbs.player.previewSample(fullPath, pad->samples[0].start, pad->samples[0].end,
-                                             pad->volume, pad->pan);
-                }
-            }
-        }
-        break;
-    }
-    default:
-        break;
-    }
-}
-
-// Selected pad at full colour on the LEDs, the rest dimmed.
-static void applyPadEditorLeds(int selectedIdx) {
-    KitInfo * kit = getCurrentKit();
-    if (!kit) return;
-    auto & pm = crosspad::getPadManager();
-    for (int i = 0; i < 16; i++) {
-        uint32_t c = kit->pads[i].color;
-        if (i == selectedIdx) {
-            pm.setPadColor((uint8_t)i, crosspad::HtmlColor(c));
-        } else {
-            uint8_t r = ((c >> 16) & 0xFF) / 16;
-            uint8_t g = ((c >> 8)  & 0xFF) / 16;
-            uint8_t b = ( c        & 0xFF) / 16;
-            pm.setPadColor((uint8_t)i, r, g, b);
-        }
-    }
-}
-
-static void UpdatePadEditor(lv_timer_t * e) {
-    LV_LOG_INFO("Update pad editor...");
-
-    /* The pad you hit is the pad you edit. The hit is stamped on the pad
-     * thread; this is where it becomes UI. */
+void tick_cb(lv_timer_t*)
+{
+    /* The pad you hit is the pad you edit -- or, in COPY, where it goes. */
     if (const int hit = g_padPressPending.exchange(0, std::memory_order_relaxed)) {
-        lv_subject_set_int(&s_pad_sampler, hit);
+        if (s_copying && !s_overlay && hit - 1 != s_copyFrom) ask_copy(hit - 1);
+        else if (!s_copying) lv_subject_set_int(&s_pad_sampler, hit);
     }
+    const int shown = lv_subject_get_int(&s_pad_sampler) - 1;
+    if (shown >= 0 && shown < KIT_PADS && shown != s_pad && !s_overlay) open_pad(shown);
 
-    // Only re-read the settings when the shown pad changed.
-    KitInfo * kit = getCurrentKit();
-    if (kit == NULL) return;
-    uint8_t padId = s_pad_sampler.value.num;
-    if (0 == padId) return; // no pad selected, leave default settings
-    Pad * pad = &kit->pads[(padId - 1)%16];
-
-    // In duplicate mode a pad change picks the copy target.
-    if (g_duplicateMode && g_duplicateSourcePadIdx >= 0 && pad != lastPad) {
-        int targetPadIdx = (padId - 1) % 16;
-        if (targetPadIdx != g_duplicateSourcePadIdx) {
-            ShowDuplicateConfirmation(g_duplicateSourcePadIdx, targetPadIdx);
-            lastPad = pad; // prevent re-triggering
-            return;
-        }
-    }
-
-    // The pad did not change, but a waveform that was still loading when it was
-    // selected lands in the cache later. Redraw on that, otherwise the canvas
-    // keeps the empty draw until the user leaves the pad and comes back.
-    static uint32_t lastDrawnWaveformGen = 0;
-    const uint32_t waveformGen = waveform_cache_generation();
-    if (pad == lastPad) {
-        if (waveformGen != lastDrawnWaveformGen) {
-            lastDrawnWaveformGen = waveformGen;
-            if (waveformView && pad->GetSampleCount() > 0) {
-                waveform_view_load(waveformView, (padId - 1) % 16, 0);
-                /* The same load carries the file's own numbers, so the markers
-                 * that had nothing to sit on when the pad was picked appear
-                 * with the waveform rather than on the next pad change. */
-                if (!waveformInfoValid && RefreshSourceInfo(currentWaveformPath)) {
-                    UpdateWaveformMarkers();
-                }
-            }
-        }
-        return;
-    }
-    lastPad = pad;
-    lastDrawnWaveformGen = waveformGen;
-
-    applyPadEditorLeds((padId - 1) % 16);
-
-    dontUpdateSettings = true;
-
-    // The mode dropdown has no stable handle: find the "Mode: " label and
-    // take the sibling after it.
-    lv_obj_t * cont = lv_obj_get_parent(chokeSpinbox); // settings container
-    if (cont) {
-        uint32_t childCnt = lv_obj_get_child_cnt(cont);
-        for (uint32_t i = 0; i < childCnt; ++i) {
-            lv_obj_t * child = lv_obj_get_child(cont, i);
-            if (child && lv_obj_check_type(child, &lv_label_class)) {
-                const char * txt = lv_label_get_text(child);
-                if (txt && strcmp(txt, "Mode: ") == 0 && (i + 1) < childCnt) {
-                    lv_obj_t * dd = lv_obj_get_child(cont, i + 1);
-                    if (dd && lv_obj_check_type(dd, &lv_dropdown_class)) {
-                        lv_dropdown_set_selected(dd, pad->playbackMode);
+    auto* st = tools();
+    if (st && st->job() != crosspad::ToolJob::Busy) {
+        if (s_ovPending) {
+            s_ovPending = false;
+            if (st->job() == crosspad::ToolJob::Ready) {
+                crosspad::WaveOverview ov = st->overview();
+                if (ov.file == s_file) {
+                    s_ov = std::move(ov);
+                    s_frames = s_ov.frames;
+                    if (s_ov.sampleRate) s_rate = s_ov.sampleRate;
+                    if (s_loading) {
+                        /* End 0, or past the file, is "to the end". */
+                        if (!s_end || s_end > s_frames) s_end = s_frames;
+                        if (s_start >= s_end) s_start = 0;
+                        s_loading = false;
                     }
-                    break;
                 }
+                show_info();
+            } else {
+                set_text(s_info, st->jobResult().c_str());
             }
+            if (s_wave) lv_obj_invalidate(s_wave);
+        } else if (s_renderPending) {
+            /* The copy is on the card: the pad plays it from now on. */
+            s_renderPending = false;
+            auto& cbs = sampler_get_platform_callbacks();
+            if (st->job() == crosspad::ToolJob::Ready) {
+                if (cbs.audio.reloadPad && s_renderPad >= 0) cbs.audio.reloadPad((uint8_t)s_renderPad);
+                show_info();
+            } else {
+                set_text(s_info, st->jobResult().c_str());
+            }
+        } else if (s_viewWanted) {
+            request_view(s_wantA, s_wantB);
+        } else if (s_renderWanted && st->requestRendered(s_renderSrc, s_renderOut, pad_fx(s_renderPad))) {
+            s_renderWanted = false;
+            s_renderPending = true;
         }
     }
+    if (s_renderPending) show_info();
 
-    // choke group
-    lv_spinbox_set_value(chokeSpinbox, pad->choke_group);
-
-    // volume
-    lv_spinbox_set_value(volumeSpinbox, pad->volume);
-
-    // pan
-    lv_spinbox_set_value(panSpinbox, pad->pan);
-    // start offset
-    if (startSpinbox) lv_spinbox_set_value(startSpinbox, pad->GetSampleCount() ? pad->samples[0].start : 0);
-    // end offset
-    if (endSpinbox) lv_spinbox_set_value(endSpinbox, pad->GetSampleCount() ? pad->samples[0].end : 0);
-
-    LV_LOG_INFO("Pad editor updated, updating file list");
-
-    // update the file list
-    lv_obj_t * list = (lv_obj_t *)lv_timer_get_user_data(e);
-    lv_list_cleanup(list); // remove all items from the list
-    for (int i = 0; i < pad->GetSampleCount(); i++) {
-        lv_obj_t * item = lv_list_add_button(list, LV_SYMBOL_AUDIO, pad->samples[i].sample.c_str());
-        lv_obj_add_style(item, &styleFileExplorerEntry, 0);
-        lv_obj_add_event_cb(item, change_item_cb, LV_EVENT_ALL, list);
-        lv_group_add_obj(pad_editor_group, item); // samples group
-        lv_obj_add_flag(item, LV_OBJ_FLAG_EVENT_BUBBLE);
-    }
-
-
-    // A dummy trailing item: reaching it is how an entry gets deleted.
-    areYouSureItem = lv_list_add_button(list, LV_SYMBOL_WARNING, "Move down to delete");
-    lv_obj_add_style(areYouSureItem, &styleFileExplorerEntry, 0);
-    lv_obj_set_style_bg_color(areYouSureItem, lv_color_hex(0x8F8F20), 0);
-    lv_obj_add_event_cb(areYouSureItem, [](lv_event_t * e) {
-        LV_LOG_WARN("Move futher down to delete...");
-    }, LV_EVENT_CLICKED, NULL);
-    lv_obj_set_hidden(areYouSureItem, true); // hidden by default
-
-    deleterItem = lv_list_add_button(list, LV_SYMBOL_TRASH, "Remover");
-    lv_obj_add_style(deleterItem, &styleFileExplorerEntry, 0);
-    lv_obj_add_event_cb(deleterItem, [](lv_event_t * e) {
-        LV_LOG_WARN("Remove sample should't be used like that");
-        lastPad = NULL; // force update on next timer tick
-    }, LV_EVENT_CLICKED, NULL);
-    lv_obj_set_hidden(deleterItem, true); // hidden by default
-
-    LV_LOG_INFO("File list updated");
-
-    if (waveformView && pad->GetSampleCount() > 0) {
-        KitInfo * kitForWf = getCurrentKit();
-        std::string resolvedWf = kitForWf ? crosspad::resolveKitSamplePath(kitForWf->path, pad->samples[0].sample) : "";
-        const char * fullPath = resolvedWf.empty() ? nullptr : resolvedWf.c_str();
-        if (fullPath) {
-            bool pathChanged = strcmp(currentWaveformPath, fullPath) != 0;
-            strncpy(currentWaveformPath, fullPath, sizeof(currentWaveformPath) - 1);
-            currentWaveformPath[sizeof(currentWaveformPath) - 1] = '\0';
-            waveform_view_load(waveformView, (padId - 1) % 16, 0);
-
-            if (pathChanged || !waveformInfoValid) RefreshSourceInfo(fullPath);
-            UpdateWaveformMarkers();
+    /* PITCH, HP, LP have stopped: back to the sample, or its copy asked for. */
+    if (s_fxMoved && lv_tick_elaps(s_fxAt) >= kFxSettleMs) {
+        s_fxMoved = false;
+        KitInfo* k = kit();
+        const crosspad::SampleFx fx = pad_fx(s_renderPad);
+        auto& cbs = sampler_get_platform_callbacks();
+        if (k && s_renderPad >= 0 && k->pads[s_renderPad].GetSampleCount() && fx.any()) {
+            const std::string src = crosspad::resolveKitSamplePath(k->path, k->pads[s_renderPad].samples[0].sample);
+            s_renderSrc = crosspad::kitFsPath(src);
+            s_renderOut = crosspad::kitFsPath(crosspad::renderedSamplePath(src, fx));
+            s_renderWanted = true;
+        } else if (cbs.audio.reloadPad && s_renderPad >= 0) {
+            cbs.audio.reloadPad((uint8_t)s_renderPad);
         }
+        show_info();
     }
 
-    dontUpdateSettings = false;
+    /* A marker that has stopped: the pad takes the trim, a loop restarts. */
+    if (s_moved && lv_tick_elaps(s_movedAt) >= kSettleMs) {
+        s_moved = false;
+        auto& cbs = sampler_get_platform_callbacks();
+        if (cbs.audio.reloadPad && s_pad >= 0) cbs.audio.reloadPad((uint8_t)s_pad);
+        if (s_looping && st) st->previewAs(s_file, s_start, s_end, true, pad_sound());
+    }
+    if ((s_looping || s_playing) && st && !st->previewing()) { s_looping = s_playing = false; show_pad(); }
+    move_head();
 }
 
-void pad_editor_destroy(lv_obj_t * editor) {
+// ── building ───────────────────────────────────────────────────────────────
+
+void style_button(lv_obj_t* b, int32_t w, int32_t h)
+{
+    lv_obj_set_size(b, w, h);
+    lv_obj_set_style_pad_all(b, 0, 0);
+    lv_obj_set_style_radius(b, 6, 0);
+    lv_obj_set_style_shadow_width(b, 0, 0);
+    lv_obj_set_style_bg_color(b, kPanel, 0);
+    lv_obj_set_style_bg_color(b, kAccent, LV_STATE_EDITED);
+    /* On the button, not the label: only the button is ever EDITED, and the
+     * label takes the colour from it -- dark on the accent while turned. */
+    lv_obj_set_style_text_color(b, kText, 0);
+    lv_obj_set_style_text_color(b, kInk, LV_STATE_EDITED);
+    lv_obj_set_style_outline_color(b, kHead, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_outline_width(b, 2, LV_STATE_FOCUS_KEY);
+}
+
+lv_obj_t* add_label(lv_obj_t* b, const char* text)
+{
+    lv_obj_t* l = lv_label_create(b);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_max_width(l, LV_PCT(100), 0);
+    lv_label_set_text(l, text);
+    lv_obj_center(l);
+    return l;
+}
+
+lv_obj_t* make_button(lv_obj_t* parent, int32_t w, const char* text, lv_event_cb_t cb)
+{
+    lv_obj_t* b = lv_button_create(parent);
+    style_button(b, w, 22);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
+    add_label(b, text);
+    lv_group_add_obj(s_group, b);
+    return b;
+}
+
+/// A value the encoder turns (number_step).
+lv_obj_t* make_number(lv_obj_t* parent, int32_t w, lv_event_cb_t cb)
+{
+    lv_obj_t* b = lv_CreateEditableButton(parent);
+    style_button(b, w, 22);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_KEY, nullptr);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* l = add_label(b, "");
+    lv_obj_add_flag(l, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_group_add_obj(s_group, b);
+    return b;
+}
+
+lv_obj_t* make_marker(lv_obj_t* parent, const char* text, bool isStart)
+{
+    lv_obj_t* b = lv_CreateEditableButton(parent);
+    style_button(b, 56, 22);
+    void* ud = isStart ? (void*)1 : nullptr;
+    lv_obj_add_event_cb(b, marker_cb, LV_EVENT_KEY, ud);
+    lv_obj_add_event_cb(b, marker_cb, LV_EVENT_CLICKED, ud);
+    lv_obj_add_event_cb(b, marker_cb, LV_EVENT_FOCUSED, ud);
+    add_label(b, text);
+    lv_group_add_obj(s_group, b);
+    return b;
+}
+
+lv_obj_t* make_row(lv_obj_t* parent, int32_t h)
+{
+    lv_obj_t* r = lv_obj_create(parent);
+    lv_obj_remove_style_all(r);
+    lv_obj_set_size(r, LV_PCT(100), h);
+    lv_obj_set_flex_flow(r, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(r, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(r, 3, 0);
+    lv_obj_remove_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+    return r;
+}
+
+/// The power button's click: a value being turned stops first, then the
+/// editor closes -- one level, back to the sampler panel.
+bool back_cb(void*)
+{
+    if (!s_cont) return false;
+    if (s_overlay) {
+        close_overlay();
+        s_copying = false;
+        show_pad();
+        show_info();
+        return true;
+    }
+    if (s_group && lv_group_get_editing(s_group)) {
+        if (s_editStart == Edit::Fine || s_editEnd == Edit::Fine) request_view(0, 0);
+        s_editStart = s_editEnd = Edit::None;
+        lv_group_set_editing(s_group, false);
+        show_marker_labels();
+        show_pad();
+        return true;
+    }
+    lv_obj_delete_async(s_cont);
+    return true;
+}
+
+void destroy_cb(lv_event_t*)
+{
+    sampler_panel_set_covered(false);   // the panel is on show again
+    crosspad_gui::ui_back_remove(s_backToken);
+    s_backToken = 0;
+    if (s_timer) { lv_timer_delete(s_timer); s_timer = nullptr; }
+    if (auto* st = tools()) st->stopPreview();
+
+    /* Before the groups go, or the indev reads freed memory. Guarded: this is
+     * also reached from the app's own teardown, which deletes the panel's
+     * group first. */
+    lv_indev_restore_group(encoder(), s_priorGroup);
+    s_priorGroup = nullptr;
+    if (s_overlayGroup) { lv_group_delete(s_overlayGroup); s_overlayGroup = nullptr; }
+    if (s_group) { lv_group_delete(s_group); s_group = nullptr; }
+
+    s_cont = s_wave = s_info = s_padBtn = s_fileBtn = s_revBtn = s_copyBtn = nullptr;
+    s_volBtn = s_panBtn = s_pitchBtn = s_hpBtn = s_lpBtn = s_chokeBtn = s_modeBtn = nullptr;
+    s_startBtn = s_endBtn = s_loopBtn = s_delBtn = s_overlay = nullptr;
+    s_pad = -1;
+    s_sample.clear();
+    s_file.clear();
+    s_ov = crosspad::WaveOverview{};
+    s_frames = 0;
+    s_looping = s_playing = s_moved = s_copying = s_delArmed = s_ovPending = s_viewWanted = s_loading = false;
+    /* A pad whose copy with its fx was not made yet: the kit load task makes it
+     * and sets the pad up again, off this thread. */
+    const int unrendered = s_fxMoved || s_renderWanted || s_renderPending ? s_renderPad : -1;
+    s_fxMoved = s_renderWanted = s_renderPending = false;
+    s_renderPad = -1;
+    s_editStart = s_editEnd = Edit::None;
+    s_headX = -1;
+
+    /* Every pad at its own colour again. */
+    if (KitInfo* k = kit()) {
+        auto& pm = crosspad::getPadManager();
+        for (int i = 0; i < KIT_PADS; i++) pm.setPadColor((uint8_t)i, crosspad::HtmlColor(k->pads[i].color));
+    }
+    /* Only for what needs the sampler set up again; volume, pan and colour
+     * were applied as they changed. */
+    auto& cbs = sampler_get_platform_callbacks();
+    if (cbs.audio.reloadPads) cbs.audio.reloadPads();
+    KitInfo* k = kit();
+    if (unrendered >= 0 && k && cbs.audio.startLoadKit) {
+        k->pads[unrendered].dirty = true;
+        cbs.audio.startLoadKit(-1, true);
+    }
+
+    crosspad::getPadManager().setActivePadLogic("Sampler");
+    if (auto* status = crosspad::getPlatformServices().status) status->isSamplerPlaying = true;
+    LV_LOG_INFO("Pad editor destroyed");
+}
+
+} // namespace
+
+lv_obj_t* pad_editor_create(lv_obj_t* parent, crosspad_gui::ILvglApp* app)
+{
+    s_app = app;
+    /* The panel behind is fully covered from here on; leaving it polling costs
+     * a repaint of whatever the editor draws over it, twenty times a second. */
+    sampler_panel_set_covered(true);
+    crosspad::getPadManager().setActivePadLogic("Pad editor");
+    if (auto* status = crosspad::getPlatformServices().status) status->isSamplerPlaying = false;
+
+    s_group = lv_group_create();
+    lv_group_set_wrap(s_group, true);
+    s_priorGroup = lv_indev_get_group(encoder());
+    lv_indev_set_group(encoder(), s_group);
+
+    s_cont = lv_obj_create(parent);
+    lv_obj_set_size(s_cont, lv_obj_get_content_width(parent), lv_obj_get_content_height(parent));
+    lv_obj_center(s_cont);
+    lv_obj_set_style_bg_color(s_cont, kBg, 0);
+    lv_obj_set_style_bg_opa(s_cont, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cont, 0, 0);
+    lv_obj_set_style_radius(s_cont, 0, 0);
+    lv_obj_set_style_pad_all(s_cont, 5, 0);
+    lv_obj_set_style_pad_row(s_cont, 4, 0);
+    lv_obj_set_flex_flow(s_cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_remove_flag(s_cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_cont, destroy_cb, LV_EVENT_DELETE, nullptr);
+
+    // -- the pad and its sample --
+    lv_obj_t* top = make_row(s_cont, 22);
+    make_button(top, 30, LV_SYMBOL_LEFT, close_cb);
+    s_padBtn = make_number(top, 56, color_cb);
+    s_fileBtn = make_button(top, 100, "", file_cb);
+    lv_obj_set_flex_grow(s_fileBtn, 1);
+    s_revBtn = make_button(top, 34, "REV", rev_cb);
+    s_modeBtn = make_button(top, 46, "", mode_cb);
+    s_copyBtn = make_button(top, 50, LV_SYMBOL_COPY " COPY", copy_cb);
+
+    // -- its settings --
+    lv_obj_t* params = make_row(s_cont, 22);
+    s_volBtn = make_number(params, 46, vol_cb);
+    s_panBtn = make_number(params, 46, pan_cb);
+    s_pitchBtn = make_number(params, 56, pitch_cb);
+    s_hpBtn = make_number(params, 46, hp_cb);
+    s_lpBtn = make_number(params, 46, lp_cb);
+    s_chokeBtn = make_number(params, 48, choke_cb);
+
+    // -- the sample --
+    s_wave = lv_obj_create(s_cont);
+    lv_obj_remove_style_all(s_wave);
+    lv_obj_set_width(s_wave, LV_PCT(100));
+    lv_obj_set_flex_grow(s_wave, 1);
+    lv_obj_set_style_bg_color(s_wave, kPanel, 0);
+    lv_obj_set_style_bg_opa(s_wave, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_wave, 6, 0);
+    lv_obj_set_style_pad_all(s_wave, 3, 0);
+    lv_obj_remove_flag(s_wave, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_wave, wave_draw_cb, LV_EVENT_DRAW_MAIN_END, nullptr);
+
+    s_info = lv_label_create(s_cont);
+    lv_obj_set_style_text_font(s_info, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_info, kDim, 0);
+    lv_label_set_long_mode(s_info, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(s_info, LV_PCT(100), 12);     // one line: a long one ends in dots, the picture keeps its height
+    lv_label_set_text(s_info, "");
+
+    // -- the trim --
+    lv_obj_t* tools_row = make_row(s_cont, 24);
+    s_startBtn = make_marker(tools_row, "START", true);
+    s_endBtn = make_marker(tools_row, "END", false);
+    make_button(tools_row, 44, LV_SYMBOL_PLAY " PLAY", play_cb);
+    s_loopBtn = make_button(tools_row, 48, LV_SYMBOL_LOOP " LOOP", loop_cb);
+    make_button(tools_row, 36, "FULL", full_cb);
+    s_delBtn = make_button(tools_row, 36, "DEL", del_cb);
+
+    s_pad = -1;
+    const int shown = lv_subject_get_int(&s_pad_sampler) - 1;
+    if (shown >= 0 && shown < KIT_PADS) open_pad(shown);
+    else { show_pad(); show_marker_labels(); show_info(); }
+    lv_group_focus_obj(s_startBtn);
+
+    s_timer = lv_timer_create(tick_cb, kTickMs, nullptr);
+    s_backToken = crosspad_gui::ui_back_push(back_cb, nullptr);
+    return s_cont;
+}
+
+void pad_editor_destroy(lv_obj_t* editor)
+{
     if (editor) lv_obj_delete(editor);
 }
 
-void pad_editor_set_pad(lv_obj_t * editor, uint8_t padIdx) {
+void pad_editor_set_pad(lv_obj_t*, uint8_t padIdx)
+{
     lv_subject_set_int(&s_pad_sampler, padIdx + 1);
-    lastPad = NULL; // force UI refresh
 }
 
 } // namespace crosspad_sampler
