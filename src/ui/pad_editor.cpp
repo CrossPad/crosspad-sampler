@@ -99,6 +99,9 @@ enum class Edit : uint8_t { None, Coarse, Fine };
 
 lv_obj_t* s_cont = nullptr;
 lv_obj_t* s_wave = nullptr;
+lv_obj_t* s_busy = nullptr;               // on the picture: what runs in the background, and how far
+lv_obj_t* s_busyText = nullptr;
+lv_obj_t* s_busyBar = nullptr;
 lv_obj_t* s_info = nullptr;
 lv_obj_t* s_padBtn = nullptr;            // the pad, in its colour; turned, the colour
 lv_obj_t* s_fileBtn = nullptr;
@@ -347,6 +350,45 @@ void move_head()
 
 // ── what the screen says ───────────────────────────────────────────────────
 
+/// On the picture itself, where it is looked at: the pad's copy being made
+/// (PITCH, HP, LP, REV -- which, and how far) or the sample being read. One
+/// line and a thin bar at the top; the dots move, so a job that waits for the
+/// card still reads as alive.
+void show_busy()
+{
+    if (!s_busy) return;
+    const bool rendering = s_fxMoved || s_renderWanted || s_renderPending;
+    const bool loading = !s_file.empty() && !s_frames;
+    if (!rendering && !loading) {
+        if (!lv_obj_has_flag(s_busy, LV_OBJ_FLAG_HIDDEN)) lv_obj_add_flag(s_busy, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    static const char* const kDots[] = {".  ", ".. ", "...", "   "};
+    const char* dots = kDots[(lv_tick_get() / 300) % 4];
+    auto* st = tools();
+    const int pct = rendering && s_renderPending && st ? (int)st->jobProgress() : 0;
+    std::string text;
+    char buf[40];
+    if (rendering) {
+        std::snprintf(buf, sizeof(buf), "PROCESSING %d%%%s", pct, dots);
+        text = buf;
+        if (const Pad* p = pad()) {
+            if (p->reverse) text += "  REV";
+            if (p->pitch) { std::snprintf(buf, sizeof(buf), "  PITCH %+d", p->pitch); text += buf; }
+            if (p->hp) text += "  HP " + fmt_hz(p->hp);
+            if (p->lp) text += "  LP " + fmt_hz(p->lp);
+        }
+    } else {
+        std::snprintf(buf, sizeof(buf), "LOADING%s  ", dots);
+        text = buf + base_of(s_file);
+    }
+    set_text(s_busyText, text.c_str());
+    lv_bar_set_value(s_busyBar, pct, LV_ANIM_OFF);
+    if (rendering) lv_obj_remove_flag(s_busyBar, LV_OBJ_FLAG_HIDDEN);
+    else           lv_obj_add_flag(s_busyBar, LV_OBJ_FLAG_HIDDEN);
+    if (lv_obj_has_flag(s_busy, LV_OBJ_FLAG_HIDDEN)) lv_obj_remove_flag(s_busy, LV_OBJ_FLAG_HIDDEN);
+}
+
 void show_info()
 {
     if (!s_info) return;
@@ -356,10 +398,6 @@ void show_info()
         std::snprintf(buf, sizeof(buf), "Hit a pad to edit it.");
     } else if (s_copying) {
         std::snprintf(buf, sizeof(buf), "COPY: hit the pad to copy PAD %d onto -- COPY again to stop.", s_copyFrom + 1);
-    } else if (s_renderWanted || s_renderPending || s_fxMoved) {
-        auto* st = tools();
-        std::snprintf(buf, sizeof(buf), "The pad's copy with its pitch, filters, reverse is being made ... %u%%",
-                      s_renderPending && st ? (unsigned)st->jobProgress() : 0u);
     } else if (s_delArmed) {
         std::snprintf(buf, sizeof(buf), "DEL again takes %s off PAD %d.", base_of(s_file).c_str(), s_pad + 1);
     } else if (s_file.empty()) {
@@ -1012,7 +1050,7 @@ void tick_cb(lv_timer_t*)
             s_renderPending = true;
         }
     }
-    if (s_renderPending) show_info();
+    show_busy();
 
     /* PITCH, HP, LP have stopped: back to the sample, or its copy asked for. */
     if (s_fxMoved && lv_tick_elaps(s_fxAt) >= kFxSettleMs) {
@@ -1160,6 +1198,7 @@ void destroy_cb(lv_event_t*)
     if (s_group) { lv_group_delete(s_group); s_group = nullptr; }
 
     s_cont = s_wave = s_info = s_padBtn = s_fileBtn = s_revBtn = s_copyBtn = nullptr;
+    s_busy = s_busyText = s_busyBar = nullptr;
     s_volBtn = s_panBtn = s_pitchBtn = s_hpBtn = s_lpBtn = s_chokeBtn = s_modeBtn = nullptr;
     s_startBtn = s_endBtn = s_loopBtn = s_delBtn = s_overlay = nullptr;
     s_pad = -1;
@@ -1255,6 +1294,37 @@ lv_obj_t* pad_editor_create(lv_obj_t* parent, crosspad_gui::ILvglApp* app)
     lv_obj_set_style_pad_all(s_wave, 3, 0);
     lv_obj_remove_flag(s_wave, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_wave, wave_draw_cb, LV_EVENT_DRAW_MAIN_END, nullptr);
+
+    s_busy = lv_obj_create(s_wave);
+    lv_obj_remove_style_all(s_busy);
+    lv_obj_set_size(s_busy, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_align(s_busy, LV_ALIGN_TOP_MID, 0, 2);
+    lv_obj_set_style_bg_color(s_busy, kBg, 0);
+    lv_obj_set_style_bg_opa(s_busy, LV_OPA_90, 0);
+    lv_obj_set_style_radius(s_busy, 4, 0);
+    lv_obj_set_style_border_color(s_busy, kAccent, 0);
+    lv_obj_set_style_border_width(s_busy, 1, 0);
+    lv_obj_set_style_pad_hor(s_busy, 6, 0);
+    lv_obj_set_style_pad_ver(s_busy, 3, 0);
+    lv_obj_set_style_pad_row(s_busy, 2, 0);
+    lv_obj_set_flex_flow(s_busy, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_busy, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(s_busy, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(s_busy, LV_OBJ_FLAG_CLICKABLE);
+    s_busyText = lv_label_create(s_busy);
+    lv_obj_set_style_text_font(s_busyText, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_busyText, kAccent, 0);
+    lv_label_set_text(s_busyText, "");
+    s_busyBar = lv_bar_create(s_busy);
+    lv_obj_set_size(s_busyBar, LV_PCT(100), 3);
+    lv_bar_set_range(s_busyBar, 0, 100);
+    lv_obj_set_style_bg_color(s_busyBar, kWaveOff, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_busyBar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_busyBar, kAccent, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(s_busyBar, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_busyBar, 2, LV_PART_INDICATOR);
+    lv_obj_set_style_anim_duration(s_busyBar, 0, 0);
+    lv_obj_add_flag(s_busy, LV_OBJ_FLAG_HIDDEN);
 
     s_info = lv_label_create(s_cont);
     lv_obj_set_style_text_font(s_info, &lv_font_montserrat_10, 0);
