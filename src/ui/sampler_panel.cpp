@@ -71,27 +71,72 @@ static lv_obj_t * previewBtn = NULL;   // plays the kit's preview.mid, looping
 static lv_obj_t * previewLabel = NULL;
 static lv_timer_t * previewTimer = NULL;
 
-#define CP_TOGGLE_OFF lv_color_hex(0xFFFFFF)   /* Full level / 16 levels at rest */
-#define CP_TOGGLE_ON  lv_color_hex(0xE8B33A)   /* and while it holds            */
-static lv_obj_t * fullLevelBtn = NULL;   // Full level / 16 levels, under the waveform
+/* The device's colours, as the Recorder and the pad editor wear them: flat
+ * dark buttons with light text, the accent (and dark text) on what is on,
+ * a white outline on what the encoder is at. */
+static const lv_color_t kBg     = lv_color_hex(0x16181B);
+static const lv_color_t kPanel  = lv_color_hex(0x20242A);
+static const lv_color_t kText   = lv_color_hex(0xE8EAED);
+static const lv_color_t kDim    = lv_color_hex(0x7B828B);
+static const lv_color_t kInk    = lv_color_hex(0x16181B);
+static const lv_color_t kAccent = lv_color_hex(0xC6FF47);
+static const lv_color_t kFocus  = lv_color_hex(0xFFFFFF);
+
+static lv_obj_t * fullLevelBtn = NULL;   // Full level / 16 levels, along the bottom
 static lv_obj_t * levelsBtn    = NULL;
 static lv_obj_t * levelsLabel  = NULL;
-/* Encoder focus, made unmissable.
- *
- * A button that carries colour for *state* writes it as a local style, and a
- * focus style merely *added* to the object would lose to it, so the focus skin
- * is local too, on LV_STATE_FOCUSED, where it beats the default-state write
- * without erasing it: move away and the state colour is back.
- *
- * Blue rather than a lighter grey because the row is grey at rest; the point is
- * that the cursor is findable at a glance on a 320 px screen, from arm's length.
- */
-/* Light fill, saturated edge. The dark labels on Back / Edit set their own
- * colour locally, so a child label never follows the parent into the focused
- * state -- a deep blue fill left black text on dark blue, which is what looked
- * broken. A pale fill keeps every existing label legible without touching it. */
-#define CP_FOCUS_BG   lv_color_hex(0xBBD6FF)
-#define CP_FOCUS_EDGE lv_color_hex(0x2F6BFF)
+static lv_obj_t * padChip      = NULL;   // "PAD 5" in the pad's colour, on the top row
+
+static void style_button(lv_obj_t * b, int32_t w, int32_t h)
+{
+    lv_obj_set_size(b, w, h);
+    lv_obj_set_style_pad_all(b, 0, 0);
+    lv_obj_set_style_radius(b, 6, 0);
+    lv_obj_set_style_shadow_width(b, 0, 0);
+    lv_obj_set_style_bg_color(b, kPanel, 0);
+    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+    /* On the button, not the label: the label takes it, so a lit switch reads
+     * dark on the accent. */
+    lv_obj_set_style_text_color(b, kText, 0);
+    lv_obj_set_style_outline_color(b, kFocus, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_outline_width(b, 2, LV_STATE_FOCUS_KEY);
+}
+
+static lv_obj_t * make_button(lv_obj_t * parent, int32_t w, const char * text, lv_event_cb_t cb, void * ud = nullptr)
+{
+    lv_obj_t * b = lv_button_create(parent);
+    style_button(b, w, 22);
+    if (cb) lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, ud);
+    lv_obj_t * l = lv_label_create(b);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_max_width(l, LV_PCT(100), 0);
+    lv_label_set_text(l, text);
+    lv_obj_center(l);
+    return b;
+}
+
+static lv_obj_t * make_row(lv_obj_t * parent, int32_t h)
+{
+    lv_obj_t * r = lv_obj_create(parent);
+    lv_obj_remove_style_all(r);
+    lv_obj_set_size(r, LV_PCT(100), h);
+    lv_obj_set_flex_flow(r, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(r, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(r, 3, 0);
+    lv_obj_remove_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+    /* The encoder's outline sits outside its button: clipped by the row, only
+     * the edge facing the next button showed. */
+    lv_obj_add_flag(r, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    return r;
+}
+
+static void set_lit(lv_obj_t * b, bool on)
+{
+    if (!b) return;
+    lv_obj_set_style_bg_color(b, on ? kAccent : kPanel, 0);
+    lv_obj_set_style_text_color(b, on ? kInk : kText, 0);
+}
 
 /* The two performance switches read their state from the pad logic, so a
  * mode changed from anywhere else (a kit reload, a later CDC verb) shows
@@ -99,31 +144,15 @@ static lv_obj_t * levelsLabel  = NULL;
 static void perf_modes_sync()
 {
     auto& logic = getSamplerPadLogic();
-    if (fullLevelBtn) {
-        lv_obj_set_style_bg_color(fullLevelBtn, logic.fullLevel() ? CP_TOGGLE_ON : CP_TOGGLE_OFF, 0);
-    }
-    if (levelsBtn) {
-        lv_obj_set_style_bg_color(levelsBtn, logic.sixteenLevels() ? CP_TOGGLE_ON : CP_TOGGLE_OFF, 0);
-    }
+    set_lit(fullLevelBtn, logic.fullLevel());
+    set_lit(levelsBtn, logic.sixteenLevels());
     if (levelsLabel) {
         if (logic.sixteenLevels()) {
-            lv_label_set_text_fmt(levelsLabel, "16 lv: pad %u", (unsigned)logic.sixteenLevelsSource() + 1);
+            lv_label_set_text_fmt(levelsLabel, "16 LEVELS: PAD %u", (unsigned)logic.sixteenLevelsSource() + 1);
         } else {
-            lv_label_set_text(levelsLabel, "16 levels");
+            lv_label_set_text(levelsLabel, "16 LEVELS");
         }
     }
-}
-
-static void apply_focus_skin(lv_obj_t * o)
-{
-    if (!o) return;
-    lv_obj_set_style_bg_color(o, CP_FOCUS_BG, LV_STATE_FOCUSED);
-    lv_obj_set_style_bg_opa(o, LV_OPA_COVER, LV_STATE_FOCUSED);
-    lv_obj_set_style_outline_color(o, CP_FOCUS_EDGE, LV_STATE_FOCUSED);
-    lv_obj_set_style_outline_width(o, 2, LV_STATE_FOCUSED);
-    lv_obj_set_style_outline_pad(o, 2, LV_STATE_FOCUSED);
-    lv_obj_set_style_outline_opa(o, LV_OPA_COVER, LV_STATE_FOCUSED);
-    lv_obj_set_style_border_color(o, CP_FOCUS_EDGE, LV_STATE_FOCUSED);
 }
 
 /// The button is the transport, so its face is the only state the user sees.
@@ -141,8 +170,6 @@ static bool waveformPending = false;
 static lv_obj_t * waveformPlayhead = NULL; // overlay line showing playback position
 static lv_obj_t * waveformStartMarker = NULL; // green marker for start position
 static lv_obj_t * waveformEndMarker = NULL; // red marker for end position
-static lv_obj_t * waveformFileLabel = NULL; // sample filename under the waveform
-static lv_obj_t * waveformTimeLabel = NULL; // playback time under the waveform
 static lv_obj_t * scopeView = NULL;
 static lv_obj_t * vuMeter = NULL;
 static lv_obj_t * waveformModeLabel = NULL;
@@ -211,6 +238,47 @@ static bool g_prevNoteOffOnRelease = false; // store previous global setting to 
 // is the pad number, and the button for pad p is child notes[p]-1.
 static const int notes[] = {13, 14, 15, 16, 9, 10, 11, 12, 5, 6, 7, 8, 1, 2, 3, 4};
 #define NOTES_MAX_QUEUE_LEN 100
+
+static int s_selectedPad = -1;   // outlined on the grid, 0-based; -1 none
+
+/// A pad on the grid in its kit colour: faint at rest, full with dark ink
+/// while it sounds.
+static void paint_pad(int pad, RgbColor c, bool active)
+{
+    if (!buttonFrame || pad < 0 || pad >= 16) return;
+    lv_obj_t * btn = lv_obj_get_child(buttonFrame, notes[pad] - 1);
+    if (!btn) return;
+    lv_obj_set_style_bg_color(btn, lv_color_make(c.R, c.G, c.B), 0);
+    lv_obj_set_style_bg_opa(btn, active ? LV_OPA_COVER : LV_OPA_40, 0);
+    lv_obj_set_style_text_color(btn, active ? kInk : kText, 0);
+}
+
+/// The last pad hit: outlined on the grid, named on the top row in its colour.
+static void show_selected_pad(int pad)
+{
+    if (buttonFrame) {
+        if (s_selectedPad >= 0 && s_selectedPad < 16) {
+            lv_obj_set_style_outline_width(lv_obj_get_child(buttonFrame, notes[s_selectedPad] - 1), 0, 0);
+        }
+        if (pad >= 0 && pad < 16) {
+            lv_obj_t * btn = lv_obj_get_child(buttonFrame, notes[pad] - 1);
+            lv_obj_set_style_outline_color(btn, kFocus, 0);
+            lv_obj_set_style_outline_width(btn, 2, 0);
+            lv_obj_set_style_outline_pad(btn, 1, 0);
+        }
+    }
+    s_selectedPad = pad;
+    if (!padChip) return;
+    lv_obj_t * l = lv_obj_get_child(padChip, 0);
+    if (pad < 0 || pad >= 16) {
+        lv_label_set_text(l, "PAD -");
+        lv_obj_set_style_text_color(padChip, kDim, 0);
+        return;
+    }
+    lv_label_set_text_fmt(l, "PAD %d", pad + 1);
+    const RgbColor c = crosspad::getPadManager().getPadColor((uint8_t)pad);
+    lv_obj_set_style_text_color(padChip, lv_color_make(c.R, c.G, c.B), 0);
+}
 
 
 static lv_timer_t * timerPad = NULL;
@@ -511,7 +579,7 @@ static void ensure_scope_view() {
     lv_obj_t* cont = lv_obj_get_parent(waveformCanvas);
     scopeView = create_scope_view(cont, WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT);
     if (!scopeView) return;
-    lv_obj_align(scopeView, LV_ALIGN_RIGHT_MID, -25, -10);
+    lv_obj_center(scopeView);   // over the waveform, in its panel
     lv_obj_add_flag(scopeView, LV_OBJ_FLAG_HIDDEN);
     scope_view_set_active(scopeView, false);
     lv_obj_add_event_cb(scopeView, waveform_mode_click_cb, LV_EVENT_CLICKED, nullptr);
@@ -531,15 +599,11 @@ static void apply_waveform_display_mode() {
         set_live_scope_capture(true);
         lv_obj_clear_flag(scopeView, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(waveformCanvas, LV_OBJ_FLAG_HIDDEN);
-        if (waveformFileLabel) lv_obj_add_flag(waveformFileLabel, LV_OBJ_FLAG_HIDDEN);
-        if (waveformTimeLabel) lv_obj_add_flag(waveformTimeLabel, LV_OBJ_FLAG_HIDDEN);
         scope_view_set_active(scopeView, true);
     } else {
         set_live_scope_capture(false);
         lv_obj_add_flag(scopeView, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(waveformCanvas, LV_OBJ_FLAG_HIDDEN);
-        if (waveformFileLabel) lv_obj_clear_flag(waveformFileLabel, LV_OBJ_FLAG_HIDDEN);
-        if (waveformTimeLabel) lv_obj_clear_flag(waveformTimeLabel, LV_OBJ_FLAG_HIDDEN);
     }
 
     if (waveformModeLabel) {
@@ -548,7 +612,6 @@ static void apply_waveform_display_mode() {
         } else {
             lv_label_set_text_static(waveformModeLabel, "FILE");
             lv_obj_clear_flag(waveformModeLabel, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_move_foreground(waveformModeLabel);
         }
     }
 }
@@ -628,25 +691,8 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
         if (currentlyActive != lastPadStatesPlaying[pad]) {
             lastPadStatesPlaying[pad] = currentlyActive;
 
-            if (currentlyActive) {
-                if (buttonFrame != nullptr && pad < sizeof(notes)/sizeof(notes[0])) {
-                    int btnIndex = notes[pad] - 1; // map physical pad -> button child index
-                    lv_obj_t * btn = lv_obj_get_child(buttonFrame, btnIndex);
-                    if (btn) {
-                        RgbColor padColor = crosspad::getPadManager().getPressedColor(pad);
-                        lv_obj_set_style_bg_color(btn, lv_color_make(padColor.R, padColor.G, padColor.B), 0);
-                    }
-                }
-            } else {
-                if (buttonFrame != nullptr && pad < sizeof(notes)/sizeof(notes[0])) {
-                    int btnIndex = notes[pad] - 1;
-                    lv_obj_t * btn = lv_obj_get_child(buttonFrame, btnIndex);
-                    if (btn) {
-                        RgbColor padColor = crosspad::getPadManager().getPadColor(pad);
-                        lv_obj_set_style_bg_color(btn, lv_color_make(padColor.R, padColor.G, padColor.B), 0);
-                    }
-                }
-            }
+            paint_pad(pad, currentlyActive ? crosspad::getPadManager().getPressedColor(pad)
+                                           : crosspad::getPadManager().getPadColor(pad), currentlyActive);
         }
     }
 
@@ -669,17 +715,13 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
             auto color_pressed = RgbColor(HtmlColor(kit->pads[n].color_pressed));
             crosspad::getPadLedController().setPadColor(n, color);
             crosspad::getPadLedController().setPadPressedColor(n, color_pressed);
-            int btnIndex = notes[n] - 1;
-            lv_obj_t * btn = lv_obj_get_child(buttonFrame, btnIndex);
-            if(btn) {
-                lv_obj_set_style_bg_color(btn,
-                                          lv_color_make(color.R, color.G, color.B), 0);
-            }
+            paint_pad(n, color, false);
         }
         auto* statusPtr = crosspad::getPlatformServices().status;
         if (statusPtr) statusPtr->keypadDirty = true; // force keypad refresh
         // PadManager needs the kit pads for the playback modes to work.
         crosspad::getPadManager().loadPadConfig(kit->pads, KIT_PADS);
+        show_selected_pad(s_selectedPad);   // the chip takes the new kit's colour
     }
     lastKit = kit;
     if (kit) {
@@ -692,11 +734,11 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
                         break;
                     case 1: // Hold
                         lv_label_set_text(padModeIndicators[n], "H");
-                        lv_obj_set_style_text_color(padModeIndicators[n], lv_color_hex(0x2020FF), 0);
+                        lv_obj_set_style_text_color(padModeIndicators[n], kText, 0);
                         break;
                     case 2: // Loop
                         lv_label_set_text(padModeIndicators[n], LV_SYMBOL_REFRESH);
-                        lv_obj_set_style_text_color(padModeIndicators[n], lv_color_hex(0x20FF20), 0);
+                        lv_obj_set_style_text_color(padModeIndicators[n], kAccent, 0);
                         break;
                     default:
                         lv_label_set_text(padModeIndicators[n], "");
@@ -761,6 +803,7 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
     }
 
     uint8_t pad = lv_subject_get_int(&s_pad_sampler);
+    if ((int)pad - 1 != s_selectedPad) show_selected_pad((int)pad - 1);
     static uint8_t lastDisplayedPad = 0; // Track which pad was last displayed
     static uint8_t lastDisplayedSampleIdx = 255; // Track last sample index displayed
 
@@ -976,62 +1019,183 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_obj_set_size(cont, lv_obj_get_content_width(parent), lv_obj_get_content_height(parent));
     lv_obj_center(cont);
     lv_obj_add_style(cont, &styleAppContainer, 0);
+    lv_obj_set_style_bg_color(cont, kBg, 0);
+    lv_obj_set_style_bg_opa(cont, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(cont, 0, 0);
+    lv_obj_remove_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
     g_parentContainer = cont;
 
-    lv_obj_t * title = lv_label_create(cont);
-    lv_obj_add_style(title, &styleTitle, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 8);
+    /* The screen in rows, as the Recorder and the pad editor are laid out:
+     * where you are along the top, the pads and the sound in the middle, the
+     * switches along the bottom. In a body of its own, so the editors opened
+     * over the panel (children of cont) still cover it whole. */
+    lv_obj_t * body = lv_obj_create(cont);
+    lv_obj_remove_style_all(body);
+    lv_obj_set_size(body, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_pad_all(body, 5, 0);
+    lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(body, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_remove_flag(body, LV_OBJ_FLAG_SCROLLABLE);
+
     const size_t kit_name_len = 32;
     static char kit_name[kit_name_len];
     static char kit_name_prev[kit_name_len];
     lv_subject_init_string(&s_kit_name, kit_name, kit_name_prev, kit_name_len, "Kit name");
-    lv_label_bind_text(title, &s_kit_name, NULL);
+    lv_subject_init_int(&s_pad_sampler, 0);
+    s_selectedPad = -1;
 
-
-    lv_obj_t * backBtn = lv_button_create(cont);
-    lv_obj_align(backBtn, LV_ALIGN_BOTTOM_MID, -40, -8);
-    lv_obj_add_event_cb(backBtn, [](lv_event_t * e) {
+    // -- where you are: back, the pad, the kit --
+    lv_obj_t * top = make_row(body, 22);
+    lv_obj_t * backBtn = make_button(top, 30, LV_SYMBOL_LEFT, [](lv_event_t *) {
         LV_LOG_INFO("Exit button clicked");
         ShowSaveConfirmationDialog(g_parentContainer);
-    }, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_style(backBtn, &styleButton, 0);
-    lv_obj_add_style(backBtn, &styleButtonPressed, LV_STATE_PRESSED);
-    lv_obj_add_style(backBtn, &styleButtonInactive, LV_STATE_DISABLED);
-    lv_obj_t * backLabel = lv_label_create(backBtn);
-    lv_label_set_text(backLabel, "Back");
-    lv_obj_set_style_text_color(backLabel, lv_color_hex(0x000000), 0);
-    apply_focus_skin(backBtn);
-    lv_group_add_obj(g_sampler, backBtn); // add the back button to the group
+    });
+    padChip = lv_obj_create(top);
+    lv_obj_remove_style_all(padChip);
+    style_button(padChip, 56, 22);
+    lv_obj_remove_flag(padChip, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(padChip, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t * padChipLabel = lv_label_create(padChip);
+    lv_obj_set_style_text_font(padChipLabel, &lv_font_montserrat_10, 0);
+    lv_obj_center(padChipLabel);
+    /* The kit's name opens the kit browser: what you are playing is where
+     * you change it. In the accent, the one thing on the row to read. */
+    pickKitBtn = make_button(top, 100, "", PickKit_button_cb);
+    lv_obj_set_flex_grow(pickKitBtn, 1);
+    lv_obj_set_style_text_color(pickKitBtn, kAccent, 0);
+    lv_label_bind_text(lv_obj_get_child(pickKitBtn, 0), &s_kit_name, LV_SYMBOL_DIRECTORY "  %s");
 
-    lv_obj_t * editBtn = lv_button_create(cont);
-    lv_obj_align(editBtn, LV_ALIGN_BOTTOM_MID, 40, -8);
-    lv_obj_add_event_cb(editBtn, [](lv_event_t * e) {
-        LV_LOG_INFO("Opening pad editor");
-        lv_obj_t * cont = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
-        if (!cont) return;
-        crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
-        if (kit && kit->engine == crosspad::KitEngine::Pitched) {
-            pitched_editor_create(cont);
-        } else {
-            pad_editor_create(cont, nullptr);
+    // -- the pads, and the sound of the last one --
+    lv_obj_t * mid = make_row(body, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_column(mid, 5, 0);
+
+    g_samplerPadEditorLogic = std::make_shared<PadEditorLogicHandler>();
+    crosspad::getPadManager().registerPadLogic("Pad editor", g_samplerPadEditorLogic);
+
+    static auto s_samplerLogic = std::shared_ptr<SamplerPadLogic>(&g_samplerPadLogic, [](SamplerPadLogic*){});
+    crosspad::getPadManager().registerPadLogic("Sampler", s_samplerLogic);
+    crosspad::getPadManager().setActivePadLogic("Sampler");
+
+    // NULL callbacks: our own events are attached below.
+    buttonFrame = createButtons(mid, NULL);
+    /* Squares in the kit's colours on the dark, big enough for a finger:
+     * 30 px and 3 between, which is what the width leaves beside the
+     * waveform and the meter. */
+    constexpr int32_t kCell = 30;
+    constexpr int32_t kGap  = 3;
+    if (buttonFrame) {
+        lv_obj_set_size(buttonFrame, 4 * kCell + 3 * kGap, 4 * kCell + 3 * kGap);
+        lv_obj_set_style_pad_all(buttonFrame, 0, 0);
+        lv_obj_set_style_border_width(buttonFrame, 0, 0);
+        uint32_t cnt = lv_obj_get_child_cnt(buttonFrame);
+        for (uint32_t i = 0; i < cnt; ++i) {
+            lv_obj_t * btn = lv_obj_get_child(buttonFrame, i);
+            if (!btn) continue;
+            lv_obj_set_size(btn, kCell, kCell);
+            lv_obj_align(btn, LV_ALIGN_TOP_LEFT, (int32_t)(i % 4) * (kCell + kGap), (int32_t)(i / 4) * (kCell + kGap));
+            lv_obj_set_style_radius(btn, 5, 0);
+            lv_obj_set_style_shadow_width(btn, 0, 0);
+            lv_obj_set_style_border_width(btn, 0, 0);
+            lv_obj_add_event_cb(btn, Sampler_pad_event_cb, LV_EVENT_CLICKED, NULL);
         }
-    }, LV_EVENT_CLICKED, cont);
-    lv_obj_add_style(editBtn, &styleButton, 0);
-    lv_obj_add_style(editBtn, &styleButtonPressed, LV_STATE_PRESSED);
-    lv_obj_add_style(editBtn, &styleButtonInactive, LV_STATE_DISABLED);
-    lv_obj_t * editLabel = lv_label_create(editBtn);
-    lv_label_set_text(editLabel, "Edit");
-    lv_obj_set_style_text_color(editLabel, lv_color_hex(0x000000), 0);
-    apply_focus_skin(editBtn);
-    lv_group_add_obj(g_sampler, editBtn); // add the edit button to the group
+        for (int pad = 0; pad < 16; ++pad) {
+            paint_pad(pad, crosspad::getPadManager().getPadColor((uint8_t)pad), false);
+            int btnIndex = notes[pad] - 1; // button child index for this pad
+            if (btnIndex >= 0 && btnIndex < (int)cnt) {
+                lv_obj_t * btn = lv_obj_get_child(buttonFrame, btnIndex);
+                if (btn && padModeIndicators[pad] == nullptr) {
+                    padModeIndicators[pad] = lv_label_create(btn);
+                    lv_label_set_text(padModeIndicators[pad], "");
+                    lv_obj_set_style_text_font(padModeIndicators[pad], &lv_font_montserrat_10, 0);
+                    lv_obj_set_style_text_color(padModeIndicators[pad], kText, 0);
+                    lv_obj_align(padModeIndicators[pad], LV_ALIGN_TOP_LEFT, 2, 1);
+                }
+            }
+        }
+        if (!padModeIndicatorsInitialized) {
+            for (int k = 0; k < 16; ++k) lastPlaybackMode[k] = 255; // force update
+            padModeIndicatorsInitialized = true;
+        }
+    }
+
+    /* The sound: its file and the view (FILE, or the live scope) above the
+     * picture, how far it has played under it. */
+    lv_obj_t * sound = lv_obj_create(mid);
+    lv_obj_remove_style_all(sound);
+    lv_obj_set_height(sound, 4 * kCell + 3 * kGap);
+    lv_obj_set_flex_grow(sound, 1);
+    lv_obj_set_flex_flow(sound, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(sound, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(sound, 4, 0);
+    lv_obj_remove_flag(sound, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t * nameRow = make_row(sound, 12);
+    lv_obj_t * fileLabel = lv_label_create(nameRow);
+    static char audio_name[32];
+    static char audio_name_prev[32];
+    lv_subject_init_int(&s_audio_idx, 0);
+    lv_subject_init_string(&s_audio_name, audio_name, audio_name_prev, 32, "Press any pad");
+    lv_label_bind_text(fileLabel, &s_audio_name, NULL);
+    lv_obj_set_style_text_font(fileLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(fileLabel, kText, 0);
+    lv_label_set_long_mode(fileLabel, LV_LABEL_LONG_DOT);
+    lv_obj_set_flex_grow(fileLabel, 1);
+
+    waveformModeLabel = lv_label_create(nameRow);
+    lv_label_set_text_static(waveformModeLabel, "FILE");
+    lv_obj_set_style_text_font(waveformModeLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(waveformModeLabel, kAccent, 0);
+    lv_obj_add_flag(waveformModeLabel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(waveformModeLabel, waveform_mode_click_cb, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t * wavePanel = lv_obj_create(sound);
+    lv_obj_remove_style_all(wavePanel);
+    lv_obj_set_size(wavePanel, WAVEFORM_CANVAS_WIDTH + 6, WAVEFORM_CANVAS_HEIGHT + 6);
+    lv_obj_set_style_bg_color(wavePanel, kPanel, 0);
+    lv_obj_set_style_bg_opa(wavePanel, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(wavePanel, 6, 0);
+    lv_obj_remove_flag(wavePanel, LV_OBJ_FLAG_SCROLLABLE);
+    waveformCanvas = waveform_view_create(wavePanel);
+    lv_obj_center(waveformCanvas);
+    lv_obj_add_event_cb(waveformCanvas, waveform_mode_click_cb, LV_EVENT_CLICKED, nullptr);
+
+    scopeView = nullptr;
+    ensure_scope_view();
+    scopeSourceKind = -2;
+    waveformDisplayMode = WaveformDisplayMode::File;
+
+    lv_obj_t * timeLabel = lv_label_create(sound);
+    static char audio_time[10];
+    static char audio_time_prev[10];
+    lv_subject_init_string(&s_audio_time, audio_time, audio_time_prev, 10, "0:00:0");
+    lv_label_bind_text(timeLabel, &s_audio_time, NULL);
+    lv_obj_set_style_text_font(timeLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(timeLabel, kDim, 0);
+
+    vuMeter = create_vu_meter(mid, 4, 4 * kCell + 3 * kGap);
+
+    // -- the switches, and the way into the pad --
+    lv_obj_t * bottom = make_row(body, 24);
+    /* Performance switches: lit (the accent) while they hold. */
+    fullLevelBtn = make_button(bottom, 80, "FULL LEVEL", [](lv_event_t *) {
+        auto& logic = getSamplerPadLogic();
+        logic.setFullLevel(!logic.fullLevel());
+        perf_modes_sync();
+    });
+    lv_obj_set_flex_grow(fullLevelBtn, 1);
+    levelsBtn = make_button(bottom, 80, "", [](lv_event_t *) {
+        auto& logic = getSamplerPadLogic();
+        logic.setSixteenLevels(!logic.sixteenLevels());
+        perf_modes_sync();
+    });
+    lv_obj_set_flex_grow(levelsBtn, 1);
+    levelsLabel = lv_obj_get_child(levelsBtn, 0);
+    perf_modes_sync();
 
     /* Preview: play the kit's own preview.mid through the pads, looping, so a
      * kit can be auditioned without a host. Driven by an lv_timer rather than a
      * task -- see PreviewPlayer for why that is good enough. */
-    previewBtn = lv_button_create(cont);
-    lv_obj_align(previewBtn, LV_ALIGN_BOTTOM_MID, 0, -8);
-    lv_obj_add_event_cb(previewBtn, [](lv_event_t * e) {
-        (void)e;
+    previewBtn = make_button(bottom, 30, "", [](lv_event_t *) {
         auto& pp = crosspad_sampler::previewPlayer();
         if (pp.running()) { pp.stop(); preview_sync_label(); return; }
         crosspad::KitInfo * kit = crosspad::getKitManager()
@@ -1051,182 +1215,42 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
             }, 10, nullptr);
         }
         preview_sync_label();
-    }, LV_EVENT_CLICKED, NULL);
+    });
     /* The timer outlives the click handler, so it has to die with the panel. */
     lv_obj_add_event_cb(previewBtn, [](lv_event_t * e) {
         (void)e;
         crosspad_sampler::previewPlayer().stop();
         if (previewTimer) { lv_timer_delete(previewTimer); previewTimer = nullptr; }
     }, LV_EVENT_DELETE, NULL);
-    lv_obj_add_style(previewBtn, &styleButton, 0);
-    lv_obj_add_style(previewBtn, &styleButtonPressed, LV_STATE_PRESSED);
-    lv_obj_add_style(previewBtn, &styleButtonInactive, LV_STATE_DISABLED);
-    previewLabel = lv_label_create(previewBtn);
-    lv_obj_set_style_text_color(previewLabel, lv_color_hex(0x000000), 0);
+    previewLabel = lv_obj_get_child(previewBtn, 0);
     preview_sync_label();
-    /* Parked: the preview beat is off the bottom row for now, so Back and Edit
-     * get the width instead. The player and its timer still exist, so bringing
-     * the button back is a matter of unhiding it. */
+    /* Parked: the preview beat is off the bottom row for now. The player and
+     * its timer still exist, so bringing the button back is a matter of
+     * unhiding it. */
     lv_obj_add_flag(previewBtn, LV_OBJ_FLAG_HIDDEN);
 
-    g_samplerPadEditorLogic = std::make_shared<PadEditorLogicHandler>();
-    crosspad::getPadManager().registerPadLogic("Pad editor", g_samplerPadEditorLogic);
-
-    static auto s_samplerLogic = std::shared_ptr<SamplerPadLogic>(&g_samplerPadLogic, [](SamplerPadLogic*){});
-    crosspad::getPadManager().registerPadLogic("Sampler", s_samplerLogic);
-    crosspad::getPadManager().setActivePadLogic("Sampler");
-
-    // NULL callbacks: our own events are attached below.
-    buttonFrame = createButtons(cont, NULL);
-    /* Positioned later, flush with the scene dropdown -- the anchor has to
-     * exist first. */
-
-    if (buttonFrame) {
-        uint32_t cnt = lv_obj_get_child_cnt(buttonFrame);
-        for (uint32_t i = 0; i < cnt; ++i) {
-            lv_obj_t * btn = lv_obj_get_child(buttonFrame, i);
-            if (!btn) continue;
-            lv_obj_add_event_cb(btn, Sampler_pad_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * editBtn = make_button(bottom, 80, "EDIT " LV_SYMBOL_RIGHT, [](lv_event_t * e) {
+        LV_LOG_INFO("Opening pad editor");
+        lv_obj_t * cont = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
+        if (!cont) return;
+        crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
+        if (kit && kit->engine == crosspad::KitEngine::Pitched) {
+            pitched_editor_create(cont);
+        } else {
+            pad_editor_create(cont, nullptr);
         }
-        for (int pad = 0; pad < 16; ++pad) {
-            int btnIndex = notes[pad] - 1; // button child index for this pad
-            if (btnIndex >= 0 && btnIndex < (int)cnt) {
-                lv_obj_t * btn = lv_obj_get_child(buttonFrame, btnIndex);
-                if (btn && padModeIndicators[pad] == nullptr) {
-                    padModeIndicators[pad] = lv_label_create(btn);
-                    lv_label_set_text(padModeIndicators[pad], "");
-                    lv_obj_set_style_text_font(padModeIndicators[pad], &lv_font_montserrat_10, 0);
-                    lv_obj_set_style_text_color(padModeIndicators[pad], lv_color_hex(0x000000), 0);
-                    lv_obj_align(padModeIndicators[pad], LV_ALIGN_TOP_LEFT, 1, 0);
-                }
-            }
-        }
-        if (!padModeIndicatorsInitialized) {
-            for (int k = 0; k < 16; ++k) lastPlaybackMode[k] = 255; // force update
-            padModeIndicatorsInitialized = true;
-        }
-    }
+    }, cont);
+    lv_obj_set_flex_grow(editBtn, 1);
 
+    /* The encoder: out, the kit, the switches, the editor -- in reading order. */
+    lv_group_add_obj(g_sampler, backBtn);
+    lv_group_add_obj(g_sampler, pickKitBtn);
+    lv_group_add_obj(g_sampler, fullLevelBtn);
+    lv_group_add_obj(g_sampler, levelsBtn);
+    lv_group_add_obj(g_sampler, editBtn);
 
-    lv_obj_t * padLabel = lv_label_create(cont);
-    lv_obj_align(padLabel, LV_ALIGN_BOTTOM_LEFT, 2, -2);
-    lv_obj_set_style_text_opa(padLabel, LV_OPA_70, 0);
-    lv_subject_init_int(&s_pad_sampler, 0);
-    lv_label_bind_text(padLabel, &s_pad_sampler, "PAD: %d");
-
-    /* "KITS", not a list glyph. The icon was recoloured to the theme's primary,
-     * which on this background came out near-black: you could not see it, and
-     * even spotted it did not say what it opened. A light plate with a word on
-     * it does both. */
-    pickKitBtn = lv_button_create(cont);
-    lv_obj_set_size(pickKitBtn, 72, 20);
-    /* Off the status bar: flush against it the plate read as part of the bar
-     * rather than as something on this screen. */
-    lv_obj_align(pickKitBtn, LV_ALIGN_TOP_RIGHT, -2, 6);
-    lv_obj_add_event_cb(pickKitBtn, PickKit_button_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_style(pickKitBtn, &styleButtonPressed, LV_STATE_PRESSED);
-    lv_obj_set_style_bg_color(pickKitBtn, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_bg_opa(pickKitBtn, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(pickKitBtn, 5, 0);
-    lv_obj_set_style_pad_all(pickKitBtn, 0, 0);
-    lv_obj_t * pickKitLabel = lv_label_create(pickKitBtn);
-    lv_label_set_text(pickKitLabel, "Browse kit");
-    lv_obj_set_style_text_font(pickKitLabel, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(pickKitLabel, lv_color_hex(0x101010), 0);
-    lv_obj_center(pickKitLabel);
-
-    apply_focus_skin(pickKitBtn);
-    if (g_sampler) {
-        lv_group_add_obj(g_sampler, pickKitBtn);
-    }
-
-    waveformCanvas = waveform_view_create(cont);
-    lv_obj_align(waveformCanvas, LV_ALIGN_RIGHT_MID, -25, -10);
-
-    /* Full level / 16 levels, under the waveform: performance switches, so
-     * they stay in reach while the Advanced strip covers the pads. Lit the
-     * way the metronome is lit while it counts. */
-    fullLevelBtn = lv_button_create(cont);
-    lv_obj_set_size(fullLevelBtn, 72, 22);
-    lv_obj_align_to(fullLevelBtn, waveformCanvas, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 8);
-    lv_obj_add_style(fullLevelBtn, &styleButtonPressed, LV_STATE_PRESSED);
-    lv_obj_set_style_radius(fullLevelBtn, 5, 0);
-    lv_obj_set_style_pad_all(fullLevelBtn, 0, 0);
-    lv_obj_add_event_cb(fullLevelBtn, [](lv_event_t *) {
-        auto& logic = getSamplerPadLogic();
-        logic.setFullLevel(!logic.fullLevel());
-        perf_modes_sync();
-    }, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * fullLevelLabel = lv_label_create(fullLevelBtn);
-    lv_label_set_text(fullLevelLabel, "Full level");
-    lv_obj_set_style_text_font(fullLevelLabel, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(fullLevelLabel, lv_color_hex(0x101010), 0);
-    lv_obj_center(fullLevelLabel);
-    apply_focus_skin(fullLevelBtn);
-    if (g_sampler) lv_group_add_obj(g_sampler, fullLevelBtn);
-
-    levelsBtn = lv_button_create(cont);
-    lv_obj_set_size(levelsBtn, 72, 22);
-    lv_obj_align_to(levelsBtn, waveformCanvas, LV_ALIGN_OUT_BOTTOM_RIGHT, 0, 8);
-    lv_obj_add_style(levelsBtn, &styleButtonPressed, LV_STATE_PRESSED);
-    lv_obj_set_style_radius(levelsBtn, 5, 0);
-    lv_obj_set_style_pad_all(levelsBtn, 0, 0);
-    lv_obj_add_event_cb(levelsBtn, [](lv_event_t *) {
-        auto& logic = getSamplerPadLogic();
-        logic.setSixteenLevels(!logic.sixteenLevels());
-        perf_modes_sync();
-    }, LV_EVENT_CLICKED, NULL);
-    levelsLabel = lv_label_create(levelsBtn);
-    lv_obj_set_style_text_font(levelsLabel, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(levelsLabel, lv_color_hex(0x101010), 0);
-    lv_obj_center(levelsLabel);
-    apply_focus_skin(levelsBtn);
-    if (g_sampler) lv_group_add_obj(g_sampler, levelsBtn);
-    perf_modes_sync();
-    lv_obj_add_event_cb(waveformCanvas, waveform_mode_click_cb, LV_EVENT_CLICKED, nullptr);
-
-    scopeView = nullptr;
-    ensure_scope_view();
-    scopeSourceKind = -2;
-    waveformDisplayMode = WaveformDisplayMode::File;
-
-    waveformModeLabel = lv_label_create(cont);
-    lv_label_set_text_static(waveformModeLabel, "FILE");
-    lv_obj_set_style_text_font(waveformModeLabel, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(waveformModeLabel, lv_color_hex(0x00FF88), 0);
-    lv_obj_set_style_text_opa(waveformModeLabel, LV_OPA_70, 0);
-    lv_obj_align_to(waveformModeLabel, waveformCanvas, LV_ALIGN_TOP_RIGHT, -2, 1);
-    lv_obj_add_flag(waveformModeLabel, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(waveformModeLabel, waveform_mode_click_cb, LV_EVENT_CLICKED, nullptr);
-
-    /* On the waveform's axis: the grid and the wave share a centre line, which
-     * is what the eye reads as the two halves of the screen belonging
-     * together. */
-    lv_obj_align_to(buttonFrame, waveformCanvas, LV_ALIGN_OUT_LEFT_MID, -10, 0);
+    show_selected_pad(-1);
     lv_obj_update_layout(cont);
-
-    lv_obj_t * fileLabel = lv_label_create(cont);
-    static char audio_name[32];
-    static char audio_name_prev[32];
-    lv_subject_init_int(&s_audio_idx, 0);
-    lv_subject_init_string(&s_audio_name, audio_name, audio_name_prev, 32, "Press any pad");
-    lv_label_bind_text(fileLabel, &s_audio_name, NULL);
-    lv_obj_set_style_text_font(fileLabel, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(fileLabel, lv_color_hex(0x00FF88), 0);
-    lv_obj_set_style_text_opa(fileLabel, LV_OPA_70, 0);
-    lv_obj_align_to(fileLabel, waveformCanvas, LV_ALIGN_BOTTOM_LEFT, 2, -2);
-    waveformFileLabel = fileLabel;
-
-    lv_obj_t * timeLabel = lv_label_create(cont);
-    static char audio_time[10];
-    static char audio_time_prev[10];
-    lv_subject_init_string(&s_audio_time, audio_time, audio_time_prev, 10, "0:00:0");
-    lv_label_bind_text(timeLabel, &s_audio_time, NULL);
-    lv_obj_set_style_text_font(timeLabel, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(timeLabel, lv_color_hex(0x00FF88), 0);
-    lv_obj_set_style_text_opa(timeLabel, LV_OPA_70, 0);
-    lv_obj_align_to(timeLabel, waveformCanvas, LV_ALIGN_BOTTOM_RIGHT, -2, -2);
-    waveformTimeLabel = timeLabel;
 
     timerPad = lv_timer_create(check_pad_timer_cb, 50, NULL); // 50ms = 20fps
     lv_timer_ready(timerPad);
@@ -1245,9 +1269,6 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     } else {
         lv_subject_copy_string(&s_kit_name, "No Kit");
     }
-
-    vuMeter = create_vu_meter(cont, 6, 85);
-    lv_obj_align(vuMeter, LV_ALIGN_RIGHT_MID, -4, -3);
 
     return cont;
 }
@@ -1302,13 +1323,12 @@ void sampler_panel_destroy(lv_obj_t * panel)
     // Other globals into UI objects, to survive the async deletion.
     buttonFrame = nullptr;
     pickKitBtn = nullptr;
-    fullLevelBtn = levelsBtn = levelsLabel = nullptr;
+    fullLevelBtn = levelsBtn = levelsLabel = padChip = nullptr;
+    s_selectedPad = -1;
     waveformCanvas = nullptr;
     waveformPlayhead = nullptr;
     waveformStartMarker = nullptr;
     waveformEndMarker = nullptr;
-    waveformFileLabel = nullptr;
-    waveformTimeLabel = nullptr;
     waveformModeLabel = nullptr;
     if (scopeView) {
         scope_view_set_active(scopeView, false);

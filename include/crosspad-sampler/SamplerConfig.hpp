@@ -23,10 +23,14 @@ constexpr uint32_t DEFAULT_PAD_COLOR     = 0x20FF10;
 constexpr uint32_t DEFAULT_PRESSED_COLOR = 0xFF1020;
 constexpr uint32_t DEFAULT_PLAYING_COLOR = 0x320005;
 
-// Waveform marker colors
-constexpr uint32_t WAVEFORM_START_COLOR = 0x00FF00;  // green
-constexpr uint32_t WAVEFORM_END_COLOR   = 0xFF0000;  // red
-constexpr uint32_t WAVEFORM_HEAD_COLOR  = 0xFF0000;  // red playhead
+// Waveform colours, the pad editor's: the sample on a lit field, the part
+// outside the trim greyed, start teal, end red, the playhead white.
+constexpr uint32_t WAVEFORM_BG_COLOR    = 0x263019;
+constexpr uint32_t WAVEFORM_WAVE_COLOR  = 0x9FD63A;
+constexpr uint32_t WAVEFORM_DIM_COLOR   = 0x20242A;
+constexpr uint32_t WAVEFORM_START_COLOR = 0x4FE0B0;
+constexpr uint32_t WAVEFORM_END_COLOR   = 0xFF5C5C;
+constexpr uint32_t WAVEFORM_HEAD_COLOR  = 0xFFFFFF;
 
 // Pad note mapping: physical pad index (0-15) -> displayed label number (1-16)
 // Bottom-left is pad 0 displayed as "1", top-right is pad 15 displayed as "16"

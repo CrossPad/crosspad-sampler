@@ -98,10 +98,10 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
 {
     lv_obj_t* cont = lv_obj_create(parent);
     lv_obj_set_size(cont, WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT);
-    lv_obj_set_style_bg_color(cont, lv_color_hex(0x111111), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(cont, color_from_hex(WAVEFORM_BG_COLOR), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(cont, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_width(cont, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(cont, lv_color_hex(0x444444), LV_PART_MAIN);
+    lv_obj_set_style_border_width(cont, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(cont, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(cont, 0, LV_PART_MAIN);
     lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(cont, LV_OBJ_FLAG_CLICKABLE);
@@ -121,7 +121,7 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
     lv_obj_set_size(canvas, WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT);
     lv_obj_align(canvas, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_clear_flag(canvas, LV_OBJ_FLAG_CLICKABLE);
-    lv_canvas_fill_bg(canvas, lv_color_hex(0x111111), LV_OPA_COVER);
+    lv_canvas_fill_bg(canvas, color_from_hex(WAVEFORM_BG_COLOR), LV_OPA_COVER);
 
     // Playhead, child 1.
     lv_obj_t* playhead = lv_obj_create(cont);
@@ -173,8 +173,8 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
     for (int i = 0; i < 2; ++i) {
         lv_obj_t* dim = lv_obj_create(cont);
         lv_obj_set_size(dim, 1, WAVEFORM_CANVAS_HEIGHT);
-        lv_obj_set_style_bg_color(dim, lv_color_hex(0x000000), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(dim, LV_OPA_60, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(dim, color_from_hex(WAVEFORM_DIM_COLOR), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(dim, LV_OPA_80, LV_PART_MAIN);
         lv_obj_set_style_border_width(dim, 0, LV_PART_MAIN);
         lv_obj_set_style_radius(dim, 0, LV_PART_MAIN);
         lv_obj_set_style_pad_all(dim, 0, LV_PART_MAIN);
@@ -231,7 +231,7 @@ static void draw_from_buffer(lv_obj_t* waveformView, uint32_t actualSamples)
     lv_obj_t* canvas = lv_obj_get_child(waveformView, 0);
     if (!canvas) return;
 
-    lv_canvas_fill_bg(canvas, lv_color_hex(0x111111), LV_OPA_COVER);
+    lv_canvas_fill_bg(canvas, color_from_hex(WAVEFORM_BG_COLOR), LV_OPA_COVER);
 
     if (actualSamples < 2) return;
 
@@ -240,7 +240,7 @@ static void draw_from_buffer(lv_obj_t* waveformView, uint32_t actualSamples)
 
     lv_draw_line_dsc_t dsc;
     lv_draw_line_dsc_init(&dsc);
-    dsc.color   = lv_color_hex(0x00AAFF);
+    dsc.color   = color_from_hex(WAVEFORM_WAVE_COLOR);
     dsc.width   = 1;
     dsc.opa     = LV_OPA_COVER;
 
@@ -321,7 +321,7 @@ void waveform_view_clear(lv_obj_t* waveformView)
 {
     lv_obj_t* canvas = lv_obj_get_child(waveformView, 0);
     if (canvas) {
-        lv_canvas_fill_bg(canvas, lv_color_hex(0x111111), LV_OPA_COVER);
+        lv_canvas_fill_bg(canvas, color_from_hex(WAVEFORM_BG_COLOR), LV_OPA_COVER);
     }
 
     if (s_pendingView == waveformView) pending_stop();
