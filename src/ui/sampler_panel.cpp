@@ -16,6 +16,7 @@
 #include "crosspad-gui/crosspad_gui.h"   // styles, widgets, App class
 #include "crosspad-gui/components/app_orchestrator.h"
 #include "crosspad-gui/components/scope_view.h"
+#include "crosspad-gui/components/ui_modal.h"
 
 // crosspad-core
 #include <crosspad/pad/PadManager.hpp>
@@ -392,7 +393,7 @@ void sampler_on_engine_note_off(uint8_t note, uint8_t wavIdx)
     (void)wavIdx;
 }
 
-static lv_obj_t * g_saveConfirmMsgbox = NULL;
+static lv_obj_t * g_saveConfirmDialog = NULL;   // the "Unsaved changes" dialog while it is open
 
 static bool HasDirtyPads(std::vector<uint8_t>& dirtyPadNumbers) {
     dirtyPadNumbers.clear();
@@ -434,96 +435,51 @@ static void close_sampler_async(void*) {
     }
 }
 
+/* Save, Discard or Cancel on leaving with edits. Index -1 is the power
+ * button's back, or the panel going first; either stays like Cancel. */
+static void save_choice_cb(int index, void *) {
+    g_saveConfirmDialog = NULL;
+    crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
+    if (index == 0) {
+        LV_LOG_INFO("Saving kit before closing...");
+        auto* kitMgr = crosspad::getKitManager();
+        if (kitMgr && kit) kitMgr->saveKit(*kit);
+    } else if (index == 1) {
+        LV_LOG_INFO("Discarding changes - reloading kit...");
+    } else {
+        LV_LOG_INFO("Cancel close operation");
+        return;
+    }
+    if (kit != NULL) {
+        kit->instrument.dirty = false;
+        for (uint8_t i = 0; i < KIT_PADS; i++) {
+            kit->pads[i].dirty = false;
+            kit->pads[i].dirtyModified = false;
+        }
+        // Discard: reload the kit from storage.
+        auto* kitMgr = crosspad::getKitManager();
+        if (index == 1 && kitMgr) kitMgr->loadKit(*kit);
+    }
+    lv_async_call(close_sampler_async, nullptr);
+}
+
 static void ShowSaveConfirmationDialog(lv_obj_t * panel) {
     std::vector<uint8_t> dirtyPadNumbers;
     if (!HasDirtyPads(dirtyPadNumbers)) {
         lv_async_call(close_sampler_async, nullptr);
         return;
     }
+    if (g_saveConfirmDialog != NULL) return;   // already asking
 
-    if (g_saveConfirmMsgbox != NULL) {
-        lv_msgbox_close(g_saveConfirmMsgbox);
-        g_saveConfirmMsgbox = NULL;
-    }
-
-    g_saveConfirmMsgbox = lv_msgbox_create(lv_layer_top());
-    lv_obj_t * closeBtn = lv_msgbox_add_close_button(g_saveConfirmMsgbox);
-
-    lv_msgbox_add_title(g_saveConfirmMsgbox, "Unsaved Changes");
-
-    std::string message = "Do you want to save changes to the kit?\n\n";
-    if (!dirtyPadNumbers.empty()) message += FormatDirtyPadsList(dirtyPadNumbers);
-    lv_msgbox_add_text(g_saveConfirmMsgbox, message.c_str());
-
-    lv_obj_t * saveBtn = lv_msgbox_add_footer_button(g_saveConfirmMsgbox, "Save");
-    lv_obj_t * discardBtn = lv_msgbox_add_footer_button(g_saveConfirmMsgbox, "Discard");
-    lv_obj_t * cancelBtn = lv_msgbox_add_footer_button(g_saveConfirmMsgbox, "Cancel");
-
-    lv_obj_add_style(saveBtn, &styleButton, 0);
-    lv_obj_add_style(discardBtn, &styleButton, 0);
-    lv_obj_add_style(cancelBtn, &styleButton, 0);
-
-    lv_obj_add_event_cb(saveBtn, [](lv_event_t * e) {
-        LV_LOG_INFO("Saving kit before closing...");
-        auto* kitMgr = crosspad::getKitManager();
-        if (kitMgr && kitMgr->getCurrentKit()) {
-            kitMgr->saveKit(*kitMgr->getCurrentKit());
-        }
-
-        crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
-        if (kit != NULL) {
-            kit->instrument.dirty = false;
-            for (uint8_t i = 0; i < KIT_PADS; i++) {
-                kit->pads[i].dirty = false;
-                kit->pads[i].dirtyModified = false;
-            }
-        }
-
-        if (g_saveConfirmMsgbox) {
-            lv_msgbox_close(g_saveConfirmMsgbox);
-            g_saveConfirmMsgbox = NULL;
-        }
-        lv_async_call(close_sampler_async, nullptr);
-    }, LV_EVENT_CLICKED, NULL);
-
-    // Discard: reload the kit from storage.
-    lv_obj_add_event_cb(discardBtn, [](lv_event_t * e) {
-        LV_LOG_INFO("Discarding changes - reloading kit...");
-
-        crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
-        if (kit != NULL) {
-                kit->instrument.dirty = false;
-                for (uint8_t i = 0; i < KIT_PADS; i++) {
-                kit->pads[i].dirty = false;
-                kit->pads[i].dirtyModified = false;
-            }
-
-            auto* kitMgr2 = crosspad::getKitManager();
-            if (kitMgr2 && kit) kitMgr2->loadKit(*kit);
-        }
-
-        if (g_saveConfirmMsgbox) {
-            lv_msgbox_close(g_saveConfirmMsgbox);
-            g_saveConfirmMsgbox = NULL;
-        }
-        lv_async_call(close_sampler_async, nullptr);
-    }, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_add_event_cb(cancelBtn, [](lv_event_t * e) {
-        LV_LOG_INFO("Cancel close operation");
-        if (g_saveConfirmMsgbox) {
-            lv_msgbox_close(g_saveConfirmMsgbox);
-            g_saveConfirmMsgbox = NULL;
-        }
-    }, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_add_event_cb(closeBtn, [](lv_event_t * e) {
-        LV_LOG_INFO("Cancel close operation (close button)");
-        if (g_saveConfirmMsgbox) {
-            lv_msgbox_close(g_saveConfirmMsgbox);
-            g_saveConfirmMsgbox = NULL;
-        }
-    }, LV_EVENT_CLICKED, NULL);
+    std::string message = "Save the changes to the kit before leaving?";
+    if (!dirtyPadNumbers.empty()) message += "\n" + FormatDirtyPadsList(dirtyPadNumbers);
+    static const ui_modal_button_t kButtons[] = {
+        {"Save", UI_MODAL_BUTTON_PRIMARY},
+        {"Discard", UI_MODAL_BUTTON_DANGER},
+        {"Cancel", UI_MODAL_BUTTON_NORMAL},
+    };
+    g_saveConfirmDialog = ui_modal_choice("Unsaved changes", message.c_str(), kButtons, 3, 0,
+                                          save_choice_cb, nullptr, nullptr);
 }
 
 static void PickKit_button_cb(lv_event_t * e) {
@@ -1340,7 +1296,8 @@ void sampler_panel_destroy(lv_obj_t * panel)
     scopeSourceKind = -2;
     timerPad = nullptr;
     g_sampler = nullptr;
-    g_saveConfirmMsgbox = nullptr; // Clear msgbox reference
+    /* On the top layer, not in the panel: it would outlive it. */
+    if (g_saveConfirmDialog) ui_modal_confirm_dismiss(g_saveConfirmDialog, false);
 
     g_parentContainer = nullptr;
 

@@ -1,7 +1,7 @@
 {
   "name": "Sampler",
   "id": "sampler",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Sample player with 16 pads, waveform editing, kit management",
   "category": "music",
   "icon": "audio.png",
@@ -9,9 +9,10 @@
   "platforms": ["esp-idf", "arduino"],
   "requires": {
     "crosspad-core": ">=1.31.0",
-    "crosspad-gui": ">=0.2.1"
+    "crosspad-gui": ">=1.16.0"
   },
   "changelog": [
+    "0.8.0: the Unsaved changes dialog in the look of the rest of the device -- Save, Discard (red), Cancel, the pads changed, the encoder on Save, the power button backs out of it; requires crosspad-gui 1.16",
     "0.7.0: the Sampler's screen in the device's design, as the Recorder and the pad editor wear it -- dark, flat buttons, the accent on what is on: back, the pad last hit (in its colour) and the kit (opens the browser) along the top; the pads in the kit's colours, faint at rest, full while they sound, the last one outlined; the sample's file and view (FILE, live scope) over the waveform, the time under it, the meter beside; FULL LEVEL, 16 LEVELS, EDIT along the bottom. The waveform in the pad editor's colours (a lit field, the part outside the trim greyed, start teal, end red, the playhead white), in the pitched editor too",
     "0.6.0: what the pad editor does in the background shows on the waveform, where it is looked at: PROCESSING with the percentage and which of PITCH, HP, LP, REV the copy carries, or LOADING and the file, one line and a thin bar at the top, the dots moving while the card is waited on; the line under the waveform no longer says it",
     "0.5.0: the pad editor laid out as the Recorder is -- the pad in its colour (turned: the colour), its sample, REV, the mode, COPY; VOL, PAN, PITCH, HP, LP, CHOKE; the sample drawn with the trim lit; START/END turned column then millisecond with a zoom; PLAY, LOOP (with a playhead), FULL, DEL. REV (backwards, and drawn so -- mirrored in the editor and the panel, START on the left over the sample's end, turned the way it is heard), PITCH -12..+12 semitones (varispeed), HP and LP 12 dB/octave filters in thirds of an octave: the player can do none of it, so such a pad plays a copy rendered once in .fx/ beside its sample (by the editor when the values settle, by the kit load task when one is missing); kit.json keeps pitch, hp, lp, reverse. The colour is saved now, and a new or removed sample asks to be saved; requires core 1.31; a value being turned reads dark on the accent: the text colour sits on the button, which is the only thing ever EDITED, not on its label",
