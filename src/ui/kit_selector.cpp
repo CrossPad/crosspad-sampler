@@ -10,7 +10,9 @@
 // Two lists, LEGACY and USER, switched on the status bar: the kits a board
 // ships with, and the ones made on it (KitInfo::isUser(), the Slicer's). A row
 // is a place in the list shown, s_kitOf[row] the kit it stands for; the
-// browser opens on the list the loaded kit is in.
+// browser opens on the list the loaded kit is in. + NEW stands beside those
+// two and belongs to USER, where it is the only thing shown: it makes an empty
+// kit of one's own, which the pad editor then fills.
 
 #ifdef USE_LVGL
 
@@ -25,6 +27,7 @@
 #include <lvgl_private.h>   // lv_image_decoder_dsc_t, for warming the image cache
 
 #include <cstdio>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -119,6 +122,7 @@ std::vector<int> s_kitOf;   ///< row -> kit id in the manager, for the list show
 enum class Segment : uint8_t { Legacy, User };
 Segment   s_segment = Segment::Legacy;
 lv_obj_t* s_segBtn[2] = {};
+lv_obj_t* s_newBtn    = nullptr;   ///< + NEW, shown with the USER list only
 
 crosspad::KitInfo* kit_of_row(int row) {
     auto* mgr = crosspad::getKitManager();
@@ -685,6 +689,9 @@ void group_reorder() {
     lv_group_remove_all_objs(s_group);
     if (s_backBtn) lv_group_add_obj(s_group, s_backBtn);
     for (lv_obj_t* b : s_segBtn) if (b) lv_group_add_obj(s_group, b);
+    /* Hidden with the LEGACY list, and a hidden object is one the group skips
+     * on its own -- there is nothing to take out of it. */
+    if (s_newBtn) lv_group_add_obj(s_group, s_newBtn);
     for (int i = s_winFirst; i <= s_winLast; ++i) {
         if (s_rows[i].obj) lv_group_add_obj(s_group, s_rows[i].obj);
     }
@@ -756,7 +763,7 @@ void build_rows() {
 
     if (s_rows.empty()) {
         lv_obj_t* msg = lv_label_create(s_list);
-        lv_label_set_text(msg, s_segment == Segment::User ? "No kits of your own yet.\nMake one in the Slicer:\nSAVE KIT."
+        lv_label_set_text(msg, s_segment == Segment::User ? "No kits of your own yet.\nMake one with + NEW,\nor in the Slicer: SAVE KIT."
                                                           : "No kits found\non the SD card");
         lv_obj_set_style_text_opa(msg, LV_OPA_50, 0);
         lv_obj_set_style_text_align(msg, LV_TEXT_ALIGN_CENTER, 0);
@@ -795,6 +802,12 @@ void segment_paint() {
         lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
         lv_obj_set_style_text_color(lv_obj_get_child(b, 0), on ? CROSSPAD_THEME_BG_DEEP : lv_color_white(), 0);
     }
+    /* A kit of one's own is only ever made in the USER list, so + NEW is only
+     * there -- it would read as "add to the factory kits" beside LEGACY. */
+    if (s_newBtn) {
+        if (s_segment == Segment::User) lv_obj_remove_flag(s_newBtn, LV_OBJ_FLAG_HIDDEN);
+        else                            lv_obj_add_flag(s_newBtn, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 /// The other list: the rows are rebuilt for it, the frame and the cover follow.
@@ -815,22 +828,120 @@ void segment_cb(lv_event_t* e) {
     if (lv_obj_t* b = s_segBtn[(int)seg]) lv_group_focus_obj(b);
 }
 
-lv_obj_t* segment_button(lv_obj_t* parent, const char* text, Segment seg, int32_t x) {
+/// Sixteen hues round the wheel, the colours a sliced kit gets, so a new kit's
+/// pads are told apart on the grid instead of being black.
+uint32_t pad_hue(int i) {
+    const float h = (float)(i % KIT_PADS) / (float)KIT_PADS * 6.0f;
+    const int   k = (int)h;
+    const float f = h - (float)k;
+    float r = 0, g = 0, b = 0;
+    switch (k) {
+        case 0:  r = 1;     g = f;     break;
+        case 1:  r = 1 - f; g = 1;     break;
+        case 2:  g = 1;     b = f;     break;
+        case 3:  g = 1 - f; b = 1;     break;
+        case 4:  r = f;     b = 1;     break;
+        default: r = 1;     b = 1 - f; break;
+    }
+    return ((uint32_t)(r * 255.0f) << 16) | ((uint32_t)(g * 255.0f) << 8) | (uint32_t)(b * 255.0f);
+}
+
+/// A kit of one's own, empty: a folder with a kit.json in it, sixteen coloured
+/// pads and no samples. What fills it is the pad editor in the Sampler, which
+/// is also what the USER list used to send people to the Slicer for.
+///
+/// Nothing here knows a path by heart. The kits root is read back off a kit
+/// that is already listed -- "<root>/<folder>/kit.json" -- so this follows
+/// wherever the board scanned, and the name is tried against the card as well
+/// as against the list: a folder nobody has scanned yet still holds somebody's
+/// kit.json, and writing over it would take their kit.
+void new_kit_cb(lv_event_t*) {
+    auto* mgr = crosspad::getKitManager();
+    if (!mgr || !s_list) return;
+
+    std::string root = "/crosspad/kits";
+    for (int i = 0, n = mgr->getKitCount(); i < n; ++i) {
+        const auto* k = mgr->getKit(i);
+        if (!k || k->path.size() < 3) continue;
+        const size_t file = k->path.find_last_of('/');
+        if (file == std::string::npos || file == 0) continue;
+        const size_t dir = k->path.find_last_of('/', file - 1);
+        if (dir == std::string::npos) continue;
+        root = k->path.substr(0, dir);
+        break;
+    }
+
+    std::string name, path;
+    bool free_name = false;
+    for (int n = 1; n <= 99 && !free_name; ++n) {
+        name = n == 1 ? "NEW KIT" : "NEW KIT " + std::to_string(n);
+        path = root + "/" + name + "/kit.json";
+        free_name = !std::ifstream(crosspad::kitFsPath(path)).good();
+    }
+    if (!free_name) {
+        if (s_statusLabel) lv_label_set_text(s_statusLabel, "no free name");
+        return;
+    }
+
+    crosspad::KitInfo info;
+    info.name     = name;
+    info.category = "user";          // what puts it in this list (KitInfo::isUser)
+    info.version  = "1.0";
+    info.path     = path;
+    for (int p = 0; p < KIT_PADS; ++p) {
+        info.pads[p].color = info.pads[p].color_pressed = pad_hue(p);
+    }
+    if (!mgr->saveKit(info)) {
+        if (s_statusLabel) lv_label_set_text(s_statusLabel, "card write failed");
+        return;
+    }
+    const int id = mgr->addKit(info.path);
+
+    s_building = true;
+    lv_obj_clean(s_list);
+    s_winFirst = 0; s_winLast = -1;
+    if (s_caret) lv_obj_add_flag(s_caret, LV_OBJ_FLAG_HIDDEN);
+    build_rows();
+    group_reorder();
+
+    const int row = id >= 0 ? row_of_kit(id) : -1;
+    if (row >= 0 && row < (int)s_rows.size()) {
+        ensure_window(row);
+        group_reorder();
+        select_row(row);
+        cover_show(row);
+    }
+    /* The focus stays on + NEW for the same reason the switch keeps it: the
+     * click that made the kit is still being read, and on a row it would load
+     * it. A turn of the encoder goes to the new kit, a press plays it. */
+    if (s_newBtn) lv_group_focus_obj(s_newBtn);
+    if (s_statusLabel) {
+        lv_label_set_text(s_statusLabel, id >= 0 ? name.c_str() : "made -- listed after a restart");
+    }
+}
+
+/// A chip on the status bar: the two list buttons and + NEW are all one.
+lv_obj_t* status_chip(lv_obj_t* parent, const char* text, int32_t x, int32_t w,
+                      lv_event_cb_t cb, void* ud) {
     lv_obj_t* b = lv_obj_create(parent);
     lv_obj_remove_style_all(b);
-    lv_obj_set_size(b, 58, kStatusH - 7);
+    lv_obj_set_size(b, w, kStatusH - 7);
     lv_obj_align(b, LV_ALIGN_LEFT_MID, x, 0);
     lv_obj_set_style_radius(b, 5, 0);
     lv_obj_set_style_outline_color(b, lv_color_white(), LV_STATE_FOCUSED);
     lv_obj_set_style_outline_width(b, 2, LV_STATE_FOCUSED);
     lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(b, segment_cb, LV_EVENT_CLICKED, (void*)(intptr_t)seg);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, ud);
     lv_obj_t* l = lv_label_create(b);
     lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
     lv_label_set_text(l, text);
     lv_obj_center(l);
     return b;
+}
+
+lv_obj_t* segment_button(lv_obj_t* parent, const char* text, Segment seg, int32_t x) {
+    return status_chip(parent, text, x, 58, segment_cb, (void*)(intptr_t)seg);
 }
 
 void reset_state();
@@ -905,8 +1016,13 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     }
     s_segBtn[0] = segment_button(status, "LEGACY", Segment::Legacy, 82);
     s_segBtn[1] = segment_button(status, "USER", Segment::User, 144);
+    s_newBtn    = status_chip(status, LV_SYMBOL_PLUS " NEW", 206, 52, new_kit_cb, nullptr);
+    lv_obj_set_style_bg_color(s_newBtn, CROSSPAD_THEME_CARD_DEEP, 0);
+    lv_obj_set_style_bg_opa(s_newBtn, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(lv_obj_get_child(s_newBtn, 0), lv_color_white(), 0);
     lv_group_add_obj(s_group, s_segBtn[0]);
     lv_group_add_obj(s_group, s_segBtn[1]);
+    lv_group_add_obj(s_group, s_newBtn);
     segment_paint();
 
     s_statusLabel = lv_label_create(status);
@@ -1049,6 +1165,7 @@ void reset_state() {
     s_rows.clear();
     s_kitOf.clear();
     s_segBtn[0] = s_segBtn[1] = nullptr;
+    s_newBtn = nullptr;
     s_winFirst = 0; s_winLast = -1;
     s_selected = s_loaded = -1;
     s_coverWanted = s_coverShown = -1;
