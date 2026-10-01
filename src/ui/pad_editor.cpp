@@ -105,6 +105,18 @@ lv_obj_t* s_busyBar = nullptr;
 lv_obj_t* s_info = nullptr;
 lv_obj_t* s_padBtn = nullptr;            // the pad, in its colour; turned, the colour
 lv_obj_t* s_fileBtn = nullptr;
+lv_obj_t* s_recBtn  = nullptr;      // record straight onto this pad
+lv_obj_t* s_meter   = nullptr;      // input level while a take runs
+lv_obj_t* s_meterBar[2] = {};
+lv_obj_t* s_meterText = nullptr;
+uint32_t  s_recStart = 0;           // tick the take began, for the time it shows
+
+/// Recording onto the pad. Stopping is its own step because the take is not on
+/// the card the moment stopRecording() returns -- the writer has a buffer to
+/// finish -- and the file is only worth anything once recStatus() says so.
+enum class Rec : uint8_t { Off, Running, Stopping };
+Rec  s_rec = Rec::Off;
+bool s_trimPending = false;         ///< the next picture to land gets trimmed to its sound
 lv_obj_t* s_revBtn = nullptr;
 lv_obj_t* s_copyBtn = nullptr;
 lv_obj_t* s_volBtn = nullptr;
@@ -366,7 +378,14 @@ void show_busy()
     static const char* const kDots[] = {".  ", ".. ", "...", "   "};
     const char* dots = kDots[(lv_tick_get() / 300) % 4];
     auto* st = tools();
-    const int pct = rendering && s_renderPending && st ? (int)st->jobProgress() : 0;
+    /* A figure only when something is reporting one. Two different waits end up
+     * here and only one of them counts: the card reader says how far through
+     * the file it is, while the engine taking the sample in says nothing at all
+     * -- and showing that one as "0%" read as a hang that never moved, which is
+     * exactly how it was reported. So the percentage appears when there is a
+     * job behind it and the dots carry the rest. */
+    const bool counted = st && (s_renderPending || s_ovPending);
+    const int pct = counted ? (int)st->jobProgress() : 0;
     std::string text;
     char buf[40];
     if (rendering) {
@@ -379,13 +398,14 @@ void show_busy()
             if (p->lp) text += "  LP " + fmt_hz(p->lp);
         }
     } else {
-        std::snprintf(buf, sizeof(buf), "LOADING%s  ", dots);
+        if (counted) std::snprintf(buf, sizeof(buf), "READING %d%%%s  ", pct, dots);
+        else         std::snprintf(buf, sizeof(buf), "LOADING%s  ", dots);
         text = buf + base_of(s_file);
     }
     set_text(s_busyText, text.c_str());
     lv_bar_set_value(s_busyBar, pct, LV_ANIM_OFF);
-    if (rendering) lv_obj_remove_flag(s_busyBar, LV_OBJ_FLAG_HIDDEN);
-    else           lv_obj_add_flag(s_busyBar, LV_OBJ_FLAG_HIDDEN);
+    if (counted) lv_obj_remove_flag(s_busyBar, LV_OBJ_FLAG_HIDDEN);
+    else         lv_obj_add_flag(s_busyBar, LV_OBJ_FLAG_HIDDEN);
     if (lv_obj_has_flag(s_busy, LV_OBJ_FLAG_HIDDEN)) lv_obj_remove_flag(s_busy, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -426,9 +446,54 @@ void show_marker_labels()
     label(s_endBtn, "END", s_editEnd);
 }
 
+/// REC while it is off, STOP while it runs, and red either way it is busy.
+void show_rec()
+{
+    if (s_recBtn) {
+        const bool live = s_rec != Rec::Off;
+        set_text(lv_obj_get_child(s_recBtn, 0), live ? LV_SYMBOL_STOP " STOP" : LV_SYMBOL_AUDIO " REC");
+        lv_obj_set_style_bg_color(s_recBtn, live ? lv_color_hex(0xFF5C5C) : CROSSPAD_THEME_CARD_DEEP, 0);
+    }
+    if (!s_meter) return;
+    if (s_rec == Rec::Off) {
+        if (!lv_obj_has_flag(s_meter, LV_OBJ_FLAG_HIDDEN)) lv_obj_add_flag(s_meter, LV_OBJ_FLAG_HIDDEN);
+        /* Back to the editor's own pace: the meter is the only thing here that
+         * wants more than five frames a second. */
+        if (s_timer) lv_timer_set_period(s_timer, kTickMs);
+        return;
+    }
+    if (lv_obj_has_flag(s_meter, LV_OBJ_FLAG_HIDDEN)) lv_obj_remove_flag(s_meter, LV_OBJ_FLAG_HIDDEN);
+    if (s_timer) lv_timer_set_period(s_timer, 50);
+}
+
+/// The input, while it is being recorded: both peaks since the last look, and
+/// how long the take is. Reading peaks() clears them, so nothing else may ask.
+void show_meter()
+{
+    auto* st = tools();
+    if (!st || !s_meter || s_rec == Rec::Off) return;
+    float l = 0.0f, r = 0.0f;
+    st->peaks(l, r);
+    const float v[2] = {l, r};
+    for (int i = 0; i < 2; ++i) {
+        if (!s_meterBar[i]) continue;
+        int pct = (int)(v[i] * 100.0f + 0.5f);
+        lv_bar_set_value(s_meterBar[i], pct < 0 ? 0 : (pct > 100 ? 100 : pct), LV_ANIM_OFF);
+    }
+    if (s_meterText) {
+        const uint32_t ms = lv_tick_elaps(s_recStart);
+        char buf[24];
+        std::snprintf(buf, sizeof(buf), LV_SYMBOL_AUDIO " %lu:%02lu.%lu",
+                      (unsigned long)(ms / 60000), (unsigned long)((ms / 1000) % 60),
+                      (unsigned long)((ms % 1000) / 100));
+        set_text(s_meterText, buf);
+    }
+}
+
 /// Every button that shows a value of the pad.
 void show_pad()
 {
+    show_rec();
     Pad* p = pad();
     char buf[32];
     if (s_padBtn) {
@@ -957,24 +1022,64 @@ void ask_copy(int to)
 // ── the sample ─────────────────────────────────────────────────────────────
 
 /// The browser's Load: the file onto the pad.
-void load_cb(lv_event_t* e)
+/// @p path onto this pad, as the only sample it plays. The browser's Load and a
+/// finished take both end here, so a recording lands exactly the way a file
+/// picked by hand does -- same slot check, same reload, same reopen.
+/// @p reloadNow false when a trim is already on its way: the markers settling
+/// reload the engine themselves (see s_moved), and taking the sample in twice
+/// for one recording is most of the wait after a take.
+bool put_on_pad(const std::string& path, bool reloadNow = true)
 {
-    lv_obj_t* obj = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    lv_obj_delete_async(lv_obj_get_parent(obj));      // the browser; its DELETE brings the editor back
-    const crosspad_gui::FileItem f = GetCurrentFile();
     Pad* p = pad();
-    if (!p || f.path.empty() || f.name.empty() || f.isFolder) return;
+    if (!p || path.empty()) return false;
     auto& cbs = sampler_get_platform_callbacks();
     if (cbs.player.wipeOut) cbs.player.wipeOut((uint8_t)s_pad);
     p->RemoveAllSamples();
     if (cbs.player.getFreeSlotCount && cbs.player.getFreeSlotCount() <= 0) {
         LV_LOG_ERROR("No free sample slots available!");
+        return false;
+    }
+    p->AddSample(path);
+    p->dirtyModified = true;
+    if (reloadNow && cbs.audio.reloadPad) cbs.audio.reloadPad((uint8_t)s_pad);
+    open_pad(s_pad);
+    return true;
+}
+
+void load_cb(lv_event_t* e)
+{
+    lv_obj_t* obj = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    lv_obj_delete_async(lv_obj_get_parent(obj));      // the browser; its DELETE brings the editor back
+    const crosspad_gui::FileItem f = GetCurrentFile();
+    if (f.path.empty() || f.name.empty() || f.isFolder) return;
+    put_on_pad(f.path);
+}
+
+/// REC/STOP. The input is whichever the Recorder was last set to -- MIC, LINE,
+/// PADS or USB -- so the two screens are one setting and this one needs no
+/// picker of its own. PADS is the interesting one here: it takes the engine's
+/// own output, so a pad can be resampled through its filters and pitch with no
+/// cable at all.
+void rec_cb(lv_event_t*)
+{
+    auto* st = tools();
+    if (!st || !pad() || s_overlay) return;
+    if (s_rec == Rec::Running) {
+        st->stopRecording();
+        s_rec = Rec::Stopping;
+        show_pad();
         return;
     }
-    p->AddSample(f.path);
-    p->dirtyModified = true;
-    if (cbs.audio.reloadPad) cbs.audio.reloadPad((uint8_t)s_pad);
-    open_pad(s_pad);
+    if (s_rec != Rec::Off) return;      // still closing the last one
+    stop_loop();                        // nothing of ours playing into the take
+    st->selectInput(st->input());
+    if (!st->startRecording()) {
+        set_text(s_info, "Cannot record now -- is the card in?");
+        return;
+    }
+    s_rec = Rec::Running;
+    s_recStart = lv_tick_get();
+    show_pad();
 }
 
 /// The file button: the card's browser. Nothing under it needs drawing, so
@@ -1005,13 +1110,41 @@ void tick_cb(lv_timer_t*)
 {
     /* The pad you hit is the pad you edit -- or, in COPY, where it goes. */
     if (const int hit = g_padPressPending.exchange(0, std::memory_order_relaxed)) {
-        if (s_copying && !s_overlay && hit - 1 != s_copyFrom) ask_copy(hit - 1);
+        /* While a take runs the pads are the material, not the navigation: a
+         * hit that moved the editor would land the recording on whichever pad
+         * was struck last instead of the one it was started for. */
+        if (s_rec != Rec::Off) { /* played into the take, nothing to select */ }
+        else if (s_copying && !s_overlay && hit - 1 != s_copyFrom) ask_copy(hit - 1);
         else if (!s_copying) lv_subject_set_int(&s_pad_sampler, hit);
     }
     const int shown = lv_subject_get_int(&s_pad_sampler) - 1;
     if (shown >= 0 && shown < KIT_PADS && shown != s_pad && !s_overlay) open_pad(shown);
 
     auto* st = tools();
+
+    /* A take in flight. stopRecording() returns before the file is closed, so
+     * the status is what says when there is something to use. */
+    if (st && s_rec != Rec::Off) {
+        show_meter();
+        const crosspad::RecStatus rs = st->recStatus();
+        if (!rs.recording && !rs.waiting) {
+            const bool stopped = s_rec == Rec::Stopping;
+            s_rec = Rec::Off;
+            show_rec();
+            if (!stopped) {
+                /* It ended on its own -- the card filled, or the writer gave
+                 * up. Whatever landed is still worth keeping. */
+                set_text(s_info, rs.error.empty() ? "The take stopped by itself." : rs.error.c_str());
+            }
+            if (!rs.file.empty() && rs.frames && put_on_pad(rs.file, false)) {
+                /* The picture is on its way: trim it when it lands. */
+                s_trimPending = true;
+            } else if (rs.file.empty() || !rs.frames) {
+                set_text(s_info, rs.error.empty() ? "Nothing was recorded." : rs.error.c_str());
+            }
+        }
+    }
+
     if (st && st->job() != crosspad::ToolJob::Busy) {
         if (s_ovPending) {
             s_ovPending = false;
@@ -1026,6 +1159,24 @@ void tick_cb(lv_timer_t*)
                         if (!s_end || s_end > s_frames) s_end = s_frames;
                         if (s_start >= s_end) s_start = 0;
                         s_loading = false;
+                    }
+                    /* A take of our own: the markers go on the sound rather
+                     * than on the file, so the pad plays from the attack the
+                     * moment it is struck. Written into the pad, not the file
+                     * -- the take stays whole on the card and the trim is two
+                     * numbers the markers can still be turned by hand. */
+                    if (s_trimPending) {
+                        s_trimPending = false;
+                        const crosspad::SliceMath::TrimPoints t =
+                            crosspad::SliceMath::autoTrim(s_ov.envelope, s_ov.hop, s_ov.start,
+                                                          s_frames, s_rate);
+                        s_start = t.start;
+                        s_end   = t.end;
+                        write_trim();
+                        show_info();
+                        set_text(s_info, t.start || t.end != s_frames
+                                             ? "Recorded, trimmed to the sound."
+                                             : "Recorded; nothing to trim off it.");
                     }
                 }
                 show_info();
@@ -1188,6 +1339,15 @@ void destroy_cb(lv_event_t*)
     s_backToken = 0;
     if (s_timer) { lv_timer_delete(s_timer); s_timer = nullptr; }
     if (auto* st = tools()) st->stopPreview();
+    /* A take still running is finished and kept -- the same as the Recorder
+     * does on its way out -- and the codec input goes back to whatever the
+     * capture preset had, or it stays held after this screen is gone. */
+    if (auto* st = tools()) {
+        if (s_rec != Rec::Off) st->stopRecording();
+        st->releaseInput();
+    }
+    s_rec = Rec::Off;
+    s_trimPending = false;
 
     /* Before the groups go, or the indev reads freed memory. Guarded: this is
      * also reached from the app's own teardown, which deletes the panel's
@@ -1199,8 +1359,10 @@ void destroy_cb(lv_event_t*)
 
     s_cont = s_wave = s_info = s_padBtn = s_fileBtn = s_revBtn = s_copyBtn = nullptr;
     s_busy = s_busyText = s_busyBar = nullptr;
+    s_meter = s_meterText = s_meterBar[0] = s_meterBar[1] = nullptr;
     s_volBtn = s_panBtn = s_pitchBtn = s_hpBtn = s_lpBtn = s_chokeBtn = s_modeBtn = nullptr;
     s_startBtn = s_endBtn = s_loopBtn = s_delBtn = s_overlay = nullptr;
+    s_recBtn = nullptr;
     s_pad = -1;
     s_sample.clear();
     s_file.clear();
@@ -1270,9 +1432,12 @@ lv_obj_t* pad_editor_create(lv_obj_t* parent, crosspad_gui::ILvglApp* app)
     s_padBtn = make_number(top, 56, color_cb);
     s_fileBtn = make_button(top, 100, "", file_cb);
     lv_obj_set_flex_grow(s_fileBtn, 1);
+    s_recBtn = make_button(top, 54, LV_SYMBOL_AUDIO " REC", rec_cb);
     s_revBtn = make_button(top, 34, "REV", rev_cb);
     s_modeBtn = make_button(top, 46, "", mode_cb);
-    s_copyBtn = make_button(top, 50, LV_SYMBOL_COPY " COPY", copy_cb);
+    /* The symbol alone: REC beside it needs the room, and the file button --
+     * which grows into whatever is left -- had the least to spare. */
+    s_copyBtn = make_button(top, 28, LV_SYMBOL_COPY, copy_cb);
 
     // -- its settings --
     lv_obj_t* params = make_row(s_cont, 22);
@@ -1294,6 +1459,39 @@ lv_obj_t* pad_editor_create(lv_obj_t* parent, crosspad_gui::ILvglApp* app)
     lv_obj_set_style_pad_all(s_wave, 3, 0);
     lv_obj_remove_flag(s_wave, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_wave, wave_draw_cb, LV_EVENT_DRAW_MAIN_END, nullptr);
+
+    /* The input, over the picture: while a take runs there is nothing to read
+     * in the old waveform anyway, and this is where the eye already is. */
+    s_meter = lv_obj_create(s_wave);
+    lv_obj_remove_style_all(s_meter);
+    lv_obj_set_size(s_meter, LV_PCT(70), LV_SIZE_CONTENT);
+    lv_obj_align(s_meter, LV_ALIGN_BOTTOM_MID, 0, -2);
+    lv_obj_set_style_bg_color(s_meter, kBg, 0);
+    lv_obj_set_style_bg_opa(s_meter, LV_OPA_90, 0);
+    lv_obj_set_style_radius(s_meter, 4, 0);
+    lv_obj_set_style_pad_hor(s_meter, 6, 0);
+    lv_obj_set_style_pad_ver(s_meter, 3, 0);
+    lv_obj_set_style_pad_row(s_meter, 2, 0);
+    lv_obj_set_flex_flow(s_meter, LV_FLEX_FLOW_COLUMN);
+    lv_obj_remove_flag(s_meter, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(s_meter, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_meter, LV_OBJ_FLAG_HIDDEN);
+    s_meterText = lv_label_create(s_meter);
+    lv_obj_set_style_text_font(s_meterText, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_meterText, lv_color_hex(0xFF5C5C), 0);
+    lv_label_set_text(s_meterText, LV_SYMBOL_AUDIO " 0:00.0");
+    for (int i = 0; i < 2; ++i) {
+        lv_obj_t* b = lv_bar_create(s_meter);
+        lv_obj_set_size(b, LV_PCT(100), 4);
+        lv_bar_set_range(b, 0, 100);
+        lv_obj_set_style_radius(b, 2, 0);
+        lv_obj_set_style_radius(b, 2, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(b, kPanel, 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(b, kAccent, LV_PART_INDICATOR);
+        lv_obj_set_style_anim_duration(b, 0, 0);
+        s_meterBar[i] = b;
+    }
 
     s_busy = lv_obj_create(s_wave);
     lv_obj_remove_style_all(s_busy);
