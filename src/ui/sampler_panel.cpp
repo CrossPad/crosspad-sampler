@@ -185,6 +185,19 @@ static int scopeSourceKind = -2;
 /// timer, and the panel's own poll). Nothing but an integer crosses over.
 std::atomic<int> g_padPressPending{0};
 
+/// Which pads are down right now, one bit each: set on press, cleared on
+/// release, read on the LVGL thread. REC MODE's take runs for exactly as long
+/// as its pad is held, and the state is this mask rather than the two events --
+/// a press and a release that both land between two of the editor's ticks
+/// cancel each other out instead of leaving a take running with nothing
+/// holding it.
+std::atomic<uint32_t> g_padHeldMask{0};
+
+/// REC MODE is on in the pad editor. The pad is the recorder's trigger there,
+/// so a hit must not also sound: it would be in the take, and with the Pads
+/// input it would be the take.
+std::atomic<bool> g_padEditorRecArm{false};
+
 class PadEditorLogicHandler : public IPadLogicHandler {
 public:
 
@@ -195,6 +208,7 @@ public:
         LV_LOG_INFO("Pad editor logic deactivated");
     }
     void onPadPress(PadManager& padManager, uint8_t padIdx, uint8_t velocity) override {
+        if (padIdx < 32) g_padHeldMask.fetch_or(1u << padIdx, std::memory_order_relaxed);
         crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
         if (kit == NULL) return;
 
@@ -207,6 +221,11 @@ public:
          * picks this up on the LVGL thread. */
         g_padPressPending.store(padIdx + 1, std::memory_order_relaxed);
 
+        /* REC MODE: the hit is the record button being pressed, and nothing
+         * else. The pad's own sample would be recorded along with whatever the
+         * pad was struck for. */
+        if (g_padEditorRecArm.load(std::memory_order_relaxed)) return;
+
         crosspad::Pad * pad = &kit->pads[padIdx];
         if (pad->sampleCount == 0) return;
 
@@ -217,8 +236,10 @@ public:
     }
 
     void onPadRelease(PadManager& padManager, uint8_t padIdx) override {
+        if (padIdx < 32) g_padHeldMask.fetch_and(~(1u << padIdx), std::memory_order_relaxed);
         crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
         if (!kit) return;
+        if (g_padEditorRecArm.load(std::memory_order_relaxed)) return;   // nothing sounded
 
         // Hold mode: cut playback on release, same as the main sampler window.
         if (kit->parsed && kit->pads[padIdx].playbackMode == 1) {

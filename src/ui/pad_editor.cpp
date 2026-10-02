@@ -69,6 +69,15 @@ extern lv_subject_t s_pad_sampler; // the pad on show, 1-based (sampler_panel.cp
 /// A pad hit while the editor is up, stamped by the pad thread and taken here,
 /// on the LVGL thread.
 extern std::atomic<int> g_padPressPending;
+/// Which pads are down right now, one bit each (sampler_panel.cpp). REC MODE
+/// records for exactly as long as its pad is held, and it is this mask that
+/// says so rather than the press and release events: a tap that falls between
+/// two ticks cancels itself out instead of leaving a take running with nothing
+/// holding it.
+extern std::atomic<uint32_t> g_padHeldMask;
+/// Set while REC MODE is on, so the pad logic knows not to sound a pad that is
+/// being used as the record button.
+extern std::atomic<bool> g_padEditorRecArm;
 
 namespace {
 
@@ -86,6 +95,7 @@ const lv_color_t kDim    = lv_color_hex(0x7B828B);
 const lv_color_t kInk    = lv_color_hex(0x16181B);
 const lv_color_t kAccent = lv_color_hex(0xC6FF47);
 const lv_color_t kRec    = lv_color_hex(0xFF5C5C);
+const lv_color_t kRecArm = lv_color_hex(0x8E3A3A);   // REC MODE on, nothing running yet
 const lv_color_t kLoopBg = lv_color_hex(0x263019);
 const lv_color_t kWave   = lv_color_hex(0x9FD63A);
 const lv_color_t kWaveOff= lv_color_hex(0x4A515B);
@@ -105,17 +115,19 @@ lv_obj_t* s_busyBar = nullptr;
 lv_obj_t* s_info = nullptr;
 lv_obj_t* s_padBtn = nullptr;            // the pad, in its colour; turned, the colour
 lv_obj_t* s_fileBtn = nullptr;
-lv_obj_t* s_recBtn  = nullptr;      // record straight onto this pad
+lv_obj_t* s_recBtn  = nullptr;      // REC MODE: hold a pad, it records onto it
 lv_obj_t* s_meter   = nullptr;      // input level while a take runs
 lv_obj_t* s_meterBar[2] = {};
 lv_obj_t* s_meterText = nullptr;
 uint32_t  s_recStart = 0;           // tick the take began, for the time it shows
 
-/// Recording onto the pad. Stopping is its own step because the take is not on
+/// Recording onto a pad. Stopping is its own step because the take is not on
 /// the card the moment stopRecording() returns -- the writer has a buffer to
 /// finish -- and the file is only worth anything once recStatus() says so.
 enum class Rec : uint8_t { Off, Running, Stopping };
 Rec  s_rec = Rec::Off;
+bool s_recArm = false;              ///< REC MODE: a held pad is a take
+int  s_recPad = -1;                 ///< the pad the take is being held for
 bool s_trimPending = false;         ///< the next picture to land gets trimmed to its sound
 lv_obj_t* s_revBtn = nullptr;
 lv_obj_t* s_copyBtn = nullptr;
@@ -414,7 +426,9 @@ void show_info()
     if (!s_info) return;
     char buf[112];
     Pad* p = pad();
-    if (!p) {
+    if (s_rec != Rec::Off && s_recPad >= 0) {
+        std::snprintf(buf, sizeof(buf), "Recording onto PAD %d -- let the pad go and it stops.", s_recPad + 1);
+    } else if (!p) {
         std::snprintf(buf, sizeof(buf), "Hit a pad to edit it.");
     } else if (s_copying) {
         std::snprintf(buf, sizeof(buf), "COPY: hit the pad to copy PAD %d onto -- COPY again to stop.", s_copyFrom + 1);
@@ -446,32 +460,45 @@ void show_marker_labels()
     label(s_endBtn, "END", s_editEnd);
 }
 
-/// REC while it is off, STOP while it runs, and red either way it is busy.
+/// The input is ours from the moment REC MODE comes on until it goes off: the
+/// meter is up over the picture the whole time, and a take only opens a file.
+bool rec_live() { return s_recArm || s_rec != Rec::Off; }
+
+/// The mode button, the meter, and the pace the editor runs at. Off, the button
+/// carries the mode's name and nothing else happens; on, it is red and the
+/// meter runs so a level can be set before a pad is touched; while a take runs
+/// it says which pad the take is for.
 void show_rec()
 {
+    const bool live = s_rec != Rec::Off;
     if (s_recBtn) {
-        const bool live = s_rec != Rec::Off;
-        set_text(lv_obj_get_child(s_recBtn, 0), live ? LV_SYMBOL_STOP " STOP" : LV_SYMBOL_AUDIO " REC");
-        lv_obj_set_style_bg_color(s_recBtn, live ? lv_color_hex(0xFF5C5C) : CROSSPAD_THEME_CARD_DEEP, 0);
+        char buf[24];
+        if (live && s_recPad >= 0) std::snprintf(buf, sizeof(buf), LV_SYMBOL_STOP " PAD %d", s_recPad + 1);
+        else                       std::snprintf(buf, sizeof(buf), "REC MODE");
+        set_text(lv_obj_get_child(s_recBtn, 0), buf);
+        set_bg(s_recBtn, live ? kRec : (s_recArm ? kRecArm : kPanel));
+        set_ink(lv_obj_get_child(s_recBtn, 0), live ? kInk : kText);
     }
+    /* Fifty frames a second while the mode is on, five otherwise. It is not
+     * only the meter: a pad's press is read here, and whatever of the hit
+     * happens before the take opens is lost for good -- 20 ms of it at worst,
+     * which the trim then starts after anyway. */
+    if (s_timer) lv_timer_set_period(s_timer, rec_live() ? 20 : kTickMs);
     if (!s_meter) return;
-    if (s_rec == Rec::Off) {
+    if (!rec_live()) {
         if (!lv_obj_has_flag(s_meter, LV_OBJ_FLAG_HIDDEN)) lv_obj_add_flag(s_meter, LV_OBJ_FLAG_HIDDEN);
-        /* Back to the editor's own pace: the meter is the only thing here that
-         * wants more than five frames a second. */
-        if (s_timer) lv_timer_set_period(s_timer, kTickMs);
         return;
     }
     if (lv_obj_has_flag(s_meter, LV_OBJ_FLAG_HIDDEN)) lv_obj_remove_flag(s_meter, LV_OBJ_FLAG_HIDDEN);
-    if (s_timer) lv_timer_set_period(s_timer, 50);
 }
 
-/// The input, while it is being recorded: both peaks since the last look, and
-/// how long the take is. Reading peaks() clears them, so nothing else may ask.
+/// The input, from the moment the mode is armed: both peaks since the last
+/// look, and -- once a pad is held -- how long the take is. Reading peaks()
+/// clears them, so nothing else may ask.
 void show_meter()
 {
     auto* st = tools();
-    if (!st || !s_meter || s_rec == Rec::Off) return;
+    if (!st || !s_meter || !rec_live()) return;
     float l = 0.0f, r = 0.0f;
     st->peaks(l, r);
     const float v[2] = {l, r};
@@ -481,12 +508,16 @@ void show_meter()
         lv_bar_set_value(s_meterBar[i], pct < 0 ? 0 : (pct > 100 ? 100 : pct), LV_ANIM_OFF);
     }
     if (s_meterText) {
-        const uint32_t ms = lv_tick_elaps(s_recStart);
-        char buf[24];
-        std::snprintf(buf, sizeof(buf), LV_SYMBOL_AUDIO " %lu:%02lu.%lu",
-                      (unsigned long)(ms / 60000), (unsigned long)((ms / 1000) % 60),
-                      (unsigned long)((ms % 1000) / 100));
-        set_text(s_meterText, buf);
+        if (s_rec == Rec::Off) {
+            set_text(s_meterText, LV_SYMBOL_AUDIO " hold a pad to record onto it");
+        } else {
+            const uint32_t ms = lv_tick_elaps(s_recStart);
+            char buf[24];
+            std::snprintf(buf, sizeof(buf), LV_SYMBOL_AUDIO " %lu:%02lu.%lu",
+                          (unsigned long)(ms / 60000), (unsigned long)((ms / 1000) % 60),
+                          (unsigned long)((ms % 1000) / 100));
+            set_text(s_meterText, buf);
+        }
     }
 }
 
@@ -566,12 +597,22 @@ void show_pad()
     }
 }
 
-/// The selected pad at full colour on the LEDs, the rest dimmed.
+/// The selected pad at full colour on the LEDs, the rest dimmed -- or, in REC
+/// MODE, red: every pad is a record button there and which one the editor
+/// happens to be on means nothing, so the kit's colours give way until the mode
+/// goes off. The pad a take is being held for is the bright one.
 void light_pads()
 {
     KitInfo* k = kit();
     if (!k) return;
     auto& pm = crosspad::getPadManager();
+    if (s_recArm) {
+        for (int i = 0; i < KIT_PADS; i++) {
+            if (i == s_recPad && s_rec != Rec::Off) pm.setPadColor((uint8_t)i, 255, 30, 30);
+            else                                    pm.setPadColor((uint8_t)i, 20, 2, 2);
+        }
+        return;
+    }
     for (int i = 0; i < KIT_PADS; i++) {
         const uint32_t c = k->pads[i].color;
         if (i == s_pad) pm.setPadColor((uint8_t)i, crosspad::HtmlColor(c));
@@ -1021,28 +1062,47 @@ void ask_copy(int to)
 
 // ── the sample ─────────────────────────────────────────────────────────────
 
-/// The browser's Load: the file onto the pad.
-/// @p path onto this pad, as the only sample it plays. The browser's Load and a
-/// finished take both end here, so a recording lands exactly the way a file
-/// picked by hand does -- same slot check, same reload, same reopen.
+/// @p path onto pad @p idx, as the only sample it plays, and the editor goes
+/// there. The browser's Load and a finished take both end here, so a recording
+/// lands exactly the way a file picked by hand does -- same slot check, same
+/// reload, same reopen -- and in REC MODE that is a pad the editor was not even
+/// on, which is why the pad is an argument and not s_pad.
 /// @p reloadNow false when a trim is already on its way: the markers settling
 /// reload the engine themselves (see s_moved), and taking the sample in twice
 /// for one recording is most of the wait after a take.
-bool put_on_pad(const std::string& path, bool reloadNow = true)
+/// The form a kit stores a sample in: card-relative, with whatever opens the
+/// file adding the mount itself (kitFsPath here, the sample player on its own).
+/// The browser hands out logical paths already; a finished take comes back as a
+/// real one, and stored as it came the pad pointed at "/sdcard/sdcard/..." --
+/// which nothing could read, so the picture never arrived, the editor sat on
+/// LOADING and the trim never ran.
+std::string logical_path(const std::string& path)
 {
-    Pad* p = pad();
-    if (!p || path.empty()) return false;
+    const std::string mount = crosspad::kitFsPath("/");   // the mount, with its slash
+    if (mount.size() <= 1) return path;                   // nothing mounted under: already logical
+    const std::string prefix = mount.substr(0, mount.size() - 1);
+    return path.compare(0, prefix.size(), prefix) == 0 ? path.substr(prefix.size()) : path;
+}
+
+bool put_on_pad(int idx, const std::string& path, bool reloadNow = true)
+{
+    KitInfo* k = kit();
+    if (!k || idx < 0 || idx >= KIT_PADS || path.empty()) return false;
+    Pad* p = &k->pads[idx];
     auto& cbs = sampler_get_platform_callbacks();
-    if (cbs.player.wipeOut) cbs.player.wipeOut((uint8_t)s_pad);
+    if (cbs.player.wipeOut) cbs.player.wipeOut((uint8_t)idx);
     p->RemoveAllSamples();
     if (cbs.player.getFreeSlotCount && cbs.player.getFreeSlotCount() <= 0) {
         LV_LOG_ERROR("No free sample slots available!");
         return false;
     }
-    p->AddSample(path);
+    p->AddSample(logical_path(path));
     p->dirtyModified = true;
-    if (reloadNow && cbs.audio.reloadPad) cbs.audio.reloadPad((uint8_t)s_pad);
-    open_pad(s_pad);
+    if (reloadNow && cbs.audio.reloadPad) cbs.audio.reloadPad((uint8_t)idx);
+    /* The grid behind the editor follows the same subject; left pointing at the
+     * pad we came from, the next tick would open that one again. */
+    if (idx != s_pad) lv_subject_set_int(&s_pad_sampler, idx + 1);
+    open_pad(idx);
     return true;
 }
 
@@ -1052,34 +1112,79 @@ void load_cb(lv_event_t* e)
     lv_obj_delete_async(lv_obj_get_parent(obj));      // the browser; its DELETE brings the editor back
     const crosspad_gui::FileItem f = GetCurrentFile();
     if (f.path.empty() || f.name.empty() || f.isFolder) return;
-    put_on_pad(f.path);
+    put_on_pad(s_pad, f.path);
 }
 
-/// REC/STOP. The input is whichever the Recorder was last set to -- MIC, LINE,
-/// PADS or USB -- so the two screens are one setting and this one needs no
-/// picker of its own. PADS is the interesting one here: it takes the engine's
-/// own output, so a pad can be resampled through its filters and pitch with no
-/// cable at all.
-void rec_cb(lv_event_t*)
+/// REC MODE on and off. The input is whichever the Recorder was last set to --
+/// MIC, LINE, PADS or USB -- so the two screens are one setting and this one
+/// needs no picker of its own; PADS is the interesting one here, as it takes the
+/// engine's own output and a pad can be resampled through its pitch and filters
+/// with no cable at all.
+///
+/// The input is claimed for as long as the mode is on rather than per take: the
+/// meter then runs while nothing is being recorded, which is where a level gets
+/// set, and the press that starts a take has nothing left to do but ask for the
+/// file. It also means the mode cannot be left on by accident with the codec
+/// held -- going off releases it, and so does leaving the editor.
+void rec_arm(bool on)
 {
     auto* st = tools();
-    if (!st || !pad() || s_overlay) return;
-    if (s_rec == Rec::Running) {
-        st->stopRecording();
-        s_rec = Rec::Stopping;
-        show_pad();
-        return;
+    if (!st || s_recArm == on) return;
+    if (on) {
+        if (!kit()) return;
+        stop_loop();                    // nothing of ours playing into a take
+        s_copying = false;              // one thing at a time; COPY also takes the pads
+        s_delArmed = false;
+        if (!st->selectInput(st->input())) {
+            set_text(s_info, "The input is busy -- nothing to record from yet.");
+            return;
+        }
+        /* A pad already down when the mode came on is not a take; only a press
+         * made inside the mode is. */
+        g_padHeldMask.store(0, std::memory_order_relaxed);
+        g_padPressPending.store(0, std::memory_order_relaxed);
+        s_recArm = true;
+        g_padEditorRecArm.store(true, std::memory_order_relaxed);
+    } else {
+        s_recArm = false;
+        g_padEditorRecArm.store(false, std::memory_order_relaxed);
+        /* A take still running is finished and kept: the pad it was held for
+         * gets it in the tick that sees the file closed. */
+        if (s_rec == Rec::Running) {
+            st->stopRecording();
+            s_rec = Rec::Stopping;
+        }
+        st->releaseInput();
     }
-    if (s_rec != Rec::Off) return;      // still closing the last one
-    stop_loop();                        // nothing of ours playing into the take
-    st->selectInput(st->input());
+    show_rec();
+    light_pads();
+    show_info();
+}
+
+void rec_cb(lv_event_t*)
+{
+    if (s_overlay) return;
+    rec_arm(!s_recArm);
+}
+
+/// The take a held pad asks for. Nothing of the pad is read here -- it is where
+/// the take lands, not what it records -- so a pad with a sample on it and an
+/// empty one start the same take.
+void rec_start(int idx)
+{
+    auto* st = tools();
+    if (!st || idx < 0 || idx >= KIT_PADS || s_rec != Rec::Off) return;
+    stop_loop();
     if (!st->startRecording()) {
         set_text(s_info, "Cannot record now -- is the card in?");
         return;
     }
+    s_recPad = idx;
     s_rec = Rec::Running;
     s_recStart = lv_tick_get();
-    show_pad();
+    show_rec();
+    light_pads();
+    show_info();
 }
 
 /// The file button: the card's browser. Nothing under it needs drawing, so
@@ -1108,12 +1213,15 @@ void file_cb(lv_event_t*)
 
 void tick_cb(lv_timer_t*)
 {
-    /* The pad you hit is the pad you edit -- or, in COPY, where it goes. */
-    if (const int hit = g_padPressPending.exchange(0, std::memory_order_relaxed)) {
-        /* While a take runs the pads are the material, not the navigation: a
-         * hit that moved the editor would land the recording on whichever pad
-         * was struck last instead of the one it was started for. */
-        if (s_rec != Rec::Off) { /* played into the take, nothing to select */ }
+    /* The pad you hit is the pad you edit -- or, in COPY, where it goes, or in
+     * REC MODE what the take is for. */
+    const int hit = g_padPressPending.exchange(0, std::memory_order_relaxed);
+    if (hit) {
+        /* In REC MODE, and while any take runs, the pads are the material and
+         * not the navigation: a hit that moved the editor would land the
+         * recording on whichever pad was struck last instead of the one it was
+         * held for. The editor follows the take onto its pad when it lands. */
+        if (s_recArm || s_rec != Rec::Off) { /* the recorder's, not the editor's */ }
         else if (s_copying && !s_overlay && hit - 1 != s_copyFrom) ask_copy(hit - 1);
         else if (!s_copying) lv_subject_set_int(&s_pad_sampler, hit);
     }
@@ -1122,10 +1230,36 @@ void tick_cb(lv_timer_t*)
 
     auto* st = tools();
 
+    /* REC MODE: the pad is the button. The press opens the take and the pad
+     * being let go closes it -- read off the held mask, so a release the editor
+     * never saw cannot leave a take running with nothing holding it. A tap too
+     * short to be seen held starts nothing at all, which is the right answer:
+     * a take of a few milliseconds is worth less than the pad it overwrites. */
+    if (s_recArm && st && !s_overlay) {
+        const uint32_t held = g_padHeldMask.load(std::memory_order_relaxed);
+        if (s_rec == Rec::Off) {
+            /* What starts a take is a pad being down, not the press that put it
+             * there: a press that arrives while the take before it is still
+             * closing its file would be dropped, and a player who is holding
+             * the pad would get nothing out of it. The newest press has it,
+             * then anything else still held. */
+            int next = hit > 0 && (held & (1u << (hit - 1))) ? hit - 1 : -1;
+            for (int i = 0; next < 0 && i < KIT_PADS; ++i) {
+                if (held & (1u << i)) next = i;
+            }
+            if (next >= 0) rec_start(next);
+        } else if (s_rec == Rec::Running && s_recPad >= 0 && !(held & (1u << s_recPad))) {
+            st->stopRecording();
+            s_rec = Rec::Stopping;
+            show_rec();
+            show_info();
+        }
+    }
+    if (st && rec_live()) show_meter();
+
     /* A take in flight. stopRecording() returns before the file is closed, so
      * the status is what says when there is something to use. */
     if (st && s_rec != Rec::Off) {
-        show_meter();
         const crosspad::RecStatus rs = st->recStatus();
         if (!rs.recording && !rs.waiting) {
             const bool stopped = s_rec == Rec::Stopping;
@@ -1136,7 +1270,8 @@ void tick_cb(lv_timer_t*)
                  * up. Whatever landed is still worth keeping. */
                 set_text(s_info, rs.error.empty() ? "The take stopped by itself." : rs.error.c_str());
             }
-            if (!rs.file.empty() && rs.frames && put_on_pad(rs.file, false)) {
+            if (!rs.file.empty() && rs.frames &&
+                put_on_pad(s_recPad >= 0 ? s_recPad : s_pad, rs.file, false)) {
                 /* The picture is on its way: trim it when it lands. */
                 s_trimPending = true;
             } else if (rs.file.empty() || !rs.frames) {
@@ -1320,6 +1455,12 @@ bool back_cb(void*)
         show_info();
         return true;
     }
+    /* REC MODE is a level of its own: the click that would leave the editor
+     * turns the mode off first, take and all. */
+    if (s_recArm) {
+        rec_arm(false);
+        return true;
+    }
     if (s_group && lv_group_get_editing(s_group)) {
         if (s_editStart == Edit::Fine || s_editEnd == Edit::Fine) request_view(0, 0);
         s_editStart = s_editEnd = Edit::None;
@@ -1347,6 +1488,9 @@ void destroy_cb(lv_event_t*)
         st->releaseInput();
     }
     s_rec = Rec::Off;
+    s_recArm = false;
+    s_recPad = -1;
+    g_padEditorRecArm.store(false, std::memory_order_relaxed);
     s_trimPending = false;
 
     /* Before the groups go, or the indev reads freed memory. Guarded: this is
@@ -1429,14 +1573,18 @@ lv_obj_t* pad_editor_create(lv_obj_t* parent, crosspad_gui::ILvglApp* app)
     // -- the pad and its sample --
     lv_obj_t* top = make_row(s_cont, 22);
     make_button(top, 30, LV_SYMBOL_LEFT, close_cb);
-    s_padBtn = make_number(top, 56, color_cb);
+    s_padBtn = make_number(top, 50, color_cb);
     s_fileBtn = make_button(top, 100, "", file_cb);
     lv_obj_set_flex_grow(s_fileBtn, 1);
-    s_recBtn = make_button(top, 54, LV_SYMBOL_AUDIO " REC", rec_cb);
+    /* Wide enough to say its own name, and to say which pad a take is filling.
+     * A mode earns that: the ten pixels come off PAD and the playback mode,
+     * which both had more room than their longest word, so the file button --
+     * which grows into whatever is left -- keeps every pixel it had. */
+    s_recBtn = make_button(top, 64, "REC MODE", rec_cb);
     s_revBtn = make_button(top, 34, "REV", rev_cb);
-    s_modeBtn = make_button(top, 46, "", mode_cb);
-    /* The symbol alone: REC beside it needs the room, and the file button --
-     * which grows into whatever is left -- had the least to spare. */
+    s_modeBtn = make_button(top, 42, "", mode_cb);
+    /* The symbol alone: REC MODE beside it needs the room, and the file button
+     * had the least to spare. */
     s_copyBtn = make_button(top, 28, LV_SYMBOL_COPY, copy_cb);
 
     // -- its settings --
