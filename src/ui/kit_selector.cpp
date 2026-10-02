@@ -10,9 +10,12 @@
 // Two lists, LEGACY and USER, switched on the status bar: the kits a board
 // ships with, and the ones made on it (KitInfo::isUser(), the Slicer's). A row
 // is a place in the list shown, s_kitOf[row] the kit it stands for; the
-// browser opens on the list the loaded kit is in. + NEW stands beside those
-// two and belongs to USER, where it is the only thing shown: it makes an empty
-// kit of one's own, which the pad editor then fills.
+// browser opens on the list the loaded kit is in. + NEW and EDIT stand beside
+// those two and belong to USER, where they are the only things shown: + NEW
+// makes an empty kit of one's own, which the pad editor then fills, and EDIT
+// opens the selected kit's card -- what it is called, who made it, what it says
+// about itself, the tempo it counts, and the way off the card. A factory kit
+// has no card: its folder is not ours to rewrite.
 
 #ifdef USE_LVGL
 
@@ -27,6 +30,7 @@
 #include <lvgl_private.h>   // lv_image_decoder_dsc_t, for warming the image cache
 
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -123,6 +127,30 @@ enum class Segment : uint8_t { Legacy, User };
 Segment   s_segment = Segment::Legacy;
 lv_obj_t* s_segBtn[2] = {};
 lv_obj_t* s_newBtn    = nullptr;   ///< + NEW, shown with the USER list only
+lv_obj_t* s_editBtn   = nullptr;   ///< EDIT, the same
+
+/* The card of a kit of one's own: what the kit says about itself, a row each,
+ * and each row written to the card the moment it is typed. No SAVE button --
+ * one more thing to forget, over a 3 kB file. */
+enum class Field : uint8_t { Name, Author, Note, Bpm, Count };
+constexpr int kFields = (int)Field::Count;
+const char* const kFieldTag[kFields]   = {"NAME", "BY", "NOTE", "BPM"};
+const char* const kFieldTitle[kFields] = {"What the kit is called", "Who made it",
+                                          "What it says about itself", "Tempo it counts, BPM"};
+const uint32_t    kFieldMax[kFields]   = {32, 24, 64, 3};
+
+lv_obj_t*   s_card      = nullptr;   ///< over the whole browser, the kit's own card
+lv_group_t* s_cardGroup = nullptr;
+lv_obj_t*   s_cardRow[kFields] = {};
+lv_obj_t*   s_cardVal[kFields] = {};
+lv_obj_t*   s_cardTitle = nullptr;
+lv_obj_t*   s_delRow    = nullptr;
+lv_obj_t*   s_typing    = nullptr;   ///< over the card, while the keyboard is up
+lv_group_t* s_typeGroup = nullptr;
+lv_obj_t*   s_typeArea  = nullptr;
+int         s_cardKit   = -1;        ///< which kit the card belongs to
+Field       s_typeField = Field::Name;
+bool        s_delArmed  = false;     ///< DELETE asked once
 
 crosspad::KitInfo* kit_of_row(int row) {
     auto* mgr = crosspad::getKitManager();
@@ -368,6 +396,7 @@ void row_mark_loaded(int idx) {
 void build_row(int idx);
 void destroy_row(int idx);
 void group_reorder();
+bool kit_edit_back();
 
 /// Give rows [centre - kRowWindow, centre + kRowWindow] objects and take them
 /// from every other row. Focus callbacks are muted meanwhile: creating a row
@@ -590,6 +619,7 @@ void list_scroll_end_cb(lv_event_t*) {
  * nothing else, so back from the browser landed on the launcher. */
 bool selector_back_cb(void*) {
     if (!s_overlay) return false;
+    if (kit_edit_back()) return true;
     kit_selector_close();
     return true;
 }
@@ -692,6 +722,7 @@ void group_reorder() {
     /* Hidden with the LEGACY list, and a hidden object is one the group skips
      * on its own -- there is nothing to take out of it. */
     if (s_newBtn) lv_group_add_obj(s_group, s_newBtn);
+    if (s_editBtn) lv_group_add_obj(s_group, s_editBtn);
     for (int i = s_winFirst; i <= s_winLast; ++i) {
         if (s_rows[i].obj) lv_group_add_obj(s_group, s_rows[i].obj);
     }
@@ -704,7 +735,12 @@ void build_rows() {
     s_kitOf.clear();
     for (int i = 0; i < all; ++i) {
         const auto* kit = mgr->getKit(i);
-        if (kit && kit->isUser() == (s_segment == Segment::User)) s_kitOf.push_back(i);
+        /* An empty path is a kit that was deleted while the board ran: the
+         * entry stays in the list so no id shifts under anything holding one
+         * (IKitManager::removeKit), and the next scan is simply without it. */
+        if (kit && !kit->path.empty() && kit->isUser() == (s_segment == Segment::User)) {
+            s_kitOf.push_back(i);
+        }
     }
     const int count = (int)s_kitOf.size();
 
@@ -802,11 +838,13 @@ void segment_paint() {
         lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
         lv_obj_set_style_text_color(lv_obj_get_child(b, 0), on ? CROSSPAD_THEME_BG_DEEP : lv_color_white(), 0);
     }
-    /* A kit of one's own is only ever made in the USER list, so + NEW is only
-     * there -- it would read as "add to the factory kits" beside LEGACY. */
-    if (s_newBtn) {
-        if (s_segment == Segment::User) lv_obj_remove_flag(s_newBtn, LV_OBJ_FLAG_HIDDEN);
-        else                            lv_obj_add_flag(s_newBtn, LV_OBJ_FLAG_HIDDEN);
+    /* A kit of one's own is only ever made, renamed or deleted in the USER
+     * list, so + NEW and EDIT are only there -- beside LEGACY they would read
+     * as "add to" and "rewrite" the kits the board ships with. */
+    for (lv_obj_t* b : {s_newBtn, s_editBtn}) {
+        if (!b) continue;
+        if (s_segment == Segment::User) lv_obj_remove_flag(b, LV_OBJ_FLAG_HIDDEN);
+        else                            lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -920,7 +958,326 @@ void new_kit_cb(lv_event_t*) {
     }
 }
 
-/// A chip on the status bar: the two list buttons and + NEW are all one.
+// ── The card of a kit of one's own ──────────────────────────────────────────
+
+crosspad::KitInfo* card_kit() {
+    auto* mgr = crosspad::getKitManager();
+    if (!mgr || s_cardKit < 0) return nullptr;
+    crosspad::KitInfo* k = mgr->getKit(s_cardKit);
+    return k && !k->path.empty() ? k : nullptr;
+}
+
+/// What the kit has in each field, and what DELETE is about to do.
+void card_paint() {
+    crosspad::KitInfo* kit = card_kit();
+    if (!kit) return;
+    if (s_cardTitle) lv_label_set_text(s_cardTitle, kit->name.c_str());
+    char bpm[8];
+    std::snprintf(bpm, sizeof(bpm), "%u", (unsigned)kit->bpm);
+    const char* value[kFields] = {
+        kit->name.c_str(),
+        kit->author.c_str(),
+        kit->description.empty() ? "--" : kit->description.c_str(),
+        kit->bpm ? bpm : "--",            // a kit is allowed not to say
+    };
+    for (int i = 0; i < kFields; ++i) {
+        if (s_cardVal[i]) lv_label_set_text(s_cardVal[i], value[i]);
+    }
+    if (s_delRow) {
+        lv_obj_t* l = lv_obj_get_child(s_delRow, 0);
+        if (l) lv_label_set_text(l, s_delArmed ? LV_SYMBOL_TRASH "  once more and it is gone"
+                                               : LV_SYMBOL_TRASH "  delete this kit");
+        lv_obj_set_style_bg_color(s_delRow, s_delArmed ? lv_color_hex(0xFF5C5C)
+                                                       : CROSSPAD_THEME_CARD_DEEP, 0);
+        if (l) lv_obj_set_style_text_color(l, s_delArmed ? CROSSPAD_THEME_BG_DEEP
+                                                         : lv_color_white(), 0);
+    }
+}
+
+void typing_close() {
+    if (!s_typing) return;
+    if (lv_indev_t* enc = encoder()) lv_indev_set_group(enc, s_cardGroup ? s_cardGroup : s_group);
+    /* Deferred: the click that closed it is still being read out of this group. */
+    if (s_typeGroup) { lv_group_delete_deferred(s_typeGroup); s_typeGroup = nullptr; }
+    lv_obj_delete_async(s_typing);
+    s_typing   = nullptr;
+    s_typeArea = nullptr;
+    if (s_cardRow[(int)s_typeField]) lv_group_focus_obj(s_cardRow[(int)s_typeField]);
+}
+
+void card_close() {
+    typing_close();
+    if (!s_card) return;
+    if (lv_indev_t* enc = encoder()) lv_indev_set_group(enc, s_group);
+    if (s_cardGroup) { lv_group_delete_deferred(s_cardGroup); s_cardGroup = nullptr; }
+    lv_obj_delete_async(s_card);
+    s_card = s_cardTitle = s_delRow = nullptr;
+    for (int i = 0; i < kFields; ++i) s_cardRow[i] = s_cardVal[i] = nullptr;
+    s_delArmed = false;
+    const int row = s_cardKit >= 0 ? row_of_kit(s_cardKit) : -1;
+    s_cardKit = -1;
+    /* Back where it came from, and never onto a row by surprise: the click that
+     * closed the card is still being read, and on a row it would load the kit. */
+    if (s_editBtn) lv_group_focus_obj(s_editBtn);
+    else if (row >= 0 && row < (int)s_rows.size() && s_rows[row].obj) {
+        lv_group_focus_obj(s_rows[row].obj);
+    }
+}
+
+bool kit_edit_back() {
+    if (s_typing) { typing_close(); return true; }
+    if (s_card)   { card_close();   return true; }
+    return false;
+}
+
+/// The keyboard's OK writes the field to the card; its X leaves the kit alone.
+/// Each field on its own, so nothing is held unsaved: what the screen says and
+/// what the file says are never two different things.
+void typed_cb(lv_event_t* e) {
+    const bool ok = lv_event_get_code(e) == LV_EVENT_READY;
+    const std::string text = s_typeArea ? lv_textarea_get_text(s_typeArea) : "";
+    const Field field = s_typeField;
+    const int kitId = s_cardKit;
+    typing_close();
+    if (!ok) return;
+
+    auto* mgr = crosspad::getKitManager();
+    crosspad::KitInfo* kit = card_kit();
+    if (!mgr || !kit) return;
+
+    /* Four fields, not the kit: saveKitInfo() keeps the pads off the file it
+     * reads, and a KitInfo copied whole here would carry sixteen of them. */
+    crosspad::KitInfo meta;
+    meta.name        = kit->name;
+    meta.author      = kit->author;
+    meta.description = kit->description;
+    meta.bpm         = kit->bpm;
+    switch (field) {
+        case Field::Name:
+            if (text.empty()) return;          // a kit with no name is no kit
+            meta.name = text;
+            break;
+        case Field::Author: meta.author      = text; break;
+        case Field::Note:   meta.description = text; break;
+        case Field::Bpm: {
+            const int bpm = std::atoi(text.c_str());
+            meta.bpm = (uint16_t)(bpm >= 20 && bpm <= 300 ? bpm : 0);   // 0 = does not say
+            break;
+        }
+        default: return;
+    }
+    if (!mgr->saveKitInfo(kitId, meta)) {
+        if (s_statusLabel) lv_label_set_text(s_statusLabel, "card write failed");
+        return;
+    }
+    card_paint();
+    /* The row and the cover carry the name and the author as well. */
+    const int row = row_of_kit(kitId);
+    if (row >= 0 && row < (int)s_rows.size()) {
+        if (s_rows[row].name)   lv_label_set_text(s_rows[row].name, kit->name.c_str());
+        if (s_rows[row].author) lv_label_set_text(s_rows[row].author, kit->author.c_str());
+        if (row == s_coverShown) {
+            if (s_coverName)   lv_label_set_text(s_coverName, kit->name.c_str());
+            if (s_coverAuthor) lv_label_set_text(s_coverAuthor, kit->author.c_str());
+        }
+    }
+    if (s_statusLabel) lv_label_set_text(s_statusLabel, "saved");
+}
+
+/// The field, under a keyboard. A finger types on it; the encoder walks the
+/// keys, which is why the keyboard is the one thing in its group and starts
+/// edited.
+void type_field(Field field) {
+    crosspad::KitInfo* kit = card_kit();
+    if (!kit || s_typing || !s_card) return;
+    s_typeField = field;
+
+    s_typing = lv_obj_create(s_card);
+    lv_obj_remove_style_all(s_typing);
+    lv_obj_set_size(s_typing, LV_PCT(100), LV_PCT(100));
+    lv_obj_add_flag(s_typing, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_style_bg_color(s_typing, CROSSPAD_THEME_BG_DEEP, 0);
+    lv_obj_set_style_bg_opa(s_typing, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(s_typing, 4, 0);
+    lv_obj_set_style_pad_row(s_typing, 3, 0);
+    lv_obj_set_flex_flow(s_typing, LV_FLEX_FLOW_COLUMN);
+    lv_obj_remove_flag(s_typing, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_typeGroup = lv_group_create();
+    if (lv_indev_t* enc = encoder()) lv_indev_set_group(enc, s_typeGroup);
+
+    lv_obj_t* title = lv_label_create(s_typing);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(title, CROSSPAD_THEME_PRIMARY, 0);
+    lv_label_set_text(title, kFieldTitle[(int)field]);
+
+    char bpm[8];
+    std::snprintf(bpm, sizeof(bpm), "%u", (unsigned)kit->bpm);
+    const char* start[kFields] = {kit->name.c_str(), kit->author.c_str(),
+                                  kit->description.c_str(), kit->bpm ? bpm : ""};
+    s_typeArea = lv_textarea_create(s_typing);
+    lv_textarea_set_one_line(s_typeArea, true);
+    lv_textarea_set_max_length(s_typeArea, kFieldMax[(int)field]);
+    lv_textarea_set_text(s_typeArea, start[(int)field]);
+    lv_obj_set_width(s_typeArea, LV_PCT(100));
+
+    lv_obj_t* kb = lv_keyboard_create(s_typing);
+    lv_keyboard_set_mode(kb, field == Field::Bpm ? LV_KEYBOARD_MODE_NUMBER
+                                                 : LV_KEYBOARD_MODE_TEXT_UPPER);
+    lv_obj_set_width(kb, LV_PCT(100));
+    lv_obj_set_flex_grow(kb, 1);
+    lv_keyboard_set_textarea(kb, s_typeArea);
+    lv_obj_add_event_cb(kb, typed_cb, LV_EVENT_READY, nullptr);
+    lv_obj_add_event_cb(kb, typed_cb, LV_EVENT_CANCEL, nullptr);
+    lv_group_add_obj(s_typeGroup, kb);
+    lv_group_focus_obj(kb);
+    lv_group_set_editing(s_typeGroup, true);
+}
+
+void field_cb(lv_event_t* e) {
+    type_field((Field)(intptr_t)lv_event_get_user_data(e));
+}
+
+/// Asked once, then done. The kit that is playing cannot go: it is the one the
+/// pads are sounding, and the engine reads its samples off the card.
+void delete_cb(lv_event_t*) {
+    auto* mgr = crosspad::getKitManager();
+    if (!mgr || !card_kit()) return;
+    if (s_cardKit == mgr->getCurrentKitId()) {
+        if (lv_obj_t* l = s_delRow ? lv_obj_get_child(s_delRow, 0) : nullptr) {
+            lv_label_set_text(l, "This kit is playing -- load another first");
+        }
+        s_delArmed = false;
+        return;
+    }
+    if (!s_delArmed) {
+        s_delArmed = true;
+        card_paint();
+        return;
+    }
+    const int kitId = s_cardKit;
+    card_close();
+    if (!mgr->removeKit(kitId)) {
+        if (s_statusLabel) lv_label_set_text(s_statusLabel, "could not delete");
+        return;
+    }
+    /* The list again, without it. */
+    s_building = true;
+    lv_obj_clean(s_list);
+    s_winFirst = 0; s_winLast = -1;
+    if (s_caret) lv_obj_add_flag(s_caret, LV_OBJ_FLAG_HIDDEN);
+    build_rows();
+    group_reorder();
+    if (s_editBtn) lv_group_focus_obj(s_editBtn);
+    if (s_statusLabel) lv_label_set_text(s_statusLabel, "deleted");
+}
+
+/// One row of the card: what it is on the left, what the kit has on the right.
+lv_obj_t* card_row(const char* tag, lv_event_cb_t cb, void* ud, lv_obj_t** value) {
+    lv_obj_t* row = lv_obj_create(s_card);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), 24);
+    lv_obj_set_style_radius(row, 5, 0);
+    lv_obj_set_style_bg_color(row, CROSSPAD_THEME_CARD_DEEP, 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_hor(row, 6, 0);
+    lv_obj_set_style_pad_column(row, 6, 0);
+    lv_obj_set_style_outline_color(row, lv_color_white(), LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_width(row, 2, LV_STATE_FOCUSED);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(row, cb, LV_EVENT_CLICKED, ud);
+
+    lv_obj_t* name = lv_label_create(row);
+    lv_obj_set_style_text_font(name, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_opa(name, LV_OPA_50, 0);
+    lv_obj_set_width(name, 34);
+    lv_label_set_text(name, tag);
+    /* Nothing inside takes the press: a tap on the text must still be the row
+     * (the same thing the list's rows had to be told). */
+    lv_obj_remove_flag(name, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t* val = lv_label_create(row);
+    lv_obj_set_style_text_font(val, &lv_font_montserrat_10, 0);
+    lv_label_set_long_mode(val, LV_LABEL_LONG_DOT);
+    lv_obj_set_flex_grow(val, 1);
+    lv_label_set_text(val, "");
+    lv_obj_remove_flag(val, LV_OBJ_FLAG_CLICKABLE);
+    if (value) *value = val;
+
+    if (s_cardGroup) lv_group_add_obj(s_cardGroup, row);
+    return row;
+}
+
+/// A plain full-width row with one label: DELETE, and the way back.
+lv_obj_t* card_button(const char* text, lv_event_cb_t cb) {
+    lv_obj_t* row = lv_obj_create(s_card);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), 24);
+    lv_obj_set_style_radius(row, 5, 0);
+    lv_obj_set_style_bg_color(row, CROSSPAD_THEME_CARD_DEEP, 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+    lv_obj_set_style_outline_color(row, lv_color_white(), LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_width(row, 2, LV_STATE_FOCUSED);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(row, cb, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* l = lv_label_create(row);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(l, LV_PCT(90));
+    lv_label_set_text(l, text);
+    lv_obj_center(l);
+    if (s_cardGroup) lv_group_add_obj(s_cardGroup, row);
+    return row;
+}
+
+/// EDIT: the selected kit's card. Only a kit of one's own has one, which is
+/// also why the chip stands beside the USER list and nowhere else.
+void edit_cb(lv_event_t*) {
+    if (s_card || !s_overlay) return;
+    crosspad::KitInfo* kit = kit_of_row(s_selected);
+    if (!kit || !kit->isUser()) {
+        if (s_statusLabel) lv_label_set_text(s_statusLabel, "pick a kit of your own");
+        return;
+    }
+    s_cardKit  = s_kitOf[s_selected];
+    s_delArmed = false;
+
+    s_card = lv_obj_create(s_overlay);
+    lv_obj_remove_style_all(s_card);
+    lv_obj_set_size(s_card, LV_PCT(100), LV_PCT(100));
+    lv_obj_add_flag(s_card, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_style_bg_color(s_card, CROSSPAD_THEME_BG_DEEP, 0);
+    lv_obj_set_style_bg_opa(s_card, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(s_card, 6, 0);
+    lv_obj_set_style_pad_row(s_card, 4, 0);
+    lv_obj_set_flex_flow(s_card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_remove_flag(s_card, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_cardGroup = lv_group_create();
+    if (lv_indev_t* enc = encoder()) lv_indev_set_group(enc, s_cardGroup);
+
+    s_cardTitle = lv_label_create(s_card);
+    lv_obj_set_style_text_font(s_cardTitle, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_cardTitle, lv_color_white(), 0);
+    lv_label_set_long_mode(s_cardTitle, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(s_cardTitle, LV_PCT(100));
+    lv_label_set_text(s_cardTitle, "");
+
+    for (int i = 0; i < kFields; ++i) {
+        s_cardRow[i] = card_row(kFieldTag[i], field_cb, (void*)(intptr_t)i, &s_cardVal[i]);
+    }
+    s_delRow = card_button("", delete_cb);
+    card_button(LV_SYMBOL_OK "  done", [](lv_event_t*) { card_close(); });
+
+    card_paint();
+    if (s_cardRow[0]) lv_group_focus_obj(s_cardRow[0]);
+}
+
+/// A chip on the status bar: the two list buttons, + NEW and EDIT are all one.
 lv_obj_t* status_chip(lv_obj_t* parent, const char* text, int32_t x, int32_t w,
                       lv_event_cb_t cb, void* ud) {
     lv_obj_t* b = lv_obj_create(parent);
@@ -940,8 +1297,8 @@ lv_obj_t* status_chip(lv_obj_t* parent, const char* text, int32_t x, int32_t w,
     return b;
 }
 
-lv_obj_t* segment_button(lv_obj_t* parent, const char* text, Segment seg, int32_t x) {
-    return status_chip(parent, text, x, 58, segment_cb, (void*)(intptr_t)seg);
+lv_obj_t* segment_button(lv_obj_t* parent, const char* text, Segment seg, int32_t x, int32_t w) {
+    return status_chip(parent, text, x, w, segment_cb, (void*)(intptr_t)seg);
 }
 
 void reset_state();
@@ -1014,15 +1371,24 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
         auto* cur = mgr ? mgr->getKit(mgr->getCurrentKitId()) : nullptr;
         s_segment = cur && cur->isUser() ? Segment::User : Segment::Legacy;
     }
-    s_segBtn[0] = segment_button(status, "LEGACY", Segment::Legacy, 82);
-    s_segBtn[1] = segment_button(status, "USER", Segment::User, 144);
-    s_newBtn    = status_chip(status, LV_SYMBOL_PLUS " NEW", 206, 52, new_kit_cb, nullptr);
-    lv_obj_set_style_bg_color(s_newBtn, CROSSPAD_THEME_CARD_DEEP, 0);
-    lv_obj_set_style_bg_opa(s_newBtn, LV_OPA_COVER, 0);
-    lv_obj_set_style_text_color(lv_obj_get_child(s_newBtn, 0), lv_color_white(), 0);
+    /* Four chips in the width two used to have: each is as wide as its longest
+     * word and no wider, so EDIT fits between + NEW and the kit count. */
+    s_segBtn[0] = segment_button(status, "LEGACY", Segment::Legacy, 76, 50);
+    s_segBtn[1] = segment_button(status, "USER", Segment::User, 130, 42);
+    s_newBtn    = status_chip(status, LV_SYMBOL_PLUS " NEW", 176, 46, new_kit_cb, nullptr);
+    /* Measured on the board: the bar pads its children 9 px in, so EDIT ends at
+     * 279 of 320 and the kit count -- right-aligned, as wide as its text -- has
+     * its own room instead of drawing over the chip. */
+    s_editBtn   = status_chip(status, LV_SYMBOL_EDIT " EDIT", 226, 44, edit_cb, nullptr);
+    for (lv_obj_t* b : {s_newBtn, s_editBtn}) {
+        lv_obj_set_style_bg_color(b, CROSSPAD_THEME_CARD_DEEP, 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_color(lv_obj_get_child(b, 0), lv_color_white(), 0);
+    }
     lv_group_add_obj(s_group, s_segBtn[0]);
     lv_group_add_obj(s_group, s_segBtn[1]);
     lv_group_add_obj(s_group, s_newBtn);
+    lv_group_add_obj(s_group, s_editBtn);
     segment_paint();
 
     s_statusLabel = lv_label_create(status);
@@ -1149,6 +1515,20 @@ void reset_state() {
     s_building = true;
     s_loadingStarted = false;
 
+    /* A card or its keyboard still up: their groups are not children of the
+     * screen, so they are deleted here, and the encoder may be reading one of
+     * them -- it goes back to the list's group before either is freed. */
+    if (lv_indev_t* enc = encoder()) {
+        lv_group_t* g = lv_indev_get_group(enc);
+        if (g == s_typeGroup || g == s_cardGroup) lv_indev_set_group(enc, s_group);
+    }
+    if (s_typeGroup) { lv_group_delete(s_typeGroup); s_typeGroup = nullptr; }
+    if (s_cardGroup) { lv_group_delete(s_cardGroup); s_cardGroup = nullptr; }
+    s_card = s_typing = s_typeArea = s_cardTitle = s_delRow = nullptr;
+    for (int i = 0; i < kFields; ++i) s_cardRow[i] = s_cardVal[i] = nullptr;
+    s_cardKit  = -1;
+    s_delArmed = false;
+
     if (s_backToken) { crosspad_gui::ui_back_remove(s_backToken); s_backToken = 0; }
     if (s_loadTimer)  { lv_timer_delete(s_loadTimer);  s_loadTimer = nullptr; }
     if (s_coverTimer) { lv_timer_delete(s_coverTimer); s_coverTimer = nullptr; }
@@ -1165,7 +1545,7 @@ void reset_state() {
     s_rows.clear();
     s_kitOf.clear();
     s_segBtn[0] = s_segBtn[1] = nullptr;
-    s_newBtn = nullptr;
+    s_newBtn = s_editBtn = nullptr;
     s_winFirst = 0; s_winLast = -1;
     s_selected = s_loaded = -1;
     s_coverWanted = s_coverShown = -1;
