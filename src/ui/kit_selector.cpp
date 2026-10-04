@@ -29,9 +29,12 @@
 #include <crosspad-gui/crosspad_gui.h>
 #include <lvgl_private.h>   // lv_image_decoder_dsc_t, for warming the image cache
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
+#include <sys/stat.h>
 #include <vector>
 
 namespace crosspad_sampler {
@@ -910,15 +913,21 @@ void new_kit_cb(lv_event_t*) {
 
     std::string name, path;
     bool free_name = false;
+    bool probe_failed = false;
     for (int n = 1; n <= 99 && !free_name; ++n) {
         name = n == 1 ? "NEW KIT" : "NEW KIT " + std::to_string(n);
         path = root + "/" + name + "/kit.json";
-        FILE* f = fopen(crosspad::kitFsPath(path).c_str(), "r");
-        free_name = !f;
-        if (f) fclose(f);
+        struct stat st;
+        if (stat(crosspad::kitFsPath(path).c_str(), &st) == 0) continue;
+        if (errno == ENOENT) { free_name = true; continue; }
+        /* Neither there nor absent -- a card error: counted as taken, so a
+         * kit that may be there is never written over. Logged once, not per
+         * name: this runs on the LVGL task, and the console blocks it. */
+        if (!probe_failed) printf("[KitSel] %s: %s\n", path.c_str(), std::strerror(errno));
+        probe_failed = true;
     }
     if (!free_name) {
-        if (s_statusLabel) lv_label_set_text(s_statusLabel, "no free name");
+        if (s_statusLabel) lv_label_set_text(s_statusLabel, probe_failed ? "card read failed" : "no free name");
         return;
     }
 
