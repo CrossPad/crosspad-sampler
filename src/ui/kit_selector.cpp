@@ -31,7 +31,6 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
 #include <string>
 #include <vector>
 
@@ -914,7 +913,9 @@ void new_kit_cb(lv_event_t*) {
     for (int n = 1; n <= 99 && !free_name; ++n) {
         name = n == 1 ? "NEW KIT" : "NEW KIT " + std::to_string(n);
         path = root + "/" + name + "/kit.json";
-        free_name = !std::ifstream(crosspad::kitFsPath(path)).good();
+        FILE* f = fopen(crosspad::kitFsPath(path).c_str(), "r");
+        free_name = !f;
+        if (f) fclose(f);
     }
     if (!free_name) {
         if (s_statusLabel) lv_label_set_text(s_statusLabel, "no free name");
