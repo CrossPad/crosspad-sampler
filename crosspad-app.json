@@ -1,17 +1,18 @@
 {
   "name": "Sampler",
   "id": "sampler",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "Sample player with 16 pads, waveform editing, kit management",
   "category": "music",
   "icon": "audio.png",
   "component_path": "components/crosspad-sampler",
   "platforms": ["esp-idf", "arduino"],
   "requires": {
-    "crosspad-core": ">=1.31.0",
+    "crosspad-core": ">=1.43.0",
     "crosspad-gui": ">=1.16.0"
   },
   "changelog": [
+    "0.8.3: the pitched editor's Voices goes up to the board's voice cap (PitchedInstrument::voiceCap(), which every setParams now meets); requires core 1.43.0",
     "0.8.2: a kit swap with no pad sounding starts on the first pad at once instead of 150 ms later (the wait stays while a pad sounds)",
     "0.8.1: + NEW finds a free kit name with stat(), and a name the card cannot answer for counts as taken (\"card read failed\"); no <fstream> left (smaller firmware image)",
     "0.8.0: the Unsaved changes dialog in the look of the rest of the device -- Save, Discard (red), Cancel, the pads changed, the encoder on Save, the power button backs out of it; requires crosspad-gui 1.16",
