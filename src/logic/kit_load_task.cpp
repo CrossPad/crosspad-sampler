@@ -273,8 +273,13 @@ static void run_one_load(bool onlyModified, int kitId) {
     auto* kit = kitMgr->getCurrentKit();
 
     // Let the streaming background release the storage bus and its file
-    // handles before the reload reopens them.
-    vTaskDelay(pdMS_TO_TICKS(150));
+    // handles before the reload reopens them -- when there is a stream: with
+    // no pad sounding the streamer reads nothing, and since every task has
+    // its own file slot (platform-idf 671dcc5) nothing of the loader's is
+    // held by it. 150 ms of every quiet swap otherwise.
+    bool anySounding = false;
+    for (uint8_t p = 0; p < PAD_COUNT && !anySounding; ++p) anySounding = pad_sounding(p);
+    if (anySounding) vTaskDelay(pdMS_TO_TICKS(150));
 
     EngineLoadStats before;
     engine_stats(before);
