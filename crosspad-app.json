@@ -1,7 +1,7 @@
 {
   "name": "Sampler",
   "id": "sampler",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "Sample player with 16 pads, waveform editing, kit management",
   "category": "music",
   "icon": "audio.png",
@@ -12,6 +12,7 @@
     "crosspad-gui": ">=1.16.0"
   },
   "changelog": [
+    "0.8.2: a kit swap with no pad sounding starts on the first pad at once instead of 150 ms later (the wait stays while a pad sounds)",
     "0.8.1: + NEW finds a free kit name with stat(), and a name the card cannot answer for counts as taken (\"card read failed\"); no <fstream> left (smaller firmware image)",
     "0.8.0: the Unsaved changes dialog in the look of the rest of the device -- Save, Discard (red), Cancel, the pads changed, the encoder on Save, the power button backs out of it; requires crosspad-gui 1.16",
     "0.7.0: the Sampler's screen in the device's design, as the Recorder and the pad editor wear it -- dark, flat buttons, the accent on what is on: back, the pad last hit (in its colour) and the kit (opens the browser) along the top; the pads in the kit's colours, faint at rest, full while they sound, the last one outlined; the sample's file and view (FILE, live scope) over the waveform, the time under it, the meter beside; FULL LEVEL, 16 LEVELS, EDIT along the bottom. The waveform in the pad editor's colours (a lit field, the part outside the trim greyed, start teal, end red, the playhead white), in the pitched editor too",
