@@ -203,6 +203,13 @@ bool waveform_loader_start() {
         if (!s_queue) return false;
     }
 
+    /* Running before the create, not after: the loader outranks the LVGL
+     * task that starts it, so it could run at once, find the flag still
+     * false and end — and then the flag went true over a task that was
+     * gone. Nothing asked for it again, the queue filled and every waveform
+     * stayed LOADING. */
+    s_running = true;
+
     /* Stack from PSRAM, the way kit_load takes its. 6 kB of internal RAM in
      * one piece is more than the launcher with a kit up tends to have left:
      * the create failed, the queue filled behind it and the kit had no
@@ -220,7 +227,8 @@ bool waveform_loader_start() {
         MALLOC_CAP_SPIRAM);
 #endif
 
-    if (r == pdPASS) { s_running = true; return true; }
+    if (r == pdPASS) return true;
+    s_running = false;
 
     /* 6 kB of internal RAM in one piece, and the launcher with a kit up has
      * had less than that. A failure here used to be a false nobody read: the
