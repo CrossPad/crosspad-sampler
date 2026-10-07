@@ -1345,6 +1345,13 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     lv_obj_add_event_cb(scr, overlay_deleted_cb, LV_EVENT_DELETE, nullptr);
 
     s_group = lv_group_create();
+    /* No wrap: the group holds only the rows the virtual window has built, so
+     * LVGL's wrap from the last of them landed on Back and then on the first
+     * built row -- a dozen kits up, not the top -- and a fast spin (which
+     * reaches the end in a few accelerated clicks) circled the last screenful
+     * for ever. The list stops at its last kit; Back stays one notch
+     * counter-clockwise of the top. */
+    lv_group_set_wrap(s_group, false);
     if (lv_indev_t* enc = encoder()) {
         s_prevGroup = lv_indev_get_group(enc);
         lv_indev_set_group(enc, s_group);
