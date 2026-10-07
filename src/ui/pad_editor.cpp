@@ -882,6 +882,14 @@ void fx_moved(Pad* p)
     s_fxMoved = true;
     s_fxAt = lv_tick_get();
     s_renderPad = s_pad;
+    /* Heard on this detent, not in 400 ms. The settle below exists because a
+     * rendered copy is expensive to write and must not be written once per
+     * click; an engine that transposes in the voice needs none of that, so the
+     * step goes in now and the settle path is left to do the bookkeeping. */
+    {
+        auto& cbs = sampler_get_platform_callbacks();
+        if (cbs.player.setPadPitch) cbs.player.setPadPitch((uint8_t)s_pad, p->pitch);
+    }
     auto* st = tools();
     if (st && s_looping) st->previewAs(s_file, s_start, s_end, true, pad_sound());
     show_pad();
@@ -1344,14 +1352,25 @@ void tick_cb(lv_timer_t*)
         KitInfo* k = kit();
         const crosspad::SampleFx fx = pad_fx(s_renderPad);
         auto& cbs = sampler_get_platform_callbacks();
-        if (k && s_renderPad >= 0 && k->pads[s_renderPad].GetSampleCount() && fx.any()) {
+        /* A copy is only wanted for what the engine cannot do. One that
+         * transposes in the voice takes the original and the step, so turning
+         * PITCH costs nothing on the card and is heard at once. */
+        const bool engineDoesIt = cbs.player.engineHandlesFx &&
+                                  cbs.player.engineHandlesFx(fx.semitones, fx.hpHz, fx.lpHz,
+                                                             fx.reverse);
+        if (k && s_renderPad >= 0 && k->pads[s_renderPad].GetSampleCount() && fx.any()
+            && !engineDoesIt) {
             const std::string src = crosspad::resolveKitSamplePath(k->path, k->pads[s_renderPad].samples[0].sample);
             s_renderSrc = crosspad::kitFsPath(src);
             s_renderOut = crosspad::kitFsPath(crosspad::renderedSamplePath(src, fx));
             s_renderWanted = true;
-        } else if (cbs.audio.reloadPad && s_renderPad >= 0) {
+        } else if (!engineDoesIt && cbs.audio.reloadPad && s_renderPad >= 0) {
             cbs.audio.reloadPad((uint8_t)s_renderPad);
         }
+        /* Nothing when the engine took the step on the detent: rebuilding the
+         * pad would re-read its header from the card for a change that was
+         * one number, and that read is the last thing between turning the
+         * knob and hearing it. */
         show_info();
     }
 

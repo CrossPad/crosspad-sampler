@@ -63,6 +63,35 @@ struct SamplerPlayerCallbacks {
                                  uint32_t* sampleRate)                                = nullptr;
     /// Start/stop the engine-side scope tap. Disabled means no audio copy.
     void (*setLiveScopeEnabled)(bool enabled)                                         = nullptr;
+
+    /**
+     * @brief Does the engine play this combination of effects itself?
+     *
+     * The pad editor renders a copy of the sample with the effects applied and
+     * points the pad at that copy, because the engine it was written against
+     * can do none of them. An engine that transposes in the voice does not
+     * want the copy -- it wants the original and a step -- and asking for one
+     * anyway is a write to the card and a reload on every turn of the knob.
+     *
+     * Null, or false, keeps the copy. Scalars rather than SampleFx so the
+     * answer stays cheap to ask per redraw.
+     */
+    bool (*engineHandlesFx)(int semitones, uint16_t hpHz, uint16_t lpHz, bool reverse) = nullptr;
+
+    /**
+     * @brief Set a pad's step now, with no reload and no card.
+     *
+     * A pad's pitch in an engine that transposes in the voice is one number.
+     * Nothing has to be read, nothing re-parsed, nothing rebuilt -- so the
+     * editor can apply it on the detent instead of debouncing for 400 ms and
+     * then rebuilding the pad, which is what a rendered copy needed.
+     *
+     * Voices already sounding keep the step they started with: a knob turned
+     * over a ringing note should not retune that note.
+     *
+     * False when the engine cannot, and the editor falls back to a reload.
+     */
+    bool (*setPadPitch)(uint8_t padIdx, int semitones)                                 = nullptr;
 };
 
 /// Callbacks the audio engine invokes back INTO the sampler (NoteOn/NoteOff
