@@ -207,8 +207,20 @@ public:
     void onDeactivate(PadManager& padManager) override {
         LV_LOG_INFO("Pad editor logic deactivated");
     }
+    /// A finger, or the sequencer playing a pattern back. Only a finger is
+    /// navigation: a scene running under an open editor moved the editor onto
+    /// whatever the pattern hit next, so the pad being worked on was lost on
+    /// every step -- and in REC MODE the take would have landed on it. The
+    /// sound is not gated, only who gets to steer the UI.
+    static bool played_by_hand(PadManager& padManager, uint8_t padIdx) {
+        const crosspad::EventSource src = padManager.pressSource(padIdx);
+        return src != crosspad::EventSource::SequencerCallback &&
+               src != crosspad::EventSource::SequencerInput;
+    }
+
     void onPadPress(PadManager& padManager, uint8_t padIdx, uint8_t velocity) override {
-        if (padIdx < 32) g_padHeldMask.fetch_or(1u << padIdx, std::memory_order_relaxed);
+        const bool byHand = played_by_hand(padManager, padIdx);
+        if (padIdx < 32 && byHand) g_padHeldMask.fetch_or(1u << padIdx, std::memory_order_relaxed);
         crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
         if (kit == NULL) return;
 
@@ -219,7 +231,7 @@ public:
          * at once. That is a task watchdog on the UART task with lv_inv_area in
          * its backtrace, and a UI that never comes back. The editor's own timer
          * picks this up on the LVGL thread. */
-        g_padPressPending.store(padIdx + 1, std::memory_order_relaxed);
+        if (byHand) g_padPressPending.store(padIdx + 1, std::memory_order_relaxed);
 
         /* REC MODE: the hit is the record button being pressed, and nothing
          * else. The pad's own sample would be recorded along with whatever the
@@ -236,7 +248,10 @@ public:
     }
 
     void onPadRelease(PadManager& padManager, uint8_t padIdx) override {
-        if (padIdx < 32) g_padHeldMask.fetch_and(~(1u << padIdx), std::memory_order_relaxed);
+        /* The same hand that set the bit clears it: a pattern step landing on
+         * a pad a finger is holding would otherwise close the take under it. */
+        if (padIdx < 32 && played_by_hand(padManager, padIdx))
+            g_padHeldMask.fetch_and(~(1u << padIdx), std::memory_order_relaxed);
         crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
         if (!kit) return;
         if (g_padEditorRecArm.load(std::memory_order_relaxed)) return;   // nothing sounded
