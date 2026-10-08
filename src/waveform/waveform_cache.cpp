@@ -85,6 +85,14 @@ static bool get_cache_path(const char* kitJsonPath, char* out, int maxLen) {
     return true;
 }
 
+/* Entries are stored relative to the kit's directory, so a cache built off the
+ * card (or shipped in a kit's zip) matches wherever the kit is installed. An
+ * absolute name is a sample outside the kit, or a cache from before this. */
+static int kit_dir_len(const char* kitJsonPath) {
+    const char* lastSlash = strrchr(kitJsonPath, '/');
+    return lastSlash ? (int)(lastSlash - kitJsonPath) : -1;
+}
+
 // ── Public API ──────────────────────────────────────────────────────────
 
 void waveform_cache_init() {
@@ -264,6 +272,7 @@ bool waveform_cache_save_to_disk(const char* kitJsonPath) {
 
     char cachePath[256];
     if (!get_cache_path(kitJsonPath, cachePath, sizeof(cachePath))) return false;
+    const int dirLen = kit_dir_len(kitJsonPath);
 
     uint8_t validCount = 0;
     if (s_mutex && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(500))) {
@@ -298,9 +307,12 @@ bool waveform_cache_save_to_disk(const char* kitJsonPath) {
     if (s_mutex && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(500))) {
         for (int i = 0; i < WAVEFORM_CACHE_SIZE; i++) {
             if (!s_cache[i].valid || !s_cache[i].waveformData) continue;
-            uint8_t fnLen = (uint8_t)strlen(s_cache[i].filename);
+            const char* name = s_cache[i].filename;
+            if (dirLen > 0 && strncmp(name, kitJsonPath, dirLen) == 0 && name[dirLen] == '/')
+                name += dirLen + 1;
+            uint8_t fnLen = (uint8_t)strlen(name);
             buf[pos++] = fnLen;
-            memcpy(buf + pos, s_cache[i].filename, fnLen); pos += fnLen;
+            memcpy(buf + pos, name, fnLen); pos += fnLen;
             memcpy(buf + pos, &s_cache[i].sampleCount, 4); pos += 4;
             memcpy(buf + pos, &s_cache[i].srcFrames, 4); pos += 4;
             memcpy(buf + pos, &s_cache[i].srcSampleRate, 4); pos += 4;
@@ -323,6 +335,7 @@ bool waveform_cache_load_from_disk(const char* kitJsonPath) {
 
     char cachePath[256];
     if (!get_cache_path(kitJsonPath, cachePath, sizeof(cachePath))) return false;
+    const int dirLen = kit_dir_len(kitJsonPath);
 
     uint32_t maxFile = 256 * 1024;  // 256 KB max
     uint8_t* buf = (uint8_t*)malloc(maxFile);
@@ -369,6 +382,15 @@ bool waveform_cache_load_from_disk(const char* kitJsonPath) {
 
         memcpy(data, buf + pos, dataBytes); pos += dataBytes;
 
+        char path[256];
+        const int pathLen = filename[0] == '/'
+            ? snprintf(path, sizeof(path), "%s", filename)
+            : snprintf(path, sizeof(path), "%.*s/%s", dirLen, kitJsonPath, filename);
+        if (pathLen < 0 || pathLen >= (int)sizeof(WaveformCacheEntry::filename)) {
+            cache_free(data);
+            continue;
+        }
+
         // Direct insert: notify would move the progress counter.
         if (s_mutex && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(500))) {
             WaveformCacheEntry* entry = nullptr;
@@ -378,7 +400,7 @@ bool waveform_cache_load_from_disk(const char* kitJsonPath) {
             if (!entry) {
                 cache_free(data);
             } else {
-                snprintf(entry->filename, sizeof(entry->filename), "%s", filename);
+                memcpy(entry->filename, path, pathLen + 1);
                 entry->waveformData = data;
                 entry->sampleCount = sampleCount;
                 entry->srcFrames = srcFrames;
