@@ -33,6 +33,10 @@ static void sampler_back_cb() {
  * declining here. */
 static bool sampler_handle_back(lv_obj_t* app) {
     (void)app;
+    /* Unsaved pad edits first. The `<` that used to ask is gone with the
+     * UX 2000 chrome, and this click is now the only way off this screen that
+     * the screen itself sees -- so nothing is lost without a question. */
+    if (sampler_panel_confirm_exit()) return true;
     const auto& cb = sampler_get_platform_callbacks().kitSelector;
     const auto open = cb.openSelectorForBack ? cb.openSelectorForBack : cb.openSelector;
     if (!open) return false;
