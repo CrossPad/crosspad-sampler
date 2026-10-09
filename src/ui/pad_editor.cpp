@@ -666,7 +666,16 @@ void open_pad(int idx)
         request_view(0, 0);
     }
     s_color = p ? color_index(p->color) : 0;
-    if (s_group) lv_group_set_editing(s_group, false);
+    /* A setting being turned stays turned on the next pad: hit, turn, hit,
+     * turn, no click in between. A marker comes back coarse over the whole
+     * sample, and with no sample there is nothing to move. */
+    if (s_group && lv_group_get_editing(s_group)) {
+        lv_obj_t* f = lv_group_get_focused(s_group);
+        if (f == s_startBtn || f == s_endBtn) {
+            if (s_loading) (f == s_startBtn ? s_editStart : s_editEnd) = Edit::Coarse;
+            else lv_group_set_editing(s_group, false);
+        }
+    }
     light_pads();
     show_pad();
     show_marker_labels();

@@ -911,9 +911,13 @@ lv_obj_t* pitched_editor_create(lv_obj_t* parent) {
         applyParams();
     }, &releaseRowLabel);
 
+    // Up to the board's cap: setParams() clamps to it anyway, and a spinbox
+    // that goes past it would show voices the engine never plays.
     lv_obj_t* voicesRowLabel = nullptr;
+    auto* inst = instrument();
     s_voicesSpin = makeRow(s_instPanel, releaseRowLabel, "Voices:", 1,
-                           crosspad::PitchedInstrument::kMaxSounding, [](lv_event_t* e) {
+                           inst ? inst->voiceCap() : crosspad::PitchedInstrument::kMaxSounding,
+                           [](lv_event_t* e) {
         if (s_syncing) return;
         KitInfo* kit = currentKit();
         if (!kit) return;
