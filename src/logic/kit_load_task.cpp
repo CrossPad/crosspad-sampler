@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Kit loading, off the LVGL thread. Four things about this file are
 // load-bearing, and each replaced a defect:

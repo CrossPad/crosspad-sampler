@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Kit Selector app — wraps kit_selector UI with platform callbacks
 // and LVGL app lifecycle. Registered via a named platform entry point.
