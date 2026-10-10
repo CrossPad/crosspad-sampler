@@ -459,6 +459,10 @@ void kit_load_task_start(bool onlyModified, int kitId) {
     xSemaphoreGive(s_workPending);
 }
 
+bool kit_load_task_is_worker() {
+    return s_worker != nullptr && xTaskGetCurrentTaskHandle() == s_worker;
+}
+
 bool kit_load_task_is_loading() {
     return s_loading;
 }

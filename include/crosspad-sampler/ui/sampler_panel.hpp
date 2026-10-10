@@ -48,6 +48,17 @@ void sampler_on_engine_note_on(uint8_t note, uint8_t wavIdx);
 /// Called by the platform's audio engine NoteOff callback to update GUI state.
 void sampler_on_engine_note_off(uint8_t note, uint8_t wavIdx);
 
+/// Ask about unsaved pad edits before this screen is left, if there are any.
+///
+/// Returns true when it asked, which means the caller's own way out must not
+/// run -- the dialog's Save or Discard takes it from there. False when there
+/// is nothing to lose.
+///
+/// The `<` that used to ask went with the UX 2000 chrome (no back button on
+/// any screen), so the question moved to the one gesture that still leaves:
+/// the power button's click.
+bool sampler_panel_confirm_exit();
+
 } // namespace crosspad_sampler
 
 #endif // USE_LVGL

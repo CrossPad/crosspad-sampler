@@ -17,12 +17,18 @@ namespace crosspad_sampler {
  *   1 = hold      — sample stops on pad release
  *   2 = loop      — reserved (treated as one-shot for now)
  *
- * Two performance modes, MPC-style, neither persisted:
+ * Performance modes, MPC-style, none persisted:
  *   Full level  — every hit plays at velocity 127, whatever the pad measured.
  *   16 levels   — the pad hit last before the mode went on becomes the
  *                 source; every pad then plays that source at one of sixteen
- *                 velocities, pad 0 the softest, pad 15 full. The LEDs show
- *                 the source's colour as a brightness ramp while it is on.
+ *                 levels:
+ *     Velocity  — pad 0 the softest, pad 15 full. The LEDs show the source's
+ *                 colour as a brightness ramp.
+ *     Pitch     — pad 0 as it is, each pad a semitone above the one before
+ *                 (pad 15 +15), at the velocity the pad measured -- the
+ *                 layout Pitch Play starts with. Each pad is a note of its
+ *                 own, so a chord holds. The LEDs show it as a keyboard: the
+ *                 source's notes bright, the sharps dim.
  */
 class SamplerPadLogic : public crosspad::IPadLogicHandler {
 public:
@@ -32,11 +38,13 @@ public:
     void setFullLevel(bool on) { fullLevel_ = on; }
     bool fullLevel() const { return fullLevel_; }
 
+    enum class Levels : uint8_t { Off = 0, Velocity, Pitch };
     /// Turning it on takes the last pad hit as the source (pad 0 when none
-    /// was hit yet) and paints the ramp; turning it off restores the kit's
-    /// colours.
-    void setSixteenLevels(bool on);
-    bool sixteenLevels() const { return sixteenLevels_; }
+    /// was hit yet) and paints the pads for it; switching between velocity
+    /// and pitch keeps the source; off restores the kit's colours.
+    void setLevels(Levels mode);
+    Levels levels() const { return levels_; }
+    bool sixteenLevels() const { return levels_ != Levels::Off; }
     uint8_t sixteenLevelsSource() const { return levelsSource_; }
 
     /// Repaints the pads for the active mode — the ramp, or the kit's own
@@ -65,12 +73,19 @@ private:
 
     /// The source pad's colour on every pad, brightness rising with the level.
     void loadLevelsColors();
+    /// The MIDI note a pad sends, moved by @p transpose and kept in range.
+    static uint8_t midiNote(crosspad::PadManager& padManager, uint8_t pad, int8_t transpose);
 
     /// Velocity a pad plays at under 16 levels: 7, 15, … 127.
     static uint8_t levelVelocity(uint8_t padIdx) { return static_cast<uint8_t>((padIdx + 1) * 8 - 1); }
+    /// Semitones a pad plays the source at under 16 levels of pitch.
+    static int8_t levelTranspose(uint8_t padIdx) { return static_cast<int8_t>(padIdx); }
+    /// The key a pad's note is struck under in pitch mode: one per pad, past
+    /// the pads' own, so each is a note of its own (SamplePlaybackData::key).
+    static constexpr uint8_t kLevelsKey = 16;
 
     bool    fullLevel_     = false;
-    bool    sixteenLevels_ = false;
+    Levels  levels_        = Levels::Off;
     uint8_t levelsSource_  = 0;
     uint8_t lastPad_       = 0;
 

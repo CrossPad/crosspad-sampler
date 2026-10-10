@@ -123,26 +123,32 @@ void SamplerPadLogic::onPadPress(crosspad::PadManager& padManager,
 
     // The velocity is already post-curve (the STM32 applies the per-pad
     // response), so it passes through linearly — unless a performance mode
-    // overrides it. Under 16 levels the pad hit only picks the velocity; what
-    // sounds (and what goes out over MIDI) is the source pad. The pad hit
-    // still gets the press feedback and the held state, so the ramp lights
-    // where the finger is.
+    // overrides it. Under 16 levels the pad hit only picks the level; what
+    // sounds (and what goes out over MIDI) is the source pad -- at a velocity
+    // of the ramp, or at a pitch of the scale. The pad hit still gets the
+    // press feedback and the held state, so the LEDs light where the finger is.
     uint8_t soundPad = padIdx;
-    if (sixteenLevels_) {
+    int8_t transpose = 0;
+    uint8_t key = crosspad::kSamplePlaybackOwnKey;
+    if (levels_ == Levels::Velocity) {
         soundPad = levelsSource_;
         velocity = levelVelocity(padIdx);
+    } else if (levels_ == Levels::Pitch) {
+        soundPad = levelsSource_;
+        transpose = levelTranspose(padIdx);
+        key = static_cast<uint8_t>(kLevelsKey + padIdx);
     } else {
         lastPad_ = padIdx;
     }
-    if (fullLevel_ && !sixteenLevels_) velocity = 127;
+    if (fullLevel_ && levels_ != Levels::Velocity) velocity = 127;
 
     crosspad::getEventBus().postSamplePlayback(
-        soundPad, /*wavIdx=*/0, /*isOn=*/true, crosspad::EventSource::App, velocity);
+        soundPad, /*wavIdx=*/0, /*isOn=*/true, crosspad::EventSource::App, velocity, transpose, key);
 
     padManager.notifyNoteOn(padIdx, velocity, /*fromSampler=*/true);
 
     if (padMidiEnabled()) {
-        crosspad::getMidiOutput().sendNoteOn(padManager.getMidiNoteForPad(soundPad),
+        crosspad::getMidiOutput().sendNoteOn(midiNote(padManager, soundPad, transpose),
                                              velocity,
                                              padManager.getPadChannel(soundPad));
     }
@@ -152,7 +158,10 @@ void SamplerPadLogic::onPadRelease(crosspad::PadManager& padManager,
                                     uint8_t padIdx) {
     if (padIdx >= PAD_COUNT) return;
 
-    const uint8_t soundPad = sixteenLevels_ ? levelsSource_ : padIdx;
+    const uint8_t soundPad = sixteenLevels() ? levelsSource_ : padIdx;
+    const bool pitch = levels_ == Levels::Pitch;
+    const int8_t transpose = pitch ? levelTranspose(padIdx) : 0;
+    const uint8_t key = pitch ? static_cast<uint8_t>(kLevelsKey + padIdx) : crosspad::kSamplePlaybackOwnKey;
 
     padManager.notifyNoteOff(padIdx, /*fromSampler=*/true);
 
@@ -164,12 +173,12 @@ void SamplerPadLogic::onPadRelease(crosspad::PadManager& padManager,
         crosspad::KitInfo* kit = kitMgr->getCurrentKit();
         if (kit && kit->parsed && kit->pads[soundPad].playbackMode == 1) {
             crosspad::getEventBus().postSamplePlayback(
-                soundPad, /*wavIdx=*/0, /*isOn=*/false, crosspad::EventSource::App);
+                soundPad, /*wavIdx=*/0, /*isOn=*/false, crosspad::EventSource::App, 127, transpose, key);
         }
     }
 
     if (padMidiEnabled()) {
-        crosspad::getMidiOutput().sendNoteOff(padManager.getMidiNoteForPad(soundPad),
+        crosspad::getMidiOutput().sendNoteOff(midiNote(padManager, soundPad, transpose),
                                               /*velocity=*/0,
                                               padManager.getPadChannel(soundPad));
     }
@@ -177,16 +186,23 @@ void SamplerPadLogic::onPadRelease(crosspad::PadManager& padManager,
 
 // ── Performance modes ────────────────────────────────────────────────────────
 
-void SamplerPadLogic::setSixteenLevels(bool on) {
-    if (on == sixteenLevels_) return;
-    sixteenLevels_ = on;
-    if (on) levelsSource_ = lastPad_;
+void SamplerPadLogic::setLevels(Levels mode) {
+    if (mode == levels_) return;
+    /* From off, the pad hit last is the source; between the two levels it
+     * stays the one it was. */
+    if (levels_ == Levels::Off) levelsSource_ = lastPad_;
+    levels_ = mode;
     refreshColors();
 }
 
 void SamplerPadLogic::refreshColors() {
-    if (sixteenLevels_) loadLevelsColors();
-    else                loadKitColors(crosspad::getPadManager());
+    if (sixteenLevels()) loadLevelsColors();
+    else                 loadKitColors(crosspad::getPadManager());
+}
+
+uint8_t SamplerPadLogic::midiNote(crosspad::PadManager& padManager, uint8_t pad, int8_t transpose) {
+    const int note = static_cast<int>(padManager.getMidiNoteForPad(pad)) + transpose;
+    return static_cast<uint8_t>(note < 0 ? 0 : (note > 127 ? 127 : note));
 }
 
 void SamplerPadLogic::onPadPressure(crosspad::PadManager& /*padManager*/,
@@ -204,7 +220,7 @@ void SamplerPadLogic::loadKitColors(crosspad::PadManager& padManager) {
     crosspad::KitInfo* kit = kitMgr->getCurrentKit();
     if (!kit || !kit->parsed) return;
 
-    if (sixteenLevels_) {
+    if (sixteenLevels()) {
         loadLevelsColors();
         return;
     }
@@ -230,7 +246,14 @@ void SamplerPadLogic::loadLevelsColors() {
     auto& ledCtrl = crosspad::getPadLedController();
     for (uint8_t i = 0; i < PAD_COUNT; ++i) {
         // Dim() takes 0..255; the softest pad keeps a floor so it is not off.
-        const uint8_t brightness = static_cast<uint8_t>(40 + (215 * i) / (PAD_COUNT - 1));
+        uint8_t brightness = static_cast<uint8_t>(40 + (215 * i) / (PAD_COUNT - 1));
+        if (levels_ == Levels::Pitch) {
+            /* A keyboard: the source's own note in every octave full, the
+             * other naturals half, the sharps low. */
+            const int semi = levelTranspose(i) % 12;
+            const bool sharp = semi == 1 || semi == 3 || semi == 6 || semi == 8 || semi == 10;
+            brightness = semi == 0 ? 255 : (sharp ? 40 : 130);
+        }
         ledCtrl.setPadColor(i, base.Dim(brightness));
         ledCtrl.setPadPressedColor(i, pressed);
         ledCtrl.setPadPlayingColor(i, base.Dim(brightness / 2));

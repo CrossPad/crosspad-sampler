@@ -141,17 +141,20 @@ static void set_lit(lv_obj_t * b, bool on)
 
 /* The two performance switches read their state from the pad logic, so a
  * mode changed from anywhere else (a kit reload, a later CDC verb) shows
- * up here too. "16 levels" names the source pad while it is on. */
+ * up here too. "16 levels" says which levels and names the source pad while
+ * it is on. */
 static void perf_modes_sync()
 {
+    using Levels = crosspad_sampler::SamplerPadLogic::Levels;
     auto& logic = getSamplerPadLogic();
     set_lit(fullLevelBtn, logic.fullLevel());
     set_lit(levelsBtn, logic.sixteenLevels());
     if (levelsLabel) {
-        if (logic.sixteenLevels()) {
-            lv_label_set_text_fmt(levelsLabel, "16 LEVELS: PAD %u", (unsigned)logic.sixteenLevelsSource() + 1);
-        } else {
-            lv_label_set_text(levelsLabel, "16 LEVELS");
+        const unsigned pad = (unsigned)logic.sixteenLevelsSource() + 1;
+        switch (logic.levels()) {
+            case Levels::Velocity: lv_label_set_text_fmt(levelsLabel, "16 LEVELS: PAD %u", pad); break;
+            case Levels::Pitch:    lv_label_set_text_fmt(levelsLabel, "16 PITCH: PAD %u", pad); break;
+            default:               lv_label_set_text(levelsLabel, "16 LEVELS"); break;
         }
     }
 }
@@ -207,8 +210,20 @@ public:
     void onDeactivate(PadManager& padManager) override {
         LV_LOG_INFO("Pad editor logic deactivated");
     }
+    /// A finger, or the sequencer playing a pattern back. Only a finger is
+    /// navigation: a scene running under an open editor moved the editor onto
+    /// whatever the pattern hit next, so the pad being worked on was lost on
+    /// every step -- and in REC MODE the take would have landed on it. The
+    /// sound is not gated, only who gets to steer the UI.
+    static bool played_by_hand(PadManager& padManager, uint8_t padIdx) {
+        const crosspad::EventSource src = padManager.pressSource(padIdx);
+        return src != crosspad::EventSource::SequencerCallback &&
+               src != crosspad::EventSource::SequencerInput;
+    }
+
     void onPadPress(PadManager& padManager, uint8_t padIdx, uint8_t velocity) override {
-        if (padIdx < 32) g_padHeldMask.fetch_or(1u << padIdx, std::memory_order_relaxed);
+        const bool byHand = played_by_hand(padManager, padIdx);
+        if (padIdx < 32 && byHand) g_padHeldMask.fetch_or(1u << padIdx, std::memory_order_relaxed);
         crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
         if (kit == NULL) return;
 
@@ -219,7 +234,7 @@ public:
          * at once. That is a task watchdog on the UART task with lv_inv_area in
          * its backtrace, and a UI that never comes back. The editor's own timer
          * picks this up on the LVGL thread. */
-        g_padPressPending.store(padIdx + 1, std::memory_order_relaxed);
+        if (byHand) g_padPressPending.store(padIdx + 1, std::memory_order_relaxed);
 
         /* REC MODE: the hit is the record button being pressed, and nothing
          * else. The pad's own sample would be recorded along with whatever the
@@ -236,7 +251,10 @@ public:
     }
 
     void onPadRelease(PadManager& padManager, uint8_t padIdx) override {
-        if (padIdx < 32) g_padHeldMask.fetch_and(~(1u << padIdx), std::memory_order_relaxed);
+        /* The same hand that set the bit clears it: a pattern step landing on
+         * a pad a finger is holding would otherwise close the take under it. */
+        if (padIdx < 32 && played_by_hand(padManager, padIdx))
+            g_padHeldMask.fetch_and(~(1u << padIdx), std::memory_order_relaxed);
         crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
         if (!kit) return;
         if (g_padEditorRecArm.load(std::memory_order_relaxed)) return;   // nothing sounded
@@ -501,6 +519,14 @@ static void ShowSaveConfirmationDialog(lv_obj_t * panel) {
     };
     g_saveConfirmDialog = ui_modal_choice("Unsaved changes", message.c_str(), kButtons, 3, 0,
                                           save_choice_cb, nullptr, nullptr);
+}
+
+/* Already inside namespace crosspad_sampler -- see the top of the file. */
+bool sampler_panel_confirm_exit() {
+    std::vector<uint8_t> dirty;
+    if (!HasDirtyPads(dirty)) return false;
+    ShowSaveConfirmationDialog(g_parentContainer);
+    return true;
 }
 
 static void PickKit_button_cb(lv_event_t * e) {
@@ -1002,16 +1028,20 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_obj_remove_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
     g_parentContainer = cont;
 
-    /* The screen in rows, as the Recorder and the pad editor are laid out:
-     * where you are along the top, the pads and the sound in the middle, the
-     * switches along the bottom. In a body of its own, so the editors opened
-     * over the panel (children of cont) still cover it whole. */
+    /* The screen on the design's three bands (UX 2000 section 5.1): the
+     * context row at y 34, the pads and the sound from y 60, the switches at
+     * y 206. Placed, not stacked -- the gaps the design leaves are not equal,
+     * which a flex column cannot say. In a body of its own, so the editors
+     * opened over the panel (children of cont) still cover it whole.
+     *
+     * SMP_Y turns a screen y into a y inside the body, which begins under the
+     * 30 px transport bar. */
+#define SMP_Y(v) ((v) - 30)
     lv_obj_t * body = lv_obj_create(cont);
     lv_obj_remove_style_all(body);
     lv_obj_set_size(body, LV_PCT(100), LV_PCT(100));
-    lv_obj_set_style_pad_all(body, 5, 0);
-    lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(body, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_all(body, 0, 0);
+    lv_obj_set_layout(body, LV_LAYOUT_NONE);
     lv_obj_remove_flag(body, LV_OBJ_FLAG_SCROLLABLE);
 
     const size_t kit_name_len = 32;
@@ -1021,12 +1051,15 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_subject_init_int(&s_pad_sampler, 0);
     s_selectedPad = -1;
 
-    // -- where you are: back, the pad, the kit --
+    /* -- where you are: the pad, and the kit --
+     *
+     * No back button. Back is the power button's click, which still raises
+     * the save confirmation through the app's own back hook, and apps are
+     * switched with MODE and a pad (UX 2000 section 2). The 30 px it held go
+     * to the kit's name, which is the thing on this row worth reading. */
     lv_obj_t * top = make_row(body, 22);
-    lv_obj_t * backBtn = make_button(top, 30, LV_SYMBOL_LEFT, [](lv_event_t *) {
-        LV_LOG_INFO("Exit button clicked");
-        ShowSaveConfirmationDialog(g_parentContainer);
-    });
+    lv_obj_set_pos(top, 6, SMP_Y(35));
+    lv_obj_set_width(top, 308);
     padChip = lv_obj_create(top);
     lv_obj_remove_style_all(padChip);
     style_button(padChip, 56, 22);
@@ -1043,7 +1076,9 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_label_bind_text(lv_obj_get_child(pickKitBtn, 0), &s_kit_name, LV_SYMBOL_DIRECTORY "  %s");
 
     // -- the pads, and the sound of the last one --
-    lv_obj_t * mid = make_row(body, LV_SIZE_CONTENT);
+    lv_obj_t * mid = make_row(body, 138);
+    lv_obj_set_pos(mid, 6, SMP_Y(62));
+    lv_obj_set_width(mid, 308);
     lv_obj_set_style_pad_column(mid, 5, 0);
 
     g_samplerPadEditorLogic = std::make_shared<PadEditorLogicHandler>();
@@ -1058,18 +1093,19 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     /* Squares in the kit's colours on the dark, big enough for a finger:
      * 30 px and 3 between, which is what the width leaves beside the
      * waveform and the meter. */
-    constexpr int32_t kCell = 30;
-    constexpr int32_t kGap  = 3;
+    constexpr int32_t kCellW = 31, kCellH = 32;   // the design's pad
+    constexpr int32_t kGap  = 2;
     if (buttonFrame) {
-        lv_obj_set_size(buttonFrame, 4 * kCell + 3 * kGap, 4 * kCell + 3 * kGap);
+        lv_obj_set_size(buttonFrame, 4 * kCellW + 3 * kGap, 4 * kCellH + 3 * kGap);
         lv_obj_set_style_pad_all(buttonFrame, 0, 0);
         lv_obj_set_style_border_width(buttonFrame, 0, 0);
         uint32_t cnt = lv_obj_get_child_cnt(buttonFrame);
         for (uint32_t i = 0; i < cnt; ++i) {
             lv_obj_t * btn = lv_obj_get_child(buttonFrame, i);
             if (!btn) continue;
-            lv_obj_set_size(btn, kCell, kCell);
-            lv_obj_align(btn, LV_ALIGN_TOP_LEFT, (int32_t)(i % 4) * (kCell + kGap), (int32_t)(i / 4) * (kCell + kGap));
+            lv_obj_set_size(btn, kCellW, kCellH);
+            lv_obj_align(btn, LV_ALIGN_TOP_LEFT, (int32_t)(i % 4) * (kCellW + kGap),
+                         (int32_t)(i / 4) * (kCellH + kGap));
             lv_obj_set_style_radius(btn, 5, 0);
             lv_obj_set_style_shadow_width(btn, 0, 0);
             lv_obj_set_style_border_width(btn, 0, 0);
@@ -1099,7 +1135,7 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
      * picture, how far it has played under it. */
     lv_obj_t * sound = lv_obj_create(mid);
     lv_obj_remove_style_all(sound);
-    lv_obj_set_height(sound, 4 * kCell + 3 * kGap);
+    lv_obj_set_height(sound, 4 * kCellH + 3 * kGap);
     lv_obj_set_flex_grow(sound, 1);
     lv_obj_set_flex_flow(sound, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(sound, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
@@ -1149,10 +1185,19 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_obj_set_style_text_font(timeLabel, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(timeLabel, kDim, 0);
 
-    vuMeter = create_vu_meter(mid, 4, 4 * kCell + 3 * kGap);
+    /* Two thin bars at the right edge, as the design draws them: the helper
+     * makes a stereo pair, 4 px each. */
+    vuMeter = create_vu_meter(mid, 4, 4 * kCellH + 3 * kGap);
 
     // -- the switches, and the way into the pad --
-    lv_obj_t * bottom = make_row(body, 24);
+    /* The design's key row: 28 px tall, 4 px apart, filling the width.
+     * make_button() builds the 22 px chip the context row wants, so the three
+     * keys are grown after it -- measured on the board, they sat 22 px tall
+     * and centred at y 209 instead of filling 206..234. */
+    lv_obj_t * bottom = make_row(body, 28);
+    lv_obj_set_pos(bottom, 6, SMP_Y(206));
+    lv_obj_set_width(bottom, 308);
+    lv_obj_set_style_pad_column(bottom, 4, 0);
     /* Performance switches: lit (the accent) while they hold. */
     fullLevelBtn = make_button(bottom, 80, "FULL LEVEL", [](lv_event_t *) {
         auto& logic = getSamplerPadLogic();
@@ -1160,9 +1205,14 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         perf_modes_sync();
     });
     lv_obj_set_flex_grow(fullLevelBtn, 1);
+    /* 16 levels round: off, velocity, pitch, off. */
     levelsBtn = make_button(bottom, 80, "", [](lv_event_t *) {
+        using Levels = crosspad_sampler::SamplerPadLogic::Levels;
         auto& logic = getSamplerPadLogic();
-        logic.setSixteenLevels(!logic.sixteenLevels());
+        const Levels next = logic.levels() == Levels::Off      ? Levels::Velocity
+                          : logic.levels() == Levels::Velocity ? Levels::Pitch
+                                                               : Levels::Off;
+        logic.setLevels(next);
         perf_modes_sync();
     });
     lv_obj_set_flex_grow(levelsBtn, 1);
@@ -1218,14 +1268,15 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         }
     }, cont);
     lv_obj_set_flex_grow(editBtn, 1);
+    for (lv_obj_t * k : {fullLevelBtn, levelsBtn, editBtn}) lv_obj_set_height(k, 28);
 
-    /* The encoder: out, the kit, the switches, the editor -- in reading order. */
-    lv_group_add_obj(g_sampler, backBtn);
+    /* The encoder: the kit, the switches, the editor -- in reading order. */
     lv_group_add_obj(g_sampler, pickKitBtn);
     lv_group_add_obj(g_sampler, fullLevelBtn);
     lv_group_add_obj(g_sampler, levelsBtn);
     lv_group_add_obj(g_sampler, editBtn);
 
+#undef SMP_Y
     show_selected_pad(-1);
     lv_obj_update_layout(cont);
 
