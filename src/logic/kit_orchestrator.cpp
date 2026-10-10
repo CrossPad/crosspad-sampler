@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <crosspad-sampler/logic/kit_orchestrator.hpp>
 #include <crosspad-sampler/logic/pad_color_manager.hpp>
