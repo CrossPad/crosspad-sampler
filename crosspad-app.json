@@ -1,17 +1,18 @@
 {
   "name": "Sampler",
   "id": "sampler",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Sample player with 16 pads, waveform editing, kit management",
   "category": "music",
   "icon": "audio.png",
   "component_path": "components/crosspad-sampler",
   "platforms": ["esp-idf", "arduino"],
   "requires": {
-    "crosspad-core": ">=1.55.0",
+    "crosspad-core": ">=1.56.0",
     "crosspad-gui": ">=1.16.0"
   },
   "changelog": [
+    "0.10.0: NORM in the pad editor brings a pad's sample up until its loudest moment sits at -0.3 dB, as a copy beside it (<name>_norm.wav) the pad then plays -- trim, pitch and filters stay, the original is not touched, a sample already at full level is left alone. PLAY and LOOP are their symbols alone to make room. Needs core 1.56.",
     "0.9.0: a take keeps what each hit sounded as. Under 16 levels a hit is recorded as the source pad at its level -- velocity or pitch -- with the velocity Full level or the ramp made of it, and plays back that way with the mode off; a plain part plays its own pads with the mode on. The modes shape what a finger plays, not a take's playback. The pad logic offers its 16 levels to other apps (core IPadPerformance), so the Sequencer can turn it on. Needs core 1.55.",
     "0.8.1: + NEW finds a free kit name with stat(), and a name the card cannot answer for counts as taken (\"card read failed\"); no <fstream> left (smaller firmware image)",
     "0.8.0: the Unsaved changes dialog in the look of the rest of the device -- Save, Discard (red), Cancel, the pads changed, the encoder on Save, the power button backs out of it; requires crosspad-gui 1.16",
