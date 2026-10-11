@@ -33,6 +33,7 @@
 #include <crosspad/pad/PadManager.hpp>
 #include <crosspad/event/IEventBus.hpp>
 
+#include <crosspad-gui/components/kit_loader.h>
 #include <crosspad-gui/components/status_bar.h>
 #include <lvgl.h>
 
@@ -82,6 +83,8 @@ static int  s_reqKitId        = -1;
 // ── Cross-thread progress hand-off ──────────────────────────────────────────
 static std::atomic<int> s_progress{0};        // 0..100
 static std::atomic<int> s_outcome{0};         // 0 = running, 1 = done, -1 = error
+static std::atomic<int> s_padsDone{0};        // for "KIT LOADED done/total"
+static std::atomic<int> s_padsTotal{0};
 
 // Why it failed, for the status bar. Published by s_outcome's release/acquire
 // pair, so it needs no lock.
@@ -192,7 +195,9 @@ static void force_quiet(uint8_t pad) {
 static void progress_poll_timer_cb(lv_timer_t* timer) {
     int outcome = s_outcome.load(std::memory_order_acquire);
     if (outcome == 0) {
-        crosspad_gui::statusbar_set_loading(s_progress.load(std::memory_order_relaxed));
+        const int progress = s_progress.load(std::memory_order_relaxed);
+        crosspad_gui::statusbar_set_loading(progress);
+        crosspad_gui::kit_loader_set(static_cast<uint8_t>(progress));
         // Every LED write of the swap happens here, on the LVGL thread; the
         // loader only clears bits.
         getPadColorManager().tickKitSwap();
@@ -200,6 +205,8 @@ static void progress_poll_timer_cb(lv_timer_t* timer) {
     }
     if (outcome > 0) {
         crosspad_gui::statusbar_process_loader_status(100, true, false, "Kit loaded");
+        crosspad_gui::kit_loader_done(static_cast<uint8_t>(s_padsDone.load(std::memory_order_relaxed)),
+                                      static_cast<uint8_t>(s_padsTotal.load(std::memory_order_relaxed)));
     } else {
         crosspad_gui::statusbar_process_loader_status(100, true, true, s_error);
     }
@@ -293,6 +300,7 @@ static void run_one_load(bool onlyModified, int kitId) {
     }
     const int total = __builtin_popcount(todo);
     int done = 0;
+    s_padsTotal.store(total, std::memory_order_relaxed);
 
     /* Copies of pads with pitch or filters first, while the outgoing kit still
      * plays: a pad swapped before its copy exists would come back plain. */
@@ -327,6 +335,7 @@ static void run_one_load(bool onlyModified, int kitId) {
             todo &= static_cast<uint16_t>(~bit);
             progressed = true;
             s_progress.store((++done * 100) / (total ? total : 1), std::memory_order_relaxed);
+            s_padsDone.store(done, std::memory_order_relaxed);
         }
         if (!todo || progressed) continue;
 
@@ -342,6 +351,7 @@ static void run_one_load(bool onlyModified, int kitId) {
             reload_pad(padIdx, rec, false);
             todo &= static_cast<uint16_t>(~bit);
             s_progress.store((++done * 100) / (total ? total : 1), std::memory_order_relaxed);
+            s_padsDone.store(done, std::memory_order_relaxed);
             continue;
         }
         vTaskDelay(pdMS_TO_TICKS(kDeferPollMs));
@@ -439,10 +449,20 @@ void kit_load_task_start(bool onlyModified, int kitId) {
 
     s_loading = true;
     s_progress.store(0, std::memory_order_relaxed);
+    s_padsDone.store(0, std::memory_order_relaxed);
+    s_padsTotal.store(0, std::memory_order_relaxed);
     set_error(nullptr);
     s_outcome.store(0, std::memory_order_release);
 
     crosspad_gui::statusbar_set_loading(0);
+    /* A whole kit gets the bar in the context row. A pad editor's reload of
+     * the pads it changed does not: it would flash over the editor at every
+     * edit. kitId -1 is the current kit again. */
+    if (!onlyModified) {
+        crosspad::KitInfo* kit = nullptr;
+        if (auto* km = crosspad::getKitManager()) kit = kitId >= 0 ? km->getKit(kitId) : km->getCurrentKit();
+        crosspad_gui::kit_loader_start(kit ? kit->name.c_str() : nullptr);
+    }
 
     s_reqOnlyModified = onlyModified;
     s_reqKitId        = kitId;
