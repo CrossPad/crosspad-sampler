@@ -1,6 +1,7 @@
 #pragma once
 
 #include <crosspad/pad/IPadLogicHandler.hpp>
+#include <crosspad/pad/PadPerformance.hpp>
 #include <crosspad/event/IEventBus.hpp>
 
 namespace crosspad_sampler {
@@ -29,8 +30,13 @@ namespace crosspad_sampler {
  *                 layout Pitch Play starts with. Each pad is a note of its
  *                 own, so a chord holds. The LEDs show it as a keyboard: the
  *                 source's notes bright, the sharps dim.
+ *
+ * A take keeps what each hit sounded as (performance()), and its playback is
+ * played that way -- a part recorded in 16 levels plays its source pad at
+ * its levels with the mode off, and a plain part plays its own pads with the
+ * mode on. The modes shape what a finger plays, not what was recorded.
  */
-class SamplerPadLogic : public crosspad::IPadLogicHandler {
+class SamplerPadLogic : public crosspad::IPadLogicHandler, public crosspad::IPadPerformance {
 public:
     SamplerPadLogic() = default;
     ~SamplerPadLogic() override = default;
@@ -38,12 +44,13 @@ public:
     void setFullLevel(bool on) { fullLevel_ = on; }
     bool fullLevel() const { return fullLevel_; }
 
-    enum class Levels : uint8_t { Off = 0, Velocity, Pitch };
+    using Levels = crosspad::PadLevels;
     /// Turning it on takes the last pad hit as the source (pad 0 when none
     /// was hit yet) and paints the pads for it; switching between velocity
     /// and pitch keeps the source; off restores the kit's colours.
-    void setLevels(Levels mode);
-    Levels levels() const { return levels_; }
+    void setLevels(Levels mode) override;
+    Levels levels() const override { return levels_; }
+    uint8_t levelsSource() const override { return levelsSource_; }
     bool sixteenLevels() const { return levels_ != Levels::Off; }
     uint8_t sixteenLevelsSource() const { return levelsSource_; }
 
@@ -67,7 +74,16 @@ public:
     /// Reserved for future aftertouch use — no-op.
     void onPadPressure(crosspad::PadManager& padManager, uint8_t padIdx, uint8_t pressure) override;
 
+    /// What a finger on @p padIdx sounds as now: the levels' source at a
+    /// level, and the velocity Full level or the ramp makes of it.
+    crosspad::PadPerformance performance(uint8_t padIdx, uint8_t& velocity) const override;
+
 private:
+    /// How the press or release of @p padIdx sounds: what the recorder kept
+    /// with it for its own presses, the mode the pads are in for a finger's.
+    crosspad::PadPerformance pressPerformance(crosspad::PadManager& padManager, uint8_t padIdx,
+                                              uint8_t& velocity) const;
+
     /// Load per-pad colors from the current kit into PadLedController.
     void loadKitColors(crosspad::PadManager& padManager);
 

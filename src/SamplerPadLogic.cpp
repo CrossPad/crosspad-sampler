@@ -127,20 +127,20 @@ void SamplerPadLogic::onPadPress(crosspad::PadManager& padManager,
     // sounds (and what goes out over MIDI) is the source pad -- at a velocity
     // of the ramp, or at a pitch of the scale. The pad hit still gets the
     // press feedback and the held state, so the LEDs light where the finger is.
+    const crosspad::PadPerformance perf = pressPerformance(padManager, padIdx, velocity);
     uint8_t soundPad = padIdx;
     int8_t transpose = 0;
     uint8_t key = crosspad::kSamplePlaybackOwnKey;
-    if (levels_ == Levels::Velocity) {
-        soundPad = levelsSource_;
-        velocity = levelVelocity(padIdx);
-    } else if (levels_ == Levels::Pitch) {
-        soundPad = levelsSource_;
+    if (!perf.plain()) soundPad = perf.source < PAD_COUNT ? perf.source : padIdx;
+    if (perf.levels == Levels::Pitch) {
         transpose = levelTranspose(padIdx);
         key = static_cast<uint8_t>(kLevelsKey + padIdx);
-    } else {
+    }
+    /* The source is the pad a finger hit last outside the levels -- not one a
+     * take played. */
+    if (perf.plain() && padManager.pressSource(padIdx) != crosspad::EventSource::SequencerCallback) {
         lastPad_ = padIdx;
     }
-    if (fullLevel_ && levels_ != Levels::Velocity) velocity = 127;
 
     crosspad::getEventBus().postSamplePlayback(
         soundPad, /*wavIdx=*/0, /*isOn=*/true, crosspad::EventSource::App, velocity, transpose, key);
@@ -158,8 +158,10 @@ void SamplerPadLogic::onPadRelease(crosspad::PadManager& padManager,
                                     uint8_t padIdx) {
     if (padIdx >= PAD_COUNT) return;
 
-    const uint8_t soundPad = sixteenLevels() ? levelsSource_ : padIdx;
-    const bool pitch = levels_ == Levels::Pitch;
+    uint8_t velocity = 0;   // a release has none; the lookup wants somewhere to put it
+    const crosspad::PadPerformance perf = pressPerformance(padManager, padIdx, velocity);
+    const uint8_t soundPad = (!perf.plain() && perf.source < PAD_COUNT) ? perf.source : padIdx;
+    const bool pitch = perf.levels == Levels::Pitch;
     const int8_t transpose = pitch ? levelTranspose(padIdx) : 0;
     const uint8_t key = pitch ? static_cast<uint8_t>(kLevelsKey + padIdx) : crosspad::kSamplePlaybackOwnKey;
 
@@ -201,6 +203,26 @@ void SamplerPadLogic::refreshColors() {
 uint8_t SamplerPadLogic::midiNote(crosspad::PadManager& padManager, uint8_t pad, int8_t transpose) {
     const int note = static_cast<int>(padManager.getMidiNoteForPad(pad)) + transpose;
     return static_cast<uint8_t>(note < 0 ? 0 : (note > 127 ? 127 : note));
+}
+
+crosspad::PadPerformance SamplerPadLogic::performance(uint8_t padIdx, uint8_t& velocity) const {
+    crosspad::PadPerformance p;
+    p.levels = levels_;
+    if (levels_ != Levels::Off) p.source = levelsSource_;
+    if (levels_ == Levels::Velocity) velocity = levelVelocity(padIdx);
+    else if (fullLevel_)             velocity = 127;
+    return p;
+}
+
+crosspad::PadPerformance SamplerPadLogic::pressPerformance(crosspad::PadManager& padManager,
+                                                           uint8_t padIdx, uint8_t& velocity) const {
+    /* A take's hit carries what it sounded as, its velocity already resolved:
+     * the modes are for fingers, and applied again they would turn a plain
+     * part into sixteen levels of one pad. */
+    if (padManager.pressSource(padIdx) == crosspad::EventSource::SequencerCallback) {
+        return padManager.pressPerformance(padIdx);
+    }
+    return performance(padIdx, velocity);
 }
 
 void SamplerPadLogic::onPadPressure(crosspad::PadManager& /*padManager*/,
