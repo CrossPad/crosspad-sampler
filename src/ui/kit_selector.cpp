@@ -1586,7 +1586,7 @@ void overlay_deleted_cb(lv_event_t* e) {
 
 void kit_selector_destroy(lv_obj_t* selector) {
     reset_state();
-    lv_obj_delete_async(selector);
+    if (selector) lv_obj_delete_async(selector);
     /* Three 122x122 covers are 180 kB of the 192 kB image cache, and they
      * outlived the browser until the next launcher rebuild -- long enough for
      * the sample explorer behind the sampler to run PSRAM dry. Both async

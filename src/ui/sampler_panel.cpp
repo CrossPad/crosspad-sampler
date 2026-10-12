@@ -1399,7 +1399,7 @@ void sampler_panel_destroy(lv_obj_t * panel)
 
     LV_LOG_INFO("Sampler GUI destroyed");
 
-    lv_obj_delete_async(panel);
+    if (panel) lv_obj_delete_async(panel);
 
     auto* settingsPtr = crosspad::getPlatformServices().settings;
     if (settingsPtr) {
