@@ -5,6 +5,7 @@
 #include "crosspad-sampler/waveform/waveform_loader.hpp"
 #include "crosspad-sampler/waveform/waveform_cache_ui.hpp"
 #include "crosspad-sampler/SamplerConfig.hpp"
+#include "crosspad-sampler/ui/sampler_styles.hpp"
 
 // crosspad-gui styles
 #include "crosspad-gui/crosspad_gui.h"
@@ -270,7 +271,7 @@ lv_obj_t* waveform_create_display(lv_obj_t* parent, const char* filename) {
     lv_canvas_fill_bg(canvas, lv_color_hex3(0x222), LV_OPA_COVER);
     lv_obj_set_size(canvas, WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT);
 
-    // Apply waveform box style from crosspad-gui (declared in crosspad-gui/styles/styles.h)
+    sampler_styles_init();
     lv_obj_add_style(canvas, &styleWaveformBox, 0);
 
     if (filename && filename[0]) {

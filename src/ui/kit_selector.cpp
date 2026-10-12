@@ -22,6 +22,7 @@
 #include <crosspad-sampler/ui/kit_selector.hpp>
 #include <crosspad-sampler/SamplerPlatformCallbacks.hpp>
 #include <crosspad-sampler/logic/kit_load_task.hpp>
+#include <crosspad-sampler/ui/sampler_styles.hpp>
 
 #include <crosspad/kit/IKitManager.hpp>
 #include <crosspad/kit/KitPathUtils.hpp>
@@ -1332,6 +1333,7 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
      * launcher re-decodes its icons from the assets partition on the way back. */
     lv_image_cache_drop(NULL);
 
+    sampler_styles_init();
     lv_obj_t* scr = lv_obj_create(config.parent);
     lv_obj_add_style(scr, &styleKitBrowserScreen, 0);
     lv_obj_set_size(scr, LV_PCT(100), LV_PCT(100));
