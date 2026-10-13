@@ -1,7 +1,7 @@
 {
   "name": "Sampler",
   "id": "sampler",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Sample player with 16 pads, waveform editing, kit management",
   "category": "music",
   "icon": "audio.png",
@@ -12,6 +12,7 @@
     "crosspad-gui": ">=1.16.0"
   },
   "changelog": [
+    "0.11.0: A control being turned in the pad editor stays the one being turned when another pad is struck -- PITCH, VOL, PAN, HP, LP, CHOKE, the colour, START and END (in FINE the picture zooms in round the new pad's marker) -- so pad after pad is tuned without reaching for it again; nothing turned, nothing is. START and END in FINE speed up when turned fast: detents one way under 120 ms apart double the step, 1 ms up to 64 ms a detent; a pause or a turn back is 1 ms again.",
     "0.10.0: NORM in the pad editor brings a pad's sample up until its loudest moment sits at -0.3 dB, as a copy beside it (<name>_norm.wav) the pad then plays -- trim, pitch and filters stay, the original is not touched, a sample already at full level is left alone. PLAY and LOOP are their symbols alone to make room. Needs core 1.56.",
     "0.9.0: a take keeps what each hit sounded as. Under 16 levels a hit is recorded as the source pad at its level -- velocity or pitch -- with the velocity Full level or the ramp made of it, and plays back that way with the mode off; a plain part plays its own pads with the mode on. The modes shape what a finger plays, not a take's playback. The pad logic offers its 16 levels to other apps (core IPadPerformance), so the Sequencer can turn it on. Needs core 1.55.",
     "0.8.1: + NEW finds a free kit name with stat(), and a name the card cannot answer for counts as taken (\"card read failed\"); no <fstream> left (smaller firmware image)",

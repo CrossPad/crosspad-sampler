@@ -87,6 +87,12 @@ namespace {
 constexpr uint16_t kCols       = 300;     // columns of the picture
 constexpr uint32_t kTickMs     = 50;
 constexpr uint32_t kZoomFrames = 12000;   // each side of a marker in fine mode, ~0.25 s
+/* FINE turned fast: detents in one direction close together move further each
+ * time, doubling up to kFineRunMax ms a detent, so a spin crosses the zoomed
+ * picture rather than a millisecond a click; a pause or a turn back is one
+ * millisecond again. */
+constexpr uint32_t kFineFastMs = 120;
+constexpr uint32_t kFineRunMax = 64;
 constexpr uint32_t kSettleMs   = 150;     // a marker still this long: the pad reloads, a loop restarts
 constexpr uint32_t kFxSettleMs = 400;     // PITCH, HP, LP still this long: the pad's copy is rendered
 constexpr float    kNormPeak   = 0.966f;  // NORM's loudest sample: -0.3 dB of full scale
@@ -166,6 +172,9 @@ bool     s_viewWanted = false;            // a picture asked for while a job ran
 uint32_t s_wantA = 0, s_wantB = 0;
 bool     s_loading = false;               // the markers take the pad's trim when the picture comes
 Edit     s_editStart = Edit::None, s_editEnd = Edit::None;
+uint32_t s_fineRun = 1;                   // ms a FINE detent moves now
+uint32_t s_fineAt = 0;                    // when the last one came
+int      s_fineDir = 0;
 bool     s_looping = false;               // LOOP: round and round
 bool     s_playing = false;               // PLAY: once
 bool     s_fxMoved = false;               // PITCH, HP or LP turned; the copy is asked for once it settles
@@ -655,11 +664,16 @@ crosspad::PreviewSound pad_sound()
 }
 
 /// Pad @p idx on screen: its settings, its sample, its trim.
+///
+/// A value being turned stays the one being turned -- PITCH, a filter, START
+/// in FINE: one pad after another is tuned with the same control, and only
+/// the pad changes under it. Nothing turned, nothing is.
 void open_pad(int idx)
 {
+    const bool turning = s_group && lv_group_get_editing(s_group);
     stop_loop();
     s_pad = idx;
-    s_editStart = s_editEnd = Edit::None;
+    if (!turning) s_editStart = s_editEnd = Edit::None;
     s_delArmed = false;
     s_moved = false;
     s_sample.clear();
@@ -680,7 +694,7 @@ void open_pad(int idx)
         request_view(0, 0);
     }
     s_color = p ? color_index(p->color) : 0;
-    if (s_group) lv_group_set_editing(s_group, false);
+    if (s_group) lv_group_set_editing(s_group, turning);
     light_pads();
     show_pad();
     show_marker_labels();
@@ -849,8 +863,21 @@ void marker_cb(lv_event_t* e)
     if (!dir || edit == Edit::None) return;
     if (rev) dir = -dir;
     const uint32_t viewLen = s_ov.end > s_ov.start ? s_ov.end - s_ov.start : s_frames;
+    if (edit == Edit::Fine) {
+        /* Strictly later, not merely soon: a quick flick reaches LVGL as
+         * several keys inside one tick, and those carry their own distance. */
+        const uint32_t now = lv_tick_get();
+        const uint32_t since = now - s_fineAt;
+        if (dir == s_fineDir && since > 0 && since <= kFineFastMs) {
+            s_fineRun = std::min(kFineRunMax, s_fineRun * 2);
+        } else if (dir != s_fineDir || since > kFineFastMs) {
+            s_fineRun = 1;
+        }
+        s_fineDir = dir;
+        s_fineAt = now;
+    }
     const uint32_t step = edit == Edit::Coarse ? std::max<uint32_t>(1, viewLen / kCols)
-                                               : std::max<uint32_t>(1, s_rate / 1000);
+                                               : std::max<uint32_t>(1, s_rate / 1000) * s_fineRun;
     int64_t v = (int64_t)m + (int64_t)dir * step;
     const int64_t lo = movesStart ? 0 : (int64_t)s_start + 1;
     const int64_t hi = movesStart ? (int64_t)s_end - 1 : (int64_t)s_frames;
@@ -1383,6 +1410,13 @@ void tick_cb(lv_timer_t*)
                         if (!s_end || s_end > s_frames) s_end = s_frames;
                         if (s_start >= s_end) s_start = 0;
                         s_loading = false;
+                        /* FINE kept from the pad before: the picture zooms in
+                         * round this pad's marker, as the click into FINE does. */
+                        const bool fineStart = s_editStart == Edit::Fine;
+                        if (fineStart || s_editEnd == Edit::Fine) {
+                            const uint32_t m = fineStart != reversed() ? s_start : s_end;
+                            request_view(m > kZoomFrames ? m - kZoomFrames : 0, std::min(s_frames, m + kZoomFrames));
+                        }
                     }
                     /* A take of our own: the markers go on the sound rather
                      * than on the file, so the pad plays from the attack the
