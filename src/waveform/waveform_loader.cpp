@@ -47,7 +47,10 @@ constexpr uint32_t kRetryDelayMs = 150;
  * still held the last kit's, simply never got those waveforms for as long as
  * it stayed loaded. So the queue running dry is a cue to walk the current kit
  * again. The budget is per kit — a layer whose file is broken fails for good,
- * and re-queueing it forever would be a card read every second. */
+ * and re-queueing it forever would be a card read every second. A sweep ends
+ * the sweeping only when the kit has nothing left uncached: one whose every
+ * request met a queue another thread filled meanwhile queued nothing, with
+ * most of the kit still to fetch. */
 constexpr uint32_t kSweepIdleMs  = 1000;
 constexpr uint8_t  kSweepBudget  = 8;
 
@@ -59,6 +62,8 @@ static volatile bool  s_running = false;
 static WaveformLoaderStats s_stats;
 static uint8_t s_sweepsLeft = kSweepBudget;   // loader task + clear_queue only
 static uint32_t s_kitRequested = 0;           // requests since this kit was picked
+
+static int preload_current_kit(int maxPads, int* uncached);
 
 static void requeue_or_fail(WaveformLoadRequest& req, uint32_t& failCounter) {
     if (req.attempt + 1 < kMaxAttempts) {
@@ -85,8 +90,10 @@ static void loader_task(void* /*param*/) {
             // Nothing waiting: top up from the kit, then block again.
             if (s_running && s_sweepsLeft > 0) {
                 s_stats.sweeps++;
-                if (waveform_loader_preload_kit(16) == 0) s_sweepsLeft = 0;
-                else                                      s_sweepsLeft--;
+                int uncached = 0;
+                preload_current_kit(PAD_COUNT, &uncached);
+                if (uncached == 0) s_sweepsLeft = 0;
+                else               s_sweepsLeft--;
             }
             continue;
         }
@@ -289,6 +296,12 @@ void waveform_loader_sweep_now() {
 }
 
 int waveform_loader_preload_kit(int maxPads) {
+    return preload_current_kit(maxPads, nullptr);
+}
+
+/* @p uncached, when given, counts the layers not in the cache, whether their
+ * request got into the queue or not. */
+static int preload_current_kit(int maxPads, int* uncached) {
     if (!s_running) waveform_loader_start();
     if (!s_queue.valid()) return 0;
 
@@ -305,6 +318,7 @@ int waveform_loader_preload_kit(int maxPads) {
             std::string resolvedPath = crosspad::resolveKitSamplePath(kit->path, sample.sample);
             if (resolvedPath.empty()) continue;
             if (waveform_cache_find(resolvedPath.c_str())) continue;
+            if (uncached) ++*uncached;
 
             // The full-file envelope: crop in/out is drawn as markers over
             // the rendered view, so trimming the cache would misalign them.
