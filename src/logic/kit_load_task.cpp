@@ -53,6 +53,22 @@
 
 namespace crosspad_sampler {
 
+namespace {
+// __builtin_popcount()/__builtin_ctz() are GCC/Clang; MSVC (crosspad-pc) has neither.
+int pad_count(uint16_t mask) {
+    int n = 0;
+    for (; mask; mask = static_cast<uint16_t>(mask & (mask - 1))) ++n;
+    return n;
+}
+
+int lowest_pad(uint16_t mask) {
+    if (!mask) return 0;
+    int i = 0;
+    for (; !(mask & 1u); mask = static_cast<uint16_t>(mask >> 1)) ++i;
+    return i;
+}
+}  // namespace
+
 static volatile bool s_loading = false;
 
 static constexpr size_t LOAD_TASK_STACK = 8096;
@@ -327,7 +343,7 @@ static void run_one_load(bool onlyModified, int kitId) {
         todo |= static_cast<uint16_t>(1u << padIdx);
     }
     const uint16_t reloaded = todo;
-    const int total = __builtin_popcount(todo);
+    const int total = pad_count(todo);
     int done = 0;
 
     /* Copies of pads with pitch or filters first, while the outgoing kit still
@@ -369,9 +385,9 @@ static void run_one_load(bool onlyModified, int kitId) {
         // Only sounding pads are left. The last one gets a moment to end on
         // its own — most samples are shorter than that — but not to hold the
         // whole kit hostage; nor does anything past the deadline.
-        if (__builtin_popcount(todo) == 1) lastAloneMs += kDeferPollMs;
+        if (pad_count(todo) == 1) lastAloneMs += kDeferPollMs;
         if (lastAloneMs >= kLastPadGraceMs || waitedMs >= kDeferDeadlineMs) {
-            const uint8_t padIdx = static_cast<uint8_t>(__builtin_ctz(todo));
+            const uint8_t padIdx = static_cast<uint8_t>(lowest_pad(todo));
             const uint16_t bit = static_cast<uint16_t>(1u << padIdx);
             force_quiet(padIdx);
             rec.forced |= bit;
@@ -414,8 +430,8 @@ static void run_one_load(bool onlyModified, int kitId) {
     // fill it, but saying "loaded" lit sixteen dead pads as ready.
     const uint16_t named = static_cast<uint16_t>(reloaded & ~rec.empty);
     const uint16_t ready = static_cast<uint16_t>(named & ~rec.failed);
-    s_padsDone.store(__builtin_popcount(ready), std::memory_order_relaxed);
-    s_padsTotal.store(__builtin_popcount(named), std::memory_order_relaxed);
+    s_padsDone.store(pad_count(ready), std::memory_order_relaxed);
+    s_padsTotal.store(pad_count(named), std::memory_order_relaxed);
     rec.ok = onlyModified || reloaded == 0 || ready != 0;
     if (!rec.ok) {
         char msg[64];
