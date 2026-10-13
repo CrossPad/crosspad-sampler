@@ -167,13 +167,9 @@ void SamplerPadLogic::onPadRelease(crosspad::PadManager& padManager,
 
     padManager.notifyNoteOff(padIdx, /*fromSampler=*/true);
 
-    if (padMidiEnabled()) {
-        crosspad::getMidiOutput().sendNoteOff(midiNote(padManager, soundPad, transpose),
-                                              /*velocity=*/0,
-                                              padManager.getPadChannel(soundPad));
-    }
-
-    // Hold mode: the release has to tell the engine to cut playback.
+    // Hold mode: the release has to tell the engine to cut playback. Before
+    // the MIDI echo, as the press posts before its own: a USB send can wait
+    // on a host that reads slowly.
     crosspad::IKitManager* kitMgr = crosspad::getKitManager();
     if (kitMgr) {
         crosspad::KitInfo* kit = kitMgr->getCurrentKit();
@@ -181,6 +177,12 @@ void SamplerPadLogic::onPadRelease(crosspad::PadManager& padManager,
             crosspad::getEventBus().postSamplePlayback(
                 soundPad, /*wavIdx=*/0, /*isOn=*/false, crosspad::EventSource::App, 127, transpose, key);
         }
+    }
+
+    if (padMidiEnabled()) {
+        crosspad::getMidiOutput().sendNoteOff(midiNote(padManager, soundPad, transpose),
+                                              /*velocity=*/0,
+                                              padManager.getPadChannel(soundPad));
     }
 }
 

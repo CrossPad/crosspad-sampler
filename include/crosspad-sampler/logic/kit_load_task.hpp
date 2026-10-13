@@ -34,6 +34,13 @@ void kit_load_task_start(bool onlyModified, int kitId = -1);
 /// True while a background load task is running.
 bool kit_load_task_is_loading();
 
+/// True when called on the kit_load worker itself. The platform's pad reload
+/// is also reached from the UI and the CDC task (pad editor, SMPL_PITCH);
+/// work that must only ever run on the worker -- a pitched bank build: seconds
+/// of card reads and FFT, behind the engine arena's owner lock -- checks this
+/// and hands itself to the worker (kit_load_task_start) when it is not.
+bool kit_load_task_is_worker();
+
 /// Kit id held back until the running load finishes, or -1 if none is waiting.
 int kit_load_task_pending_kit();
 
