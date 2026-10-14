@@ -1,7 +1,7 @@
 {
   "name": "Sampler",
   "id": "sampler",
-  "version": "0.8.4",
+  "version": "0.9.0",
   "description": "Sample player with 16 pads, waveform editing, kit management",
   "category": "music",
   "icon": "audio.png",
@@ -9,9 +9,10 @@
   "platforms": ["esp-idf", "arduino"],
   "requires": {
     "crosspad-core": ">=1.45.0",
-    "crosspad-gui": ">=1.16.0"
+    "crosspad-gui": ">=1.25.0"
   },
   "changelog": [
+    "0.9.0: the level meter beside the waveform in Arrange's look -- a dark well, two columns of segments, green to -6 dB, amber to -1, red above, unlit at a fifth; up at once, down ~28 dB a second -- and as tall as the waveform's panel, level with it (it ran the height of the pad grid). Reads the loudest since its last 50 ms tick, so a hit between two is shown. Requires crosspad-gui 1.25.0 (create_segment_meter).",
     "0.8.4: a hold-mode release cuts the voice before the MIDI echo goes out (a host that reads USB MIDI slowly no longer holds the cut back); the waveform loader is marked running before its task is created, so a waveform no longer stays LOADING; a setting being turned in the pad editor stays turned on the next pad; requires core 1.45.0, the first core on main with PitchedInstrument::voiceCap() (0.8.3's 1.43.0 was the firmware line's release/core-1.43.0)",
     "0.8.3: the pitched editor's Voices goes up to the board's voice cap (PitchedInstrument::voiceCap(), which every setParams now meets); requires core 1.43.0",
     "0.8.2: a kit swap with no pad sounding starts on the first pad at once instead of 150 ms later (the wait stays while a pad sounds)",
