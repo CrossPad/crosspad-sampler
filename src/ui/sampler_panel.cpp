@@ -1185,9 +1185,9 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     lv_obj_set_style_text_font(timeLabel, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(timeLabel, kDim, 0);
 
-    /* Two thin bars at the right edge, as the design draws them: the helper
-     * makes a stereo pair, 4 px each. */
-    vuMeter = create_vu_meter(mid, 4, 4 * kCellH + 3 * kGap);
+    /* The level at the right edge, in Arrange's look -- a well of segments --
+     * and as tall as the picture's panel; set level with it once laid out. */
+    vuMeter = create_segment_meter(mid, WAVEFORM_CANVAS_HEIGHT + 6);
 
     // -- the switches, and the way into the pad --
     /* The design's key row: 28 px tall, 4 px apart, filling the width.
@@ -1280,6 +1280,15 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
     show_selected_pad(-1);
     lv_obj_update_layout(cont);
 
+    /* The row centres the meter; the name above the picture and the time under
+     * it decide where the panel lands. */
+    if (vuMeter) {
+        lv_area_t wave, meter;
+        lv_obj_get_coords(wavePanel, &wave);
+        lv_obj_get_coords(vuMeter, &meter);
+        lv_obj_set_style_translate_y(vuMeter, wave.y1 - meter.y1, 0);
+    }
+
     timerPad = lv_timer_create(check_pad_timer_cb, 50, NULL); // 50ms = 20fps
     lv_timer_ready(timerPad);
 
@@ -1304,8 +1313,8 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
 void sampler_panel_set_covered(bool covered)
 {
     if (timerPad)     { if (covered) lv_timer_pause(timerPad);     else lv_timer_resume(timerPad); }
-    /* Hidden objects do not invalidate, which is the only handle on the VU:
-     * its timer lives in crosspad-gui and is not ours to pause. */
+    /* Hidden objects do not invalidate, which is the only handle on the
+     * meter: its timer lives in crosspad-gui and is not ours to pause. */
     if (vuMeter) {
         if (covered) lv_obj_add_flag(vuMeter, LV_OBJ_FLAG_HIDDEN);
         else         lv_obj_remove_flag(vuMeter, LV_OBJ_FLAG_HIDDEN);
