@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "crosspad-sampler/waveform/waveform_loader.hpp"
 #include "crosspad-sampler/waveform/waveform_cache.hpp"
