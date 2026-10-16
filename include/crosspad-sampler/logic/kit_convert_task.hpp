@@ -27,7 +27,7 @@
 
 namespace crosspad_sampler {
 
-enum class KitConvertJob : uint8_t { None, Convert, KeepRate, Tidy };
+enum class KitConvertJob : uint8_t { None, Convert, Tidy };
 
 struct KitConvertStatus {
     KitConvertJob job  = KitConvertJob::None;   ///< running, or the last one
@@ -35,7 +35,6 @@ struct KitConvertStatus {
     int      kitId     = -1;
     crosspad::KitRateConverter::Progress progress;   ///< the last Convert
     crosspad::KitTidyResult tidy;                    ///< the last Tidy
-    bool     keepOk    = false;                 ///< the last KeepRate wrote the kit
     bool     reloaded  = false;                 ///< the last Convert's kit was current and reloaded
     uint32_t elapsedMs = 0;                     ///< of the running job, or what the last one took
     uint32_t seq       = 0;                     ///< jobs finished since boot
@@ -52,8 +51,9 @@ void kit_convert_cancel();
 bool kit_convert_busy();
 KitConvertStatus kit_convert_status();
 
-/// Never offer the conversion for this kit (@p keep), or offer it again:
-/// the model at once, the kit's JSON on the worker. LVGL thread.
+/// Never offer the conversion for this kit (@p keep), or offer it again: the
+/// model, saved as the Sampler's Save saves it unless pads hold unsaved
+/// edits (their save then carries it). A loaded sampler kit only. LVGL thread.
 bool kit_convert_keep_rate(int kitId, bool keep);
 
 /// Remove the originals a finished conversion of @p kitId left, if any.

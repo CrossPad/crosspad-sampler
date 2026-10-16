@@ -225,10 +225,11 @@ void kit_convert_dialog_tick(lv_group_t* panelGroup) {
         /* A converted kit: what its last tidy could not remove yet (a voice
          * still read it, or the power went) goes now. The worker finds out
          * from the card; with nothing listed it is one stat. */
-        const std::string folder = crosspad::rateFolderName(r.engineRate) + "/";
+        char folder[crosspad::kRateFolderMax];
+        const size_t n = std::strlen(crosspad::rateFolderName(r.engineRate, folder));
         for (const auto& pad : kit->pads) {
             for (const auto& smp : pad.samples) {
-                if (smp.sample.compare(0, folder.size(), folder) != 0) continue;
+                if (smp.sample.compare(0, n, folder) != 0 || smp.sample.size() <= n || smp.sample[n] != '/') continue;
                 kit_convert_tidy(km->getCurrentKitId());
                 return;
             }

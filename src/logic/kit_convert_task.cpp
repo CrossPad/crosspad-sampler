@@ -61,7 +61,6 @@ SemaphoreHandle_t s_mux = nullptr;
 KitConvertJob s_reqJob = KitConvertJob::None;
 char          s_reqPath[192] = {};
 uint32_t      s_reqRate = 0;
-bool          s_reqKeep = false;
 std::atomic<bool> s_cancelReq{false};
 
 // Published by the worker under s_mux.
@@ -120,12 +119,6 @@ void run_job() {
     case KitConvertJob::Convert:
         run_convert();
         break;
-    case KitConvertJob::KeepRate: {
-        const bool ok = crosspad::setKitKeepRate(*host(), s_reqPath, s_reqKeep);
-        Lock lk;
-        s_status.keepOk = ok;
-        break;
-    }
     case KitConvertJob::Tidy: {
         const crosspad::KitTidyResult r = crosspad::tidyKit(*host(), s_reqPath, DEFAULT_KIT_PATH, s_reqRate);
         Lock lk;
@@ -175,7 +168,7 @@ crosspad::KitInfo* kit_by_id(int id) {
 }
 
 /// The worker's request, and the timer that sees it through.
-bool post(KitConvertJob job, int kitId, uint32_t rate, bool keep = false) {
+bool post(KitConvertJob job, int kitId, uint32_t rate) {
     crosspad::KitInfo* kit = kit_by_id(kitId);
     if (!kit || kit->path.empty() || kit->path.size() >= sizeof(s_reqPath) || !host()) return false;
     if (!ensure_worker()) return false;
@@ -197,7 +190,6 @@ bool post(KitConvertJob job, int kitId, uint32_t rate, bool keep = false) {
     s_reqJob = job;
     std::snprintf(s_reqPath, sizeof(s_reqPath), "%s", kit->path.c_str());
     s_reqRate = rate;
-    s_reqKeep = keep;
     s_cancelReq.store(false, std::memory_order_relaxed);
     xSemaphoreGive(s_doorbell);
     return true;
@@ -326,12 +318,17 @@ KitConvertStatus kit_convert_status() {
 }
 
 bool kit_convert_keep_rate(int kitId, bool keep) {
+    /* Saved the way the Sampler's own Save does, the model whole -- so only
+     * a kit whose pads are in memory, and not over edits nobody has saved:
+     * those carry the flag to the card with their own save. */
     crosspad::KitInfo* kit = kit_by_id(kitId);
-    if (!kit) return false;
-    if (!post(KitConvertJob::KeepRate, kitId, 0, keep)) return false;
+    auto* km = crosspad::getKitManager();
+    if (!kit || !km || !kit->parsed || kit->engine != crosspad::KitEngine::Sampler) return false;
     kit->keepRate = keep;
-    ensure_timer();
-    return true;
+    for (const auto& pad : kit->pads) {
+        if (pad.dirty || pad.dirtyModified) return true;
+    }
+    return km->saveKit(*kit);
 }
 
 bool kit_convert_tidy(int kitId) {
