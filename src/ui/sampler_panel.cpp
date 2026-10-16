@@ -10,6 +10,7 @@
 #include "crosspad-sampler/ui/pitched_editor.hpp"
 #include "crosspad-sampler/waveform/waveform_cache.hpp"
 #include "crosspad-sampler/logic/kit_load_task.hpp"
+#include "crosspad-sampler/ui/kit_convert_dialog.hpp"
 #include "crosspad-sampler/waveform/waveform_loader.hpp"
 
 // crosspad-gui
@@ -674,6 +675,7 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
     if (appIsDestroying) return;
 
     sync_engine_view();
+    kit_convert_dialog_tick(g_sampler);
 
     static long lastTime = 0;
     static char time_str[40]; // "M:SS:T / M:SS:T", sized for the widest ints snprintf can emit
@@ -1330,6 +1332,8 @@ void sampler_panel_set_covered(bool covered)
 void sampler_panel_destroy(lv_obj_t * panel)
 {
     appIsDestroying = true;
+    /* Before the group goes: the dialogs give the encoder back to it. */
+    kit_convert_dialog_close();
 
     // "Sampler" stays registered on purpose — it is the system instrument
     // (sampler_service_init), so the pads keep playing after the app closes.

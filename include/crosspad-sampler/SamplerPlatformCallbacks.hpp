@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cstddef>
 
+namespace crosspad { class IKitConvertHost; }
+
 namespace crosspad_sampler {
 
 // ---------------------------------------------------------------------------
@@ -130,6 +132,15 @@ struct EngineLoadStats {
     uint32_t loaderKb    = 0;   ///< kilobytes the loader read off the card
 };
 
+/// The current kit's sample rates, as the engine read them from the headers
+/// when it loaded the kit.
+struct KitRateReport {
+    uint16_t samples    = 0;   ///< distinct files of the kit the engine holds
+    uint16_t offRate    = 0;   ///< of those, not at the engine's rate
+    uint32_t rate       = 0;   ///< the most common of their rates
+    uint32_t engineRate = 0;
+};
+
 struct SamplerAudioCallbacks {
     /// Reload a single pad in the audio engine (after sample assignment changes).
     void (*reloadPad)(uint8_t padIdx)                                                  = nullptr;
@@ -158,6 +169,15 @@ struct SamplerAudioCallbacks {
     /// a platform does the follow-up work that must not happen there (cache
     /// top-ups, status messages that need platform state).
     void (*onKitLoadFinished)(bool success)                                            = nullptr;
+    /// The current kit's samples that are not at the engine's rate -- each one
+    /// interpolated in every voice that plays it. From what the engine read
+    /// when it loaded them, no card access, so the UI may ask as often as it
+    /// likes. False while it cannot say: no kit in the engine, or one still
+    /// being read. Null: the platform plays every rate at the same cost.
+    bool (*kitRateReport)(KitRateReport* out)                                         = nullptr;
+    /// What a kit rate conversion reads, writes and takes memory through
+    /// (crosspad/kit/KitRateConvert.hpp). Null: no conversion offered.
+    crosspad::IKitConvertHost* convertHost                                            = nullptr;
 };
 
 // ---------------------------------------------------------------------------
