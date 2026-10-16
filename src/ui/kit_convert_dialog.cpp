@@ -220,7 +220,22 @@ void kit_convert_dialog_tick(lv_group_t* panelGroup) {
     KitRateReport r;
     if (!cb.audio.kitRateReport || !cb.audio.kitRateReport(&r)) return;   // not yet: look again
     std::snprintf(s_decided, sizeof(s_decided), "%s", kit->path.c_str());
-    if (!r.offRate || !r.engineRate || kit->keepRate || !cb.audio.convertHost) return;
+    if (!cb.audio.convertHost) return;
+    if (!r.offRate) {
+        /* A converted kit: what its last tidy could not remove yet (a voice
+         * still read it, or the power went) goes now. The worker finds out
+         * from the card; with nothing listed it is one stat. */
+        const std::string folder = crosspad::rateFolderName(r.engineRate) + "/";
+        for (const auto& pad : kit->pads) {
+            for (const auto& smp : pad.samples) {
+                if (smp.sample.compare(0, folder.size(), folder) != 0) continue;
+                kit_convert_tidy(km->getCurrentKitId());
+                return;
+            }
+        }
+        return;
+    }
+    if (!r.engineRate || kit->keepRate) return;
     offer_open(km->getCurrentKitId(), r);
 }
 
