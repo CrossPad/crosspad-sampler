@@ -6,6 +6,7 @@
 
 #include "crosspad-sampler/SamplerPadLogic.hpp"
 #include "crosspad-sampler/SamplerConfig.hpp"
+#include "crosspad-sampler/SamplerPlatformCallbacks.hpp"
 
 #include <crosspad/event/EventData.hpp>
 #include <crosspad/event/IEventBus.hpp>
@@ -128,22 +129,29 @@ void SamplerPadLogic::onPadPress(crosspad::PadManager& padManager,
     // of the ramp, or at a pitch of the scale. The pad hit still gets the
     // press feedback and the held state, so the LEDs light where the finger is.
     const crosspad::PadPerformance perf = pressPerformance(padManager, padIdx, velocity);
-    uint8_t soundPad = padIdx;
-    int8_t transpose = 0;
-    uint8_t key = crosspad::kSamplePlaybackOwnKey;
-    if (!perf.plain()) soundPad = perf.source < PAD_COUNT ? perf.source : padIdx;
-    if (perf.levels == Levels::Pitch) {
-        transpose = levelTranspose(padIdx);
-        key = static_cast<uint8_t>(kLevelsKey + padIdx);
-    }
+    const Note n = noteFor(perf, padIdx);
+    const uint8_t soundPad = n.soundPad;
+    const int8_t transpose = n.transpose;
+    const uint8_t key = n.key;
     /* The source is the pad a finger hit last outside the levels -- not one a
      * take played. */
     if (perf.plain() && padManager.pressSource(padIdx) != crosspad::EventSource::SequencerCallback) {
         lastPad_ = padIdx;
     }
 
-    crosspad::getEventBus().postSamplePlayback(
-        soundPad, /*wavIdx=*/0, /*isOn=*/true, crosspad::EventSource::App, velocity, transpose, key);
+    /* A finger's hit goes straight into the engine, first of everything a
+     * hit does: the event queue's task runs on the render's core at a low
+     * priority, and under a dense pattern it was the longest wait between the
+     * STM's note and the voice. The take's playback and notes from MIDI keep
+     * the event -- their timing is the queue's, as it always was. */
+    const auto& player = sampler_get_platform_callbacks().player;
+    if (padManager.pressSource(padIdx) == crosspad::EventSource::PadManager && player.playPad &&
+        player.playPad(padIdx, soundPad, velocity, transpose, key)) {
+        crosspad::getPadLedController().notifyNotePlay(soundPad, true);
+    } else {
+        crosspad::getEventBus().postSamplePlayback(
+            soundPad, /*wavIdx=*/0, /*isOn=*/true, crosspad::EventSource::App, velocity, transpose, key);
+    }
 
     padManager.notifyNoteOn(padIdx, velocity, /*fromSampler=*/true);
 
@@ -154,9 +162,41 @@ void SamplerPadLogic::onPadPress(crosspad::PadManager& padManager,
     }
 }
 
+void SamplerPadLogic::onPadTouch(crosspad::PadManager& padManager, uint8_t padIdx, bool touching) {
+    if (padIdx >= PAD_COUNT) return;
+    const auto& player = sampler_get_platform_callbacks().player;
+    if (!touching) {
+        if (player.disarmPad) player.disarmPad(padIdx);
+        return;
+    }
+    if (!player.armPad) return;
+    /* What onPadPress() will play for this finger, worked out the same way;
+     * the velocity is the one thing not known, and nothing here needs it. */
+    auto* seq = crosspad::getPlatformServices().sequencer;
+    if (seq && seq->isErasing()) return;
+    uint8_t velocity = 127;
+    const Note n = noteFor(pressPerformance(padManager, padIdx, velocity), padIdx);
+    player.armPad(padIdx, n.soundPad, n.transpose, n.key);
+}
+
+SamplerPadLogic::Note SamplerPadLogic::noteFor(const crosspad::PadPerformance& perf, uint8_t padIdx) const {
+    Note n{padIdx, 0, crosspad::kSamplePlaybackOwnKey};
+    if (!perf.plain()) n.soundPad = perf.source < PAD_COUNT ? perf.source : padIdx;
+    if (perf.levels == Levels::Pitch) {
+        n.transpose = levelTranspose(padIdx);
+        n.key = static_cast<uint8_t>(kLevelsKey + padIdx);
+    }
+    return n;
+}
+
 void SamplerPadLogic::onPadRelease(crosspad::PadManager& padManager,
                                     uint8_t padIdx) {
     if (padIdx >= PAD_COUNT) return;
+    /* A finger that never made a hit: whatever was armed for it goes. */
+    if (padManager.pressSource(padIdx) == crosspad::EventSource::PadManager) {
+        const auto& player = sampler_get_platform_callbacks().player;
+        if (player.disarmPad) player.disarmPad(padIdx);
+    }
 
     uint8_t velocity = 0;   // a release has none; the lookup wants somewhere to put it
     const crosspad::PadPerformance perf = pressPerformance(padManager, padIdx, velocity);

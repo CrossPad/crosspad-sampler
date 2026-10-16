@@ -1,17 +1,18 @@
 {
   "name": "Sampler",
   "id": "sampler",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Sample player with 16 pads, waveform editing, kit management",
   "category": "music",
   "icon": "audio.png",
   "component_path": "components/crosspad-sampler",
   "platforms": ["esp-idf", "arduino"],
   "requires": {
-    "crosspad-core": ">=1.56.0",
+    "crosspad-core": ">=1.67.0",
     "crosspad-gui": ">=1.26.0"
   },
   "changelog": [
+    "0.14.0: a finger's hit goes straight into the engine on the thread that read it (player.playPad), first of everything a hit does -- no event queue, no task on the render's core between the STM's note and the voice; the take's playback and MIDI notes keep the event. A touch the STM reports before its velocity (core onPadTouch, PAD_TOUCH) arms the note the hit will play (player.armPad); the hit only sets its level, a touch that leaves drops it (player.disarmPad). Requires core 1.67.0.",
     "0.13.0: the level meter beside the waveform in Arrange's look -- a dark well, two columns of segments, green to -6 dB, amber to -1, red above, unlit at a fifth; up at once, down ~28 dB a second -- and as tall as the waveform's panel, level with it (it ran the height of the pad grid). Reads the loudest since its last 50 ms tick, so a hit between two is shown. Requires crosspad-gui 1.26.0 (create_segment_meter).",
     "0.12.0: main's Sampler 0.8.2-0.8.4 merged in -- a quiet kit swap starts at once, the waveform loader no longer stays LOADING, a hold-mode release cuts the voice before the MIDI echo, the pitched editor's Voices up to the voice cap, the kit selector stops at its last kit instead of wrapping, waveform cache entries relative to the kit's folder, kit_load_task_is_worker(). The pad editor keeps 0.11.0's turned control.",
     "0.11.0: A control being turned in the pad editor stays the one being turned when another pad is struck -- PITCH, VOL, PAN, HP, LP, CHOKE, the colour, START and END (in FINE the picture zooms in round the new pad's marker) -- so pad after pad is tuned without reaching for it again; nothing turned, nothing is. START and END in FINE speed up when turned fast: detents one way under 120 ms apart double the step, 1 ms up to 64 ms a detent; a pause or a turn back is 1 ms again.",

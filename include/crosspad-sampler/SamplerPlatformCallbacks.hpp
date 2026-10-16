@@ -32,6 +32,26 @@ struct SampleInfo {
 struct SamplerPlayerCallbacks {
     /// Trigger a pad's sample.  velocity=0 means note-off.
     void (*noteOn)(uint8_t padIdx, uint8_t velocity)                                  = nullptr;
+
+    /**
+     * @brief A finger is on @p touchPad, its velocity not measured yet: get
+     * the note it will play ready in the engine (@p soundPad, @p transpose,
+     * @p key as SamplePlaybackData has them). Null, or false, where the engine
+     * that plays the kit cannot -- the hit then plays the usual way.
+     */
+    bool (*armPad)(uint8_t touchPad, uint8_t soundPad, int8_t transpose, uint8_t key)  = nullptr;
+    /**
+     * @brief Play a finger's hit now, on the caller's thread: the voice armed
+     * for @p touchPad if it is this hit's, else a note-on straight into the
+     * engine. The SamplePlayback event is then not posted -- its only job was
+     * carrying the note to the engine -- so the hit skips the event queue and
+     * the task behind it. False where the engine that plays the kit is not
+     * one that can be called from here: post the event as before.
+     */
+    bool (*playPad)(uint8_t touchPad, uint8_t soundPad, uint8_t velocity, int8_t transpose,
+                    uint8_t key)                                                       = nullptr;
+    /// The touch on @p touchPad ended without a hit: drop what was armed.
+    void (*disarmPad)(uint8_t touchPad)                                               = nullptr;
     /// Preview a sample file with crop & volume/pan settings.
     void (*previewSample)(const char* path, uint32_t start, uint32_t end,
                           int volume, int pan)                                        = nullptr;

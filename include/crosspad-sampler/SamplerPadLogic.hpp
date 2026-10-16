@@ -74,6 +74,10 @@ public:
     /// Reserved for future aftertouch use — no-op.
     void onPadPressure(crosspad::PadManager& padManager, uint8_t padIdx, uint8_t pressure) override;
 
+    /// A finger on the pad before its velocity: the engine arms the note the
+    /// hit will play (player.armPad); a touch that left drops it.
+    void onPadTouch(crosspad::PadManager& padManager, uint8_t padIdx, bool touching) override;
+
     /// What a finger on @p padIdx sounds as now: the levels' source at a
     /// level, and the velocity Full level or the ramp makes of it.
     crosspad::PadPerformance performance(uint8_t padIdx, uint8_t& velocity) const override;
@@ -83,6 +87,15 @@ private:
     /// with it for its own presses, the mode the pads are in for a finger's.
     crosspad::PadPerformance pressPerformance(crosspad::PadManager& padManager, uint8_t padIdx,
                                               uint8_t& velocity) const;
+
+    /// What a hit of a pad plays: the pad itself, or the levels' source at a
+    /// pitch, as its own note.
+    struct Note {
+        uint8_t soundPad;
+        int8_t  transpose;
+        uint8_t key;
+    };
+    Note noteFor(const crosspad::PadPerformance& perf, uint8_t padIdx) const;
 
     /// Load per-pad colors from the current kit into PadLedController.
     void loadKitColors(crosspad::PadManager& padManager);
