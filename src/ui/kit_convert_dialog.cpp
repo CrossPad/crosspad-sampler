@@ -197,7 +197,19 @@ void kit_convert_dialog_tick(lv_group_t* panelGroup) {
     s_panelGroup = panelGroup;
     if (++s_tick < kTicksPerLook) return;
     s_tick = 0;
-    if (s_offer || s_prog.overlay) return;
+    /* An offer is about the kit that was loaded when it went up: once
+     * another kit is, or a conversion runs, it goes (as "Not now"). It stayed
+     * up through a kit change on the bench, and Convert then converted the
+     * kit before. */
+    if (s_offer) {
+        auto* km = crosspad::getKitManager();
+        if (kit_convert_busy() || !km || km->getCurrentKitId() != s_offerKit) {
+            ui_modal_confirm_dismiss(s_offer, false);
+            s_offer = nullptr;
+        }
+        return;
+    }
+    if (s_prog.overlay) return;
     // Only over the panel itself: the pad editor, a dialog or the kit
     // selector on top have the encoder, and would lose it to this.
     lv_indev_t* nav = crosspad_gui::getGuiPlatform().getNavigationEncoder();
