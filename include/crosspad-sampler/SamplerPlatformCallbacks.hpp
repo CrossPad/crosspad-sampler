@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cstddef>
 
+namespace crosspad { class IKitConvertHost; }
+
 namespace crosspad_sampler {
 
 // ---------------------------------------------------------------------------
@@ -32,6 +34,26 @@ struct SampleInfo {
 struct SamplerPlayerCallbacks {
     /// Trigger a pad's sample.  velocity=0 means note-off.
     void (*noteOn)(uint8_t padIdx, uint8_t velocity)                                  = nullptr;
+
+    /**
+     * @brief A finger is on @p touchPad, its velocity not measured yet: get
+     * the note it will play ready in the engine (@p soundPad, @p transpose,
+     * @p key as SamplePlaybackData has them). Null, or false, where the engine
+     * that plays the kit cannot -- the hit then plays the usual way.
+     */
+    bool (*armPad)(uint8_t touchPad, uint8_t soundPad, int8_t transpose, uint8_t key)  = nullptr;
+    /**
+     * @brief Play a finger's hit now, on the caller's thread: the voice armed
+     * for @p touchPad if it is this hit's, else a note-on straight into the
+     * engine. The SamplePlayback event is then not posted -- its only job was
+     * carrying the note to the engine -- so the hit skips the event queue and
+     * the task behind it. False where the engine that plays the kit is not
+     * one that can be called from here: post the event as before.
+     */
+    bool (*playPad)(uint8_t touchPad, uint8_t soundPad, uint8_t velocity, int8_t transpose,
+                    uint8_t key)                                                       = nullptr;
+    /// The touch on @p touchPad ended without a hit: drop what was armed.
+    void (*disarmPad)(uint8_t touchPad)                                               = nullptr;
     /// Preview a sample file with crop & volume/pan settings.
     void (*previewSample)(const char* path, uint32_t start, uint32_t end,
                           int volume, int pan)                                        = nullptr;
@@ -130,6 +152,15 @@ struct EngineLoadStats {
     uint32_t loaderKb    = 0;   ///< kilobytes the loader read off the card
 };
 
+/// The current kit's sample rates, as the engine read them from the headers
+/// when it loaded the kit.
+struct KitRateReport {
+    uint16_t samples    = 0;   ///< distinct files of the kit the engine holds
+    uint16_t offRate    = 0;   ///< of those, not at the engine's rate
+    uint32_t rate       = 0;   ///< the most common of their rates
+    uint32_t engineRate = 0;
+};
+
 struct SamplerAudioCallbacks {
     /// Reload a single pad in the audio engine (after sample assignment changes).
     void (*reloadPad)(uint8_t padIdx)                                                  = nullptr;
@@ -158,6 +189,15 @@ struct SamplerAudioCallbacks {
     /// a platform does the follow-up work that must not happen there (cache
     /// top-ups, status messages that need platform state).
     void (*onKitLoadFinished)(bool success)                                            = nullptr;
+    /// The current kit's samples that are not at the engine's rate -- each one
+    /// interpolated in every voice that plays it. From what the engine read
+    /// when it loaded them, no card access, so the UI may ask as often as it
+    /// likes. False while it cannot say: no kit in the engine, or one still
+    /// being read. Null: the platform plays every rate at the same cost.
+    bool (*kitRateReport)(KitRateReport* out)                                         = nullptr;
+    /// What a kit rate conversion reads, writes and takes memory through
+    /// (crosspad/kit/KitRateConvert.hpp). Null: no conversion offered.
+    crosspad::IKitConvertHost* convertHost                                            = nullptr;
 };
 
 // ---------------------------------------------------------------------------

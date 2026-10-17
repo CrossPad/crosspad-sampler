@@ -24,7 +24,10 @@
  *           column of the picture per detent, the second a millisecond with
  *           the picture zoomed in round it, the third is done. PLAY plays the
  *           trim once, LOOP round and round, FULL puts the markers back at the ends, DEL -- twice --
- *           takes the sample off the pad.
+ *           takes the sample off the pad. NORM brings the sample up until its
+ *           loudest moment sits at -0.3 dB, as a copy beside it the pad then
+ *           plays (<name>_norm.wav) -- trim, pitch and filters stay, and the
+ *           original on the card is not touched.
  *
  * Every change lands on the kit at once and is saved with it; the pad is
  * reloaded once a marker stops moving, not per detent. The picture and LOOP
@@ -84,8 +87,15 @@ namespace {
 constexpr uint16_t kCols       = 300;     // columns of the picture
 constexpr uint32_t kTickMs     = 50;
 constexpr uint32_t kZoomFrames = 12000;   // each side of a marker in fine mode, ~0.25 s
+/* FINE turned fast: detents in one direction close together move further each
+ * time, doubling up to kFineRunMax ms a detent, so a spin crosses the zoomed
+ * picture rather than a millisecond a click; a pause or a turn back is one
+ * millisecond again. */
+constexpr uint32_t kFineFastMs = 120;
+constexpr uint32_t kFineRunMax = 64;
 constexpr uint32_t kSettleMs   = 150;     // a marker still this long: the pad reloads, a loop restarts
 constexpr uint32_t kFxSettleMs = 400;     // PITCH, HP, LP still this long: the pad's copy is rendered
+constexpr float    kNormPeak   = 0.966f;  // NORM's loudest sample: -0.3 dB of full scale
 
 /* The Recorder's colours. */
 const lv_color_t kBg     = lv_color_hex(0x16181B);
@@ -162,6 +172,9 @@ bool     s_viewWanted = false;            // a picture asked for while a job ran
 uint32_t s_wantA = 0, s_wantB = 0;
 bool     s_loading = false;               // the markers take the pad's trim when the picture comes
 Edit     s_editStart = Edit::None, s_editEnd = Edit::None;
+uint32_t s_fineRun = 1;                   // ms a FINE detent moves now
+uint32_t s_fineAt = 0;                    // when the last one came
+int      s_fineDir = 0;
 bool     s_looping = false;               // LOOP: round and round
 bool     s_playing = false;               // PLAY: once
 bool     s_fxMoved = false;               // PITCH, HP or LP turned; the copy is asked for once it settles
@@ -170,6 +183,11 @@ bool     s_renderWanted = false;          // a copy to render, waiting for the t
 bool     s_renderPending = false;         // the tools are rendering it
 int      s_renderPad = -1;                // whose copy
 std::string s_renderSrc, s_renderOut;     // filesystem paths: the sample, its transposed copy
+bool     s_normWanted = false;            // NORM pressed, waiting for the tools
+bool     s_normPending = false;           // the tools are bringing it up
+int      s_normPad = -1;                  // whose sample
+std::string s_normSrc, s_normOut;         // filesystem paths: the sample, its normalized copy
+std::string s_normMsg;                    // NORM's answer, said again once the new picture lands
 bool     s_moved = false;                 // a marker moved; the pad is reloaded once it settles
 uint32_t s_movedAt = 0;
 int32_t  s_headX = -1;                    // playhead column as drawn, -1 = none
@@ -382,8 +400,9 @@ void show_busy()
 {
     if (!s_busy) return;
     const bool rendering = s_fxMoved || s_renderWanted || s_renderPending;
+    const bool normalizing = s_normWanted || s_normPending;
     const bool loading = !s_file.empty() && !s_frames;
-    if (!rendering && !loading) {
+    if (!rendering && !normalizing && !loading) {
         if (!lv_obj_has_flag(s_busy, LV_OBJ_FLAG_HIDDEN)) lv_obj_add_flag(s_busy, LV_OBJ_FLAG_HIDDEN);
         return;
     }
@@ -396,11 +415,14 @@ void show_busy()
      * -- and showing that one as "0%" read as a hang that never moved, which is
      * exactly how it was reported. So the percentage appears when there is a
      * job behind it and the dots carry the rest. */
-    const bool counted = st && (s_renderPending || s_ovPending);
+    const bool counted = st && (s_renderPending || s_ovPending || s_normPending);
     const int pct = counted ? (int)st->jobProgress() : 0;
     std::string text;
     char buf[40];
-    if (rendering) {
+    if (normalizing) {
+        std::snprintf(buf, sizeof(buf), "NORMALIZING %d%%%s", pct, dots);
+        text = buf;
+    } else if (rendering) {
         std::snprintf(buf, sizeof(buf), "PROCESSING %d%%%s", pct, dots);
         text = buf;
         if (const Pad* p = pad()) {
@@ -642,11 +664,16 @@ crosspad::PreviewSound pad_sound()
 }
 
 /// Pad @p idx on screen: its settings, its sample, its trim.
+///
+/// A value being turned stays the one being turned -- PITCH, a filter, START
+/// in FINE: one pad after another is tuned with the same control, and only
+/// the pad changes under it. Nothing turned, nothing is.
 void open_pad(int idx)
 {
+    const bool turning = s_group && lv_group_get_editing(s_group);
     stop_loop();
     s_pad = idx;
-    s_editStart = s_editEnd = Edit::None;
+    if (!turning) s_editStart = s_editEnd = Edit::None;
     s_delArmed = false;
     s_moved = false;
     s_sample.clear();
@@ -655,6 +682,7 @@ void open_pad(int idx)
     s_ov = crosspad::WaveOverview{};
     s_ovPending = s_viewWanted = false;
     s_loading = false;
+    s_normMsg.clear();
     Pad* p = pad();
     KitInfo* k = kit();
     if (p && k && p->GetSampleCount()) {
@@ -666,16 +694,7 @@ void open_pad(int idx)
         request_view(0, 0);
     }
     s_color = p ? color_index(p->color) : 0;
-    /* A setting being turned stays turned on the next pad: hit, turn, hit,
-     * turn, no click in between. A marker comes back coarse over the whole
-     * sample, and with no sample there is nothing to move. */
-    if (s_group && lv_group_get_editing(s_group)) {
-        lv_obj_t* f = lv_group_get_focused(s_group);
-        if (f == s_startBtn || f == s_endBtn) {
-            if (s_loading) (f == s_startBtn ? s_editStart : s_editEnd) = Edit::Coarse;
-            else lv_group_set_editing(s_group, false);
-        }
-    }
+    if (s_group) lv_group_set_editing(s_group, turning);
     light_pads();
     show_pad();
     show_marker_labels();
@@ -844,8 +863,21 @@ void marker_cb(lv_event_t* e)
     if (!dir || edit == Edit::None) return;
     if (rev) dir = -dir;
     const uint32_t viewLen = s_ov.end > s_ov.start ? s_ov.end - s_ov.start : s_frames;
+    if (edit == Edit::Fine) {
+        /* Strictly later, not merely soon: a quick flick reaches LVGL as
+         * several keys inside one tick, and those carry their own distance. */
+        const uint32_t now = lv_tick_get();
+        const uint32_t since = now - s_fineAt;
+        if (dir == s_fineDir && since > 0 && since <= kFineFastMs) {
+            s_fineRun = std::min(kFineRunMax, s_fineRun * 2);
+        } else if (dir != s_fineDir || since > kFineFastMs) {
+            s_fineRun = 1;
+        }
+        s_fineDir = dir;
+        s_fineAt = now;
+    }
     const uint32_t step = edit == Edit::Coarse ? std::max<uint32_t>(1, viewLen / kCols)
-                                               : std::max<uint32_t>(1, s_rate / 1000);
+                                               : std::max<uint32_t>(1, s_rate / 1000) * s_fineRun;
     int64_t v = (int64_t)m + (int64_t)dir * step;
     const int64_t lo = movesStart ? 0 : (int64_t)s_start + 1;
     const int64_t hi = movesStart ? (int64_t)s_end - 1 : (int64_t)s_frames;
@@ -1132,6 +1164,73 @@ void load_cb(lv_event_t* e)
     put_on_pad(s_pad, f.path);
 }
 
+/// Where NORM writes @p logicalSrc's copy: beside it, "<name>_norm.wav".
+std::string normalized_path(const std::string& logicalSrc)
+{
+    const size_t dot = logicalSrc.rfind('.');
+    const size_t slash = logicalSrc.rfind('/');
+    const std::string stem = dot != std::string::npos && (slash == std::string::npos || dot > slash)
+                                 ? logicalSrc.substr(0, dot) : logicalSrc;
+    return stem + "_norm.wav";
+}
+
+/// NORM: asked of the tools once they are free (tick_cb), heard once it lands
+/// (norm_done).
+void norm_cb(lv_event_t*)
+{
+    Pad* p = pad();
+    KitInfo* k = kit();
+    if (!p || !k || !p->GetSampleCount() || s_normWanted || s_normPending) return;
+    const std::string src = crosspad::resolveKitSamplePath(k->path, p->samples[0].sample);
+    s_normSrc = crosspad::kitFsPath(src);
+    s_normOut = crosspad::kitFsPath(normalized_path(src));
+    s_normPad = s_pad;
+    s_normWanted = true;
+    show_busy();
+}
+
+/// The tools' answer to NORM: @p result is the file the pad should play. The
+/// sample it was asked for is the one swapped -- a pad given another file
+/// meanwhile keeps that one -- and its trim and settings stay.
+void norm_done(const std::string& result)
+{
+    KitInfo* k = kit();
+    if (!k || s_normPad < 0 || s_normPad >= KIT_PADS) return;
+    Pad* p = &k->pads[s_normPad];
+    if (!p->GetSampleCount()) return;
+    const std::string now = crosspad::resolveKitSamplePath(k->path, p->samples[0].sample);
+    if (crosspad::kitFsPath(now) != s_normSrc) return;
+    if (result == s_normSrc) {
+        if (s_normPad == s_pad) set_text(s_info, "NORM: already at full level, nothing to bring up.");
+        return;
+    }
+    p->samples[0].sample = logical_path(result);
+    p->dirty = true;
+    p->dirtyModified = true;
+    /* The pad plays the new file from here: a copy with its effects first when
+     * the engine cannot do them itself, as a settled knob asks for one. */
+    auto& cbs = sampler_get_platform_callbacks();
+    const crosspad::SampleFx fx = pad_fx(s_normPad);
+    const bool engineDoesIt = cbs.player.engineHandlesFx &&
+                              cbs.player.engineHandlesFx(fx.semitones, fx.hpHz, fx.lpHz, fx.reverse);
+    if (fx.any() && !engineDoesIt) {
+        const std::string src = crosspad::resolveKitSamplePath(k->path, p->samples[0].sample);
+        s_renderSrc = crosspad::kitFsPath(src);
+        s_renderOut = crosspad::kitFsPath(crosspad::renderedSamplePath(src, fx));
+        s_renderPad = s_normPad;
+        s_renderWanted = true;
+    } else if (cbs.audio.reloadPad) {
+        cbs.audio.reloadPad((uint8_t)s_normPad);
+    }
+    if (s_normPad == s_pad) {
+        open_pad(s_pad);
+        /* The picture of the new file lands a moment later and writes the
+         * info line over this; it is said again then (tick_cb). */
+        s_normMsg = "NORM: brought up to -0.3 dB as " + base_of(result);
+        set_text(s_info, s_normMsg.c_str());
+    }
+}
+
 /// REC MODE on and off. The input is whichever the Recorder was last set to --
 /// MIC, LINE, PADS or USB -- so the two screens are one setting and this one
 /// needs no picker of its own; PADS is the interesting one here, as it takes the
@@ -1311,6 +1410,13 @@ void tick_cb(lv_timer_t*)
                         if (!s_end || s_end > s_frames) s_end = s_frames;
                         if (s_start >= s_end) s_start = 0;
                         s_loading = false;
+                        /* FINE kept from the pad before: the picture zooms in
+                         * round this pad's marker, as the click into FINE does. */
+                        const bool fineStart = s_editStart == Edit::Fine;
+                        if (fineStart || s_editEnd == Edit::Fine) {
+                            const uint32_t m = fineStart != reversed() ? s_start : s_end;
+                            request_view(m > kZoomFrames ? m - kZoomFrames : 0, std::min(s_frames, m + kZoomFrames));
+                        }
                     }
                     /* A take of our own: the markers go on the sound rather
                      * than on the file, so the pad plays from the attack the
@@ -1332,6 +1438,10 @@ void tick_cb(lv_timer_t*)
                     }
                 }
                 show_info();
+                if (!s_normMsg.empty()) {
+                    set_text(s_info, s_normMsg.c_str());
+                    s_normMsg.clear();
+                }
             } else {
                 set_text(s_info, st->jobResult().c_str());
             }
@@ -1346,11 +1456,22 @@ void tick_cb(lv_timer_t*)
             } else {
                 set_text(s_info, st->jobResult().c_str());
             }
+        } else if (s_normPending) {
+            s_normPending = false;
+            if (st->job() == crosspad::ToolJob::Ready) {
+                norm_done(st->jobResult());
+            } else {
+                const std::string msg = "NORM failed: " + st->jobResult();
+                set_text(s_info, msg.c_str());
+            }
         } else if (s_viewWanted) {
             request_view(s_wantA, s_wantB);
         } else if (s_renderWanted && st->requestRendered(s_renderSrc, s_renderOut, pad_fx(s_renderPad))) {
             s_renderWanted = false;
             s_renderPending = true;
+        } else if (s_normWanted && st->requestNormalized(s_normSrc, s_normOut, kNormPeak)) {
+            s_normWanted = false;
+            s_normPending = true;
         }
     }
     show_busy();
@@ -1546,6 +1667,9 @@ void destroy_cb(lv_event_t*)
     const int unrendered = s_fxMoved || s_renderWanted || s_renderPending ? s_renderPad : -1;
     s_fxMoved = s_renderWanted = s_renderPending = false;
     s_renderPad = -1;
+    s_normWanted = s_normPending = false;
+    s_normPad = -1;
+    s_normMsg.clear();
     s_editStart = s_editEnd = Edit::None;
     s_headX = -1;
 
@@ -1711,9 +1835,12 @@ lv_obj_t* pad_editor_create(lv_obj_t* parent, crosspad_gui::ILvglApp* app)
     lv_obj_t* tools_row = make_row(s_cont, 24);
     s_startBtn = make_marker(tools_row, "START", true);
     s_endBtn = make_marker(tools_row, "END", false);
-    make_button(tools_row, 44, LV_SYMBOL_PLAY " PLAY", play_cb);
-    s_loopBtn = make_button(tools_row, 48, LV_SYMBOL_LOOP " LOOP", loop_cb);
+    /* PLAY and LOOP as their symbols alone, as the Recorder has them: NORM
+     * needs the room. */
+    make_button(tools_row, 30, LV_SYMBOL_PLAY, play_cb);
+    s_loopBtn = make_button(tools_row, 30, LV_SYMBOL_LOOP, loop_cb);
     make_button(tools_row, 36, "FULL", full_cb);
+    make_button(tools_row, 42, "NORM", norm_cb);
     s_delBtn = make_button(tools_row, 36, "DEL", del_cb);
 
     s_pad = -1;

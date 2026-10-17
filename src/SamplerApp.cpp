@@ -70,6 +70,8 @@ void sampler_service_init() {
     pads.registerPadLogic("Sampler", logic);
     pads.setBasePadLogic("Sampler");
     crosspad::getPlatformServices().padMix = &sampler_pad_mix();
+    /* 16 levels, for the Sequencer to record a part in. */
+    crosspad::getPlatformServices().padPerformance = &getSamplerPadLogic();
 }
 
 void sampler_register() {
