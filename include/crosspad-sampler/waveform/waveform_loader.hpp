@@ -16,6 +16,14 @@ void waveform_loader_request(const char* filename, bool highPriority = false,
                              uint8_t padIndex = 0,
                              uint32_t sampleStart = 0, uint32_t sampleEnd = 0);
 
+/// Queue the waveform of a pad's sample of the current kit; the loader works
+/// out which file it is, on its own thread (a stat() of the card). What the
+/// LVGL thread asks for instead of resolving the path itself.
+void waveform_loader_request_pad(uint8_t padIndex, uint8_t sampleSlot, bool highPriority = true);
+
+/// Walk the current kit for missing waveforms now, on the loader's thread.
+void waveform_loader_sweep_now();
+
 /// Queue every sample of every pad in the current kit that is not cached yet.
 /// Every layer, not only the first: the panel shows the layer that actually
 /// fired, so a round-robin or velocity-split pad drew nothing for its other

@@ -24,6 +24,7 @@
 
 #include <crosspad-sampler/ui/sampler_panel.hpp>   // getKitOrchestrator(), getPadColorManager()
 #include <crosspad-sampler/logic/pad_color_manager.hpp>
+#include <crosspad-sampler/waveform/waveform_cache.hpp>
 
 #include <crosspad/kit/IKitManager.hpp>
 #include <crosspad/kit/KitPathUtils.hpp>
@@ -397,6 +398,10 @@ static void run_one_load(bool onlyModified, int kitId) {
     rec.engine.streamKb    = after.streamKb - before.streamKb;
     rec.engine.loaderKb    = after.loaderKb - before.loaderKb;
     rec.doneMs = since_req_ms();
+
+    // The waveforms' file too, here rather than on the LVGL thread where the
+    // load's follow-up reads it (platform onKitLoadFinished).
+    if (!onlyModified) waveform_cache_prefetch(kit->path.c_str());
 
     // What the pads hold, not how many were visited: "KIT LOADED n/m" counts
     // the pads that sound out of those the kit gives a sample. A whole kit of

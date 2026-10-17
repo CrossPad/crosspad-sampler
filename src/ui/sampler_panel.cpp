@@ -387,21 +387,18 @@ static SampleInfo currentSampleInfo = {};
 static bool sampleInfoValid = false;
 static char infoPath[128] = {0};
 
-/* Header info per sample file, fetched once: reading it is an fopen and a
- * header parse on the LVGL thread under the file guard, and every such read
- * makes audio_bg stand aside from its refill. Per hit, that doubled the
- * engine's underruns. Cleared with the kit. */
-struct SampleInfoEntry { std::string path; SampleInfo info; };
-static std::vector<SampleInfoEntry> s_sampleInfoCache;
-
-static bool cached_sample_info(const char* path, SampleInfo* out) {
-    for (const auto& e : s_sampleInfoCache) {
-        if (e.path == path) { *out = e.info; return true; }
-    }
-    auto& cb = sampler_get_platform_callbacks();
-    if (!cb.player.getSampleInfo || !cb.player.getSampleInfo(path, out)) return false;
-    s_sampleInfoCache.push_back(SampleInfoEntry{path, *out});
-    return true;
+/* The waveform cache's entry for a pad's sample, which also says the file's
+ * length and rate -- found without asking the card. Resolving the sample's
+ * path (crosspad::resolveKitSamplePath(): a stat() per layout) ran here on
+ * every hit and at every refresh while a pad sounded. Each stat takes the SD
+ * volume's lock, audio_bg waits for it, the LVGL thread inherits audio_bg's
+ * priority -- and keeps it to the end of its frame, since it holds its own
+ * lock too: the pad path on core 0 stalled 25-47 ms behind a render at
+ * priority 18 (SMPL_STALL, a 1 ms sampler of core 0). A miss is the loader's
+ * to resolve (waveform_loader_request_pad()). */
+static WaveformCacheEntry* pad_wave(const crosspad::KitInfo& kit, uint8_t pad, uint8_t slot) {
+    if (pad >= KIT_PADS || slot >= kit.pads[pad].samples.size()) return nullptr;
+    return waveform_cache_find_kit_sample(kit.path.c_str(), kit.pads[pad].samples[slot].sample.c_str());
 }
 
 // ── Engine callbacks, from the audio engine's NoteOn/NoteOff ───────────────
@@ -709,7 +706,6 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
         return;
     }
     if (lastKit != kit) { // kit changed
-        s_sampleInfoCache.clear();
         LV_LOG_INFO("Kit changed: %s (previous: %s)", kit->name.c_str(),
                     lastKit ? lastKit->name.c_str() : "NULL");
         lv_subject_copy_string(&s_kit_name, kit->name.c_str());
@@ -930,16 +926,21 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
                 if (kitP2 && padIdxTime < KIT_PADS && !kitP2->pads[padIdxTime].samples.empty()) {
                     uint8_t sIdx = currentSampleIndex[padIdxTime];
                     if (sIdx >= kitP2->pads[padIdxTime].samples.size()) sIdx = 0;
-                    std::string resolvedP = crosspad::resolveKitSamplePath(kitP2->path, kitP2->pads[padIdxTime].samples[sIdx].sample);
-                    const char* fullPath = resolvedP.empty() ? nullptr : resolvedP.c_str();
-                    if (fullPath && (infoPath[0] == '\0' || strcmp(infoPath, fullPath) != 0)) {
-                        sampleInfoValid = cached_sample_info(fullPath, &currentSampleInfo);
-                        if (sampleInfoValid) {
-                            strncpy(infoPath, fullPath, sizeof(infoPath) - 1);
-                            infoPath[sizeof(infoPath) - 1] = '\0';
-                        } else {
-                            infoPath[0] = '\0';
-                        }
+                    /* Length and rate from what the waveform's loader read off
+                     * the file, not from the file: this runs at every refresh
+                     * while a pad sounds (pad_wave()). */
+                    const WaveformCacheEntry* e = pad_wave(*kitP2, padIdxTime, sIdx);
+                    if (e && e->srcFrames && e->srcSampleRate &&
+                        (infoPath[0] == '\0' || strcmp(infoPath, e->filename) != 0)) {
+                        currentSampleInfo = SampleInfo{};
+                        currentSampleInfo.sampleCount = e->srcFrames;
+                        currentSampleInfo.sampleRate  = e->srcSampleRate;
+                        sampleInfoValid = true;
+                        strncpy(infoPath, e->filename, sizeof(infoPath) - 1);
+                        infoPath[sizeof(infoPath) - 1] = '\0';
+                    } else if (!e) {
+                        sampleInfoValid = false;
+                        infoPath[0] = '\0';
                     }
                 }
             }
@@ -1001,15 +1002,11 @@ lv_obj_t * sampler_panel_create(lv_obj_t *parent, void (*onBack)())
         if (!kit || padIdx >= KIT_PADS) return WaveformStatus::NoSample;
         if (sampleSlot >= kit->pads[padIdx].samples.size()) return WaveformStatus::NoSample;
 
-        std::string resolvedSample = crosspad::resolveKitSamplePath(kit->path, kit->pads[padIdx].samples[sampleSlot].sample);
-        if (resolvedSample.empty()) return WaveformStatus::NoSample;
-        const char* fullPath = resolvedSample.c_str();
-
-        // A cache miss is a request, not a blank.
-        WaveformCacheEntry* entry = waveform_cache_find(fullPath);
+        // A cache miss is a request, not a blank -- and the loader, not this
+        // thread, finds out which file the sample is (pad_wave()).
+        WaveformCacheEntry* entry = pad_wave(*kit, padIdx, sampleSlot);
         if (!entry || !entry->valid || !entry->waveformData || entry->sampleCount == 0) {
-            waveform_loader_start();
-            waveform_loader_request(fullPath, true, padIdx, 0, 0);
+            waveform_loader_request_pad(padIdx, sampleSlot);
             waveformPending = true;
             return WaveformStatus::Pending;
         }

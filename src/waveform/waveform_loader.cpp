@@ -26,8 +26,14 @@ namespace crosspad_sampler {
 
 // ── Load request ────────────────────────────────────────────────────────
 
+/* A pad request (kPadRequest in sampleSlot's place) names a pad's sample of
+ * the current kit; the loader resolves it to a file. kSweep in padIndex asks
+ * for a walk of the whole kit. */
+constexpr uint8_t kNoSlot = 0xFF;
+constexpr uint8_t kSweep  = 0xFF;
 struct WaveformLoadRequest {
     char     filename[128];
+    uint8_t  sampleSlot;      ///< kNoSlot: filename is the file
     uint8_t  priority;
     uint8_t  padIndex;
     uint8_t  attempt;
@@ -90,7 +96,27 @@ static void loader_task(void* /*param*/) {
             continue;
         }
 
-        if (!s_running || req.filename[0] == '\0') break;
+        if (!s_running) break;
+
+        /* A pad's sample or a walk of the kit, asked for by the LVGL thread:
+         * the stat() that tells the kit's two layouts apart happens here. */
+        if (req.sampleSlot != kNoSlot) {
+            if (req.padIndex == kSweep) {
+                waveform_loader_preload_kit(16);
+                continue;
+            }
+            auto* km = crosspad::getPlatformServices().kitManager;
+            auto* kit = km ? km->getCurrentKit() : nullptr;
+            if (!kit || req.padIndex >= PAD_COUNT ||
+                req.sampleSlot >= kit->pads[req.padIndex].samples.size()) continue;
+            const std::string path = crosspad::resolveKitSamplePath(
+                kit->path, kit->pads[req.padIndex].samples[req.sampleSlot].sample);
+            if (path.empty() || path.size() >= sizeof(req.filename)) continue;
+            memcpy(req.filename, path.c_str(), path.size() + 1);
+            req.sampleSlot = kNoSlot;
+        }
+
+        if (req.filename[0] == '\0') break;
 
         if (waveform_cache_find(req.filename)) continue;
 
@@ -268,6 +294,7 @@ void waveform_loader_request(const char* filename, bool highPriority,
 
     WaveformLoadRequest req = {};
     strncpy(req.filename, filename, sizeof(req.filename) - 1);
+    req.sampleSlot  = kNoSlot;
     req.priority    = highPriority ? 1 : 0;
     req.padIndex    = padIndex;
     req.attempt     = 0;
@@ -279,6 +306,27 @@ void waveform_loader_request(const char* filename, bool highPriority,
         : xQueueSend(s_queue, &req, 0);
     if (sent == pdTRUE) { s_stats.requested++; s_kitRequested++; }
     else                s_stats.dropped++;
+}
+
+static void post_pad_request(uint8_t padIndex, uint8_t sampleSlot, bool highPriority) {
+    if (!s_running) waveform_loader_start();
+    if (!s_queue) return;
+    WaveformLoadRequest req = {};
+    req.padIndex   = padIndex;
+    req.sampleSlot = sampleSlot;
+    req.priority   = highPriority ? 1 : 0;
+    const BaseType_t sent = highPriority ? xQueueSendToFront(s_queue, &req, 0)
+                                         : xQueueSend(s_queue, &req, 0);
+    if (sent != pdTRUE) s_stats.dropped++;
+}
+
+void waveform_loader_request_pad(uint8_t padIndex, uint8_t sampleSlot, bool highPriority) {
+    if (padIndex >= PAD_COUNT || sampleSlot == kNoSlot) return;
+    post_pad_request(padIndex, sampleSlot, highPriority);
+}
+
+void waveform_loader_sweep_now() {
+    post_pad_request(kSweep, 0, false);
 }
 
 int waveform_loader_preload_kit(int maxPads) {
