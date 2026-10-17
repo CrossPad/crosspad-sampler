@@ -177,6 +177,11 @@ struct SamplerAudioCallbacks {
     /// the engine is never restructured under a voice it is playing. Null =
     /// fall back to PadManager::isPadPlaying().
     bool (*padSounding)(uint8_t padIdx)                                                = nullptr;
+    /// True when a hit on this pad sounds now: the engine holds its sample,
+    /// not just a kit that names one. Asked by the load task after each pad it
+    /// reloads -- a pad shows as loaded, and a kit counts as loaded, only for
+    /// what actually plays. Null = every pad the kit gives a sample counts.
+    bool (*padPlayable)(uint8_t padIdx)                                                = nullptr;
     /// Reload all pads in the audio engine.
     void (*reloadPads)()                                                               = nullptr;
     /// Check if a waveform cache file exists for the given kit.

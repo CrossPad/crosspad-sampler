@@ -55,8 +55,18 @@ bool waveform_cache_clear_if_kit_changed(void* kitPtr, const char* kitPath);
 /// Clear entire cache.
 void waveform_cache_clear();
 
+/// Read a kit's disk cache now, on the calling thread (the kit loader), for
+/// the next waveform_cache_load_from_disk() of that kit to parse from memory.
+void waveform_cache_prefetch(const char* kitJsonPath);
+
 /// Thread-safe lookup.  Updates LRU timestamp on hit.
 WaveformCacheEntry* waveform_cache_find(const char* filename);
+
+/// A kit's sample by its name in the kit: the entry for whichever of the two
+/// layouts (beside kit.json, or in SAMPLES/) the loader found it in. Memory
+/// only -- crosspad::resolveKitSamplePath() asks the card, and the LVGL thread
+/// asking it on every hit held the volume lock audio_bg waits for.
+WaveformCacheEntry* waveform_cache_find_kit_sample(const char* kitJsonPath, const char* sample);
 
 /// Thread-safe insert.  Uses LRU eviction when full. The source-file numbers
 /// are optional: a caller that does not have them stores zeros, and a reader

@@ -44,6 +44,14 @@ bool kit_load_task_is_worker();
 /// Kit id held back until the running load finishes, or -1 if none is waiting.
 int kit_load_task_pending_kit();
 
+/// Why a load failed, for the swap log (the UI gets it in words).
+enum class KitLoadWhy : uint8_t {
+    None = 0,
+    Parse,        ///< the kit could not be read or made current
+    NoSamples,    ///< no pad of the kit names a sample
+    NoneReadable, ///< pads name samples, the engine could take none of them
+};
+
 /// What one kit load did and what it cost. Kept for the last few loads so a
 /// bench run can read them back after the fact (CDC KIT_SWAP_LOG): a swap
 /// that sounded wrong is then a row with numbers, not a memory.
@@ -57,6 +65,9 @@ struct KitSwapRecord {
     int32_t  padDoneMs[16] = {}; ///< request → that pad reloaded; -1 = untouched
     uint16_t deferred  = 0;      ///< pads that waited for their voice to end
     uint16_t forced    = 0;      ///< pads reloaded while still sounding
+    uint16_t empty     = 0;      ///< pads the kit gives no sample
+    uint16_t failed    = 0;      ///< pads with a sample the engine could not take
+    KitLoadWhy why     = KitLoadWhy::None;
     EngineLoadStats engine;      ///< deltas over the pad loop (gateMaxUs: peak)
 };
 

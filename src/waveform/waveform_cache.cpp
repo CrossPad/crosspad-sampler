@@ -165,6 +165,19 @@ WaveformCacheEntry* waveform_cache_find(const char* filename) {
     return result;
 }
 
+WaveformCacheEntry* waveform_cache_find_kit_sample(const char* kitJsonPath, const char* sample) {
+    if (!kitJsonPath || !sample || !sample[0]) return nullptr;
+    if (sample[0] == '/') return waveform_cache_find(sample);
+    const char* slash = strrchr(kitJsonPath, '/');
+    const int dirLen = slash ? static_cast<int>(slash - kitJsonPath) : 0;
+    // The two places crosspad::resolveKitSamplePath() looks, in its order.
+    char path[256];
+    snprintf(path, sizeof(path), "%.*s/%s", dirLen, kitJsonPath, sample);
+    if (WaveformCacheEntry* e = waveform_cache_find(path)) return e;
+    snprintf(path, sizeof(path), "%.*s/SAMPLES/%s", dirLen, kitJsonPath, sample);
+    return waveform_cache_find(path);
+}
+
 bool waveform_cache_add(const char* filename, int16_t* waveform, uint32_t sampleCount,
                         uint32_t srcFrames, uint32_t srcSampleRate,
                         uint8_t srcChannels, uint8_t srcBitDepth) {
@@ -329,20 +342,67 @@ bool waveform_cache_save_to_disk(const char* kitJsonPath) {
     return ok;
 }
 
-bool waveform_cache_load_from_disk(const char* kitJsonPath) {
+/* The file read into the largest buffer there is, from 256 kB down to 16. A
+ * file is ~1.2 kB an entry -- 20 kB for a kit of sixteen -- but after a few
+ * kit changes PSRAM has no 256 kB block left (66 kB the largest on the
+ * bench), the one malloc failed, the cache was never read back, and every kit
+ * change recomputed every waveform off the card while the streamer needed
+ * it. A file cut short loads the entries that fit; the loader redoes the
+ * rest. nullptr when there is no file or no memory; the caller frees. */
+static uint8_t* read_cache_file(const char* cachePath, uint32_t* outLen) {
     auto& wf = sampler_get_platform_callbacks().waveform;
-    if (!wf.readFile) return false;
+    if (!wf.readFile) return nullptr;
+    constexpr uint32_t kMaxFile = 256 * 1024;
+    constexpr uint32_t kMinFile = 16 * 1024;
+    uint32_t maxFile = kMaxFile;
+    uint8_t* buf = (uint8_t*)malloc(maxFile);
+    while (!buf && maxFile > kMinFile) {
+        maxFile /= 2;
+        buf = (uint8_t*)malloc(maxFile);
+    }
+    if (!buf) return nullptr;
+    *outLen = wf.readFile(cachePath, buf, maxFile);
+    if (*outLen < 8) { free(buf); return nullptr; }
+    return buf;
+}
 
+/* A kit's file read ahead on the kit loader's thread (waveform_cache_prefetch),
+ * handed to the LVGL thread's waveform_cache_load_from_disk(). Path and length
+ * are written before the buffer is published, and whoever takes the buffer
+ * owns it. */
+static std::atomic<uint8_t*> s_preBuf{nullptr};
+static uint32_t s_preLen = 0;
+static char     s_prePath[256];
+
+void waveform_cache_prefetch(const char* kitJsonPath) {
+    char cachePath[256];
+    if (!get_cache_path(kitJsonPath, cachePath, sizeof(cachePath))) return;
+    free(s_preBuf.exchange(nullptr, std::memory_order_acq_rel));
+    uint32_t len = 0;
+    uint8_t* buf = read_cache_file(cachePath, &len);
+    if (!buf) return;
+    snprintf(s_prePath, sizeof(s_prePath), "%s", cachePath);
+    s_preLen = len;
+    free(s_preBuf.exchange(buf, std::memory_order_acq_rel));
+}
+
+bool waveform_cache_load_from_disk(const char* kitJsonPath) {
     char cachePath[256];
     if (!get_cache_path(kitJsonPath, cachePath, sizeof(cachePath))) return false;
     const int dirLen = kit_dir_len(kitJsonPath);
 
-    uint32_t maxFile = 256 * 1024;  // 256 KB max
-    uint8_t* buf = (uint8_t*)malloc(maxFile);
+    /* Read ahead by the kit loader when it is this kit's: the LVGL thread on
+     * the card, as a kit lands under play, is the volume lock the streamer
+     * waits behind. */
+    uint32_t bytesRead = 0;
+    uint8_t* buf = s_preBuf.exchange(nullptr, std::memory_order_acq_rel);
+    if (buf && strcmp(s_prePath, cachePath) == 0) {
+        bytesRead = s_preLen;
+    } else {
+        free(buf);
+        buf = read_cache_file(cachePath, &bytesRead);
+    }
     if (!buf) return false;
-
-    uint32_t bytesRead = wf.readFile(cachePath, buf, maxFile);
-    if (bytesRead < 8) { free(buf); return false; }
 
     if (memcmp(buf, CACHE_MAGIC, 4) != 0 || buf[4] != CACHE_VERSION) {
         free(buf);

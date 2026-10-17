@@ -7,6 +7,8 @@
 #include "crosspad-sampler/SamplerPadLogic.hpp"
 #include "crosspad-sampler/SamplerConfig.hpp"
 #include "crosspad-sampler/SamplerPlatformCallbacks.hpp"
+#include "crosspad-sampler/logic/pad_color_manager.hpp"
+#include "crosspad-sampler/ui/sampler_panel.hpp"
 
 #include <crosspad/event/EventData.hpp>
 #include <crosspad/event/IEventBus.hpp>
@@ -288,8 +290,10 @@ void SamplerPadLogic::loadKitColors(crosspad::PadManager& padManager) {
     }
 
     auto& ledCtrl = crosspad::getPadLedController();
+    const PadColorManager& shown = getPadColorManager();
     for (int i = 0; i < PAD_COUNT; ++i) {
-        ledCtrl.setPadColor(i, colorFromUint32(kit->pads[i].color));
+        // Dark for a pad with nothing to play, red for one that did not load.
+        ledCtrl.setPadColor(i, colorFromUint32(shown.shownColor(static_cast<uint8_t>(i), kit->pads[i].color)));
         ledCtrl.setPadPressedColor(i, colorFromUint32(kit->pads[i].color_pressed));
         // Playing: the pad's default colour, dimmed.
         ledCtrl.setPadPlayingColor(i, colorFromUint32(kit->pads[i].color).Dim(127));
