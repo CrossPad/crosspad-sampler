@@ -179,7 +179,7 @@ static lv_obj_t * scopeView = NULL;
 static lv_obj_t * vuMeter = NULL;
 static lv_obj_t * waveformModeLabel = NULL;
 
-enum class WaveformDisplayMode : uint8_t { File, Live, HistoryRms };
+enum class WaveformDisplayMode : uint8_t { File, Live, HistoryRms, Spectrum };
 static WaveformDisplayMode waveformDisplayMode = WaveformDisplayMode::File;
 /* -2 until first sync, -1 without a source, 0 for the 16-pad sampler and 1
  * for the pitched engine. A source change also resets the RMS history. */
@@ -594,9 +594,11 @@ static void apply_waveform_display_mode() {
     scope_view_set_active(scopeView, false);
     if (showScope) {
         scope_view_set_mode(scopeView,
-            waveformDisplayMode == WaveformDisplayMode::HistoryRms
-                ? crosspad_gui::ScopeViewMode::HistoryRms
-                : crosspad_gui::ScopeViewMode::Live);
+            waveformDisplayMode == WaveformDisplayMode::Spectrum
+                ? crosspad_gui::ScopeViewMode::Spectrum
+                : waveformDisplayMode == WaveformDisplayMode::HistoryRms
+                    ? crosspad_gui::ScopeViewMode::HistoryRms
+                    : crosspad_gui::ScopeViewMode::Live);
         set_live_scope_capture(true);
         lv_obj_clear_flag(scopeView, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(waveformCanvas, LV_OBJ_FLAG_HIDDEN);
@@ -629,6 +631,8 @@ static void waveform_mode_click_cb(lv_event_t*) {
         waveformDisplayMode = WaveformDisplayMode::Live;
     } else if (waveformDisplayMode == WaveformDisplayMode::Live) {
         waveformDisplayMode = WaveformDisplayMode::HistoryRms;
+    } else if (waveformDisplayMode == WaveformDisplayMode::HistoryRms) {
+        waveformDisplayMode = WaveformDisplayMode::Spectrum;
     } else {
         waveformDisplayMode = WaveformDisplayMode::File;
     }
