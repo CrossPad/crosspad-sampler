@@ -718,14 +718,24 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
         {
             auto color = RgbColor(HtmlColor(kit->pads[n].color));
             auto color_pressed = RgbColor(HtmlColor(kit->pads[n].color_pressed));
-            crosspad::getPadLedController().setPadColor(n, color);
             crosspad::getPadLedController().setPadPressedColor(n, color_pressed);
             paint_pad(n, color, false);
         }
         auto* statusPtr = crosspad::getPlatformServices().status;
         if (statusPtr) statusPtr->keypadDirty = true; // force keypad refresh
-        // PadManager needs the kit pads for the playback modes to work.
+        // PadManager needs the kit pads for the playback modes to work. It
+        // paints them in the kit's colors as it takes them, which mid-swap
+        // claimed every pad loaded before any was -- so the LEDs go back to
+        // what the pads hold.
         crosspad::getPadManager().loadPadConfig(kit->pads, KIT_PADS);
+        if (getPadColorManager().kitSwapActive()) {
+            getPadColorManager().repaintKitSwap();
+        } else {
+            for (uint8_t n = 0; n < KIT_PADS; n++) {
+                crosspad::getPadLedController().setPadColor(
+                    n, RgbColor(HtmlColor(getPadColorManager().shownColor(n, kit->pads[n].color))));
+            }
+        }
         show_selected_pad(s_selectedPad);   // the chip takes the new kit's colour
     }
     lastKit = kit;

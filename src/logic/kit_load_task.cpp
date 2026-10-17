@@ -138,9 +138,19 @@ static bool pad_sounding(uint8_t pad) {
     return crosspad::getPadManager().isPadPlaying(pad);
 }
 
+/// What the engine holds for a pad just reloaded. A pitched kit's pads all
+/// play its one instrument, whatever their sample lists say.
+static PadLoad pad_load(const crosspad::KitInfo& kit, uint8_t pad) {
+    const bool named = kit.engine == crosspad::KitEngine::Pitched || kit.pads[pad].sampleCount > 0;
+    if (!named) return PadLoad::Empty;
+    auto& cb = sampler_get_platform_callbacks();
+    if (cb.audio.padPlayable && !cb.audio.padPlayable(pad)) return PadLoad::Failed;
+    return PadLoad::Ready;
+}
+
 /// False when the platform found a voice on the pad at the last moment and
 /// left it alone; the caller keeps the pad on its list.
-static bool reload_pad(uint8_t pad, KitSwapRecord& rec, bool onlyIfIdle) {
+static bool reload_pad(const crosspad::KitInfo& kit, uint8_t pad, KitSwapRecord& rec, bool onlyIfIdle) {
     auto& cb = sampler_get_platform_callbacks();
     if (onlyIfIdle && cb.audio.reloadPadIfIdle) {
         if (!cb.audio.reloadPadIfIdle(pad)) return false;
@@ -148,8 +158,13 @@ static bool reload_pad(uint8_t pad, KitSwapRecord& rec, bool onlyIfIdle) {
         cb.audio.reloadPad(pad);
     }
     rec.padDoneMs[pad] = static_cast<int32_t>(since_req_ms());
-    // The pad now plays the incoming kit, and may say so in its color.
-    getPadColorManager().markPadReloaded(pad);
+    // The pad now plays the incoming kit -- or nothing -- and says which in
+    // its color.
+    const PadLoad state = pad_load(kit, pad);
+    const uint16_t bit = static_cast<uint16_t>(1u << pad);
+    if (state == PadLoad::Empty)  rec.empty  |= bit;
+    if (state == PadLoad::Failed) rec.failed |= bit;
+    getPadColorManager().markPadReloaded(pad, state);
     return true;
 }
 
@@ -262,6 +277,7 @@ static void run_one_load(bool onlyModified, int kitId) {
         auto result = getKitOrchestrator().changeKit(kitId);
         if (!result.success) {
             set_error(result.error.c_str());
+            rec.why = KitLoadWhy::Parse;
             rec.doneMs = since_req_ms();
             s_outcome.store(-1, std::memory_order_release);
             return;
@@ -272,6 +288,7 @@ static void run_one_load(bool onlyModified, int kitId) {
     auto* kitMgr = crosspad::getKitManager();
     if (!kitMgr || !kitMgr->getCurrentKit()) {
         set_error("No kit loaded");
+        rec.why = KitLoadWhy::Parse;
         rec.doneMs = since_req_ms();
         s_outcome.store(-1, std::memory_order_release);
         return;
@@ -303,9 +320,9 @@ static void run_one_load(bool onlyModified, int kitId) {
         if (onlyModified && !kit->pads[padIdx].IsModified()) continue;
         todo |= static_cast<uint16_t>(1u << padIdx);
     }
+    const uint16_t reloaded = todo;
     const int total = __builtin_popcount(todo);
     int done = 0;
-    s_padsTotal.store(total, std::memory_order_relaxed);
 
     /* Copies of pads with pitch or filters first, while the outgoing kit still
      * plays: a pad swapped before its copy exists would come back plain. */
@@ -331,7 +348,7 @@ static void run_one_load(bool onlyModified, int kitId) {
                 rec.deferred |= bit;
                 continue;
             }
-            if (!reload_pad(padIdx, rec, seamless)) {
+            if (!reload_pad(*kit, padIdx, rec, seamless)) {
                 // A hit landed while the files were being prepared: the old
                 // sample plays out, and this pad is looked at again.
                 rec.deferred |= bit;
@@ -340,7 +357,6 @@ static void run_one_load(bool onlyModified, int kitId) {
             todo &= static_cast<uint16_t>(~bit);
             progressed = true;
             s_progress.store((++done * 100) / (total ? total : 1), std::memory_order_relaxed);
-            s_padsDone.store(done, std::memory_order_relaxed);
         }
         if (!todo || progressed) continue;
 
@@ -353,10 +369,9 @@ static void run_one_load(bool onlyModified, int kitId) {
             const uint16_t bit = static_cast<uint16_t>(1u << padIdx);
             force_quiet(padIdx);
             rec.forced |= bit;
-            reload_pad(padIdx, rec, false);
+            reload_pad(*kit, padIdx, rec, false);
             todo &= static_cast<uint16_t>(~bit);
             s_progress.store((++done * 100) / (total ? total : 1), std::memory_order_relaxed);
-            s_padsDone.store(done, std::memory_order_relaxed);
             continue;
         }
         vTaskDelay(pdMS_TO_TICKS(kDeferPollMs));
@@ -369,7 +384,9 @@ static void run_one_load(bool onlyModified, int kitId) {
     rec.engine.gateMaxUs   = after.gateMaxUs;
     rec.engine.gateTotalUs = after.gateTotalUs - before.gateTotalUs;
     rec.engine.gateCount   = after.gateCount - before.gateCount;
-    rec.engine.underruns   = after.underruns - before.underruns;
+    /* An engine that took the kit whole counts from zero again. */
+    rec.engine.underruns   = after.underruns >= before.underruns ? after.underruns - before.underruns
+                                                                 : after.underruns;
     rec.engine.noFreeBlock = after.noFreeBlock - before.noFreeBlock;
     rec.engine.droppedHits = after.droppedHits - before.droppedHits;
     rec.engine.rtGapMaxUs  = after.rtGapMaxUs;
@@ -380,9 +397,25 @@ static void run_one_load(bool onlyModified, int kitId) {
     rec.engine.streamKb    = after.streamKb - before.streamKb;
     rec.engine.loaderKb    = after.loaderKb - before.loaderKb;
     rec.doneMs = since_req_ms();
-    rec.ok = true;
 
-    s_outcome.store(1, std::memory_order_release);
+    // What the pads hold, not how many were visited: "KIT LOADED n/m" counts
+    // the pads that sound out of those the kit gives a sample. A whole kit of
+    // which none sounds is not loaded -- it is current, so the pad editor can
+    // fill it, but saying "loaded" lit sixteen dead pads as ready.
+    const uint16_t named = static_cast<uint16_t>(reloaded & ~rec.empty);
+    const uint16_t ready = static_cast<uint16_t>(named & ~rec.failed);
+    s_padsDone.store(__builtin_popcount(ready), std::memory_order_relaxed);
+    s_padsTotal.store(__builtin_popcount(named), std::memory_order_relaxed);
+    rec.ok = onlyModified || reloaded == 0 || ready != 0;
+    if (!rec.ok) {
+        char msg[64];
+        rec.why = named ? KitLoadWhy::NoneReadable : KitLoadWhy::NoSamples;
+        snprintf(msg, sizeof(msg), "%.22s: %s", kit->name.c_str(),
+                 named ? "no sample loaded" : "no samples on pads");
+        set_error(msg);
+    }
+
+    s_outcome.store(rec.ok ? 1 : -1, std::memory_order_release);
 }
 
 // Parks between loads; its stack and TCB are allocated once.

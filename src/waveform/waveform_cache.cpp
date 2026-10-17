@@ -337,8 +337,20 @@ bool waveform_cache_load_from_disk(const char* kitJsonPath) {
     if (!get_cache_path(kitJsonPath, cachePath, sizeof(cachePath))) return false;
     const int dirLen = kit_dir_len(kitJsonPath);
 
-    uint32_t maxFile = 256 * 1024;  // 256 KB max
+    /* The biggest buffer there is, from 256 kB down to 16. A file is ~1.2 kB
+     * an entry -- 20 kB for a kit of sixteen -- but after a few kit changes
+     * PSRAM has no 256 kB block left (66 kB the largest on the bench), the one
+     * malloc failed, the cache was never read back, and every kit change
+     * recomputed every waveform off the card while the streamer needed it. A
+     * file cut short loads the entries that fit; the loader redoes the rest. */
+    constexpr uint32_t kMaxFile = 256 * 1024;
+    constexpr uint32_t kMinFile = 16 * 1024;
+    uint32_t maxFile = kMaxFile;
     uint8_t* buf = (uint8_t*)malloc(maxFile);
+    while (!buf && maxFile > kMinFile) {
+        maxFile /= 2;
+        buf = (uint8_t*)malloc(maxFile);
+    }
     if (!buf) return false;
 
     uint32_t bytesRead = wf.readFile(cachePath, buf, maxFile);

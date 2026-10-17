@@ -9,6 +9,13 @@
 
 namespace crosspad_sampler {
 
+/// What a reloaded pad turned out to hold.
+enum class PadLoad : uint8_t {
+    Ready,    ///< a hit sounds
+    Empty,    ///< the kit gives this pad no sample
+    Failed,   ///< the kit names a sample the engine could not take
+};
+
 /**
  * @brief Manages pad LED colors based on kit config and selection state.
  *
@@ -80,9 +87,20 @@ public:
     void beginKitSwap(const crosspad::KitInfo& incoming, uint16_t pendingMask);
 
     /**
-     * @brief Mark @p padIdx as now playing the incoming kit. Loader thread.
+     * @brief Mark @p padIdx as reloaded, with what it now holds. Loader thread.
+     *
+     * Only a Ready pad takes its kit color: an Empty one goes dark and a
+     * Failed one dim red, so no pad looks loaded that a hit would not sound.
+     * The state outlasts the swap -- every later repaint of the kit's colors
+     * asks shownColor(), which reads emptiness off the kit model and keeps a
+     * pad red only while the engine still cannot play it.
      */
-    void markPadReloaded(uint8_t padIdx);
+    void markPadReloaded(uint8_t padIdx, PadLoad state);
+
+    /**
+     * @brief The color a pad shows for @p kitColor, given what it holds.
+     */
+    uint32_t shownColor(uint8_t padIdx, uint32_t kitColor) const;
 
     /**
      * @brief Advance the breath and push the pending/settled colors. LVGL thread.
@@ -99,6 +117,15 @@ public:
      */
     bool kitSwapActive() const { return swapActive_; }
 
+    /**
+     * @brief Paint the swap state again now, every pad. LVGL thread.
+     *
+     * For a writer that repainted the pads with the kit's colors mid-swap
+     * (the panel taking the new kit's pads) -- the swap's state goes back on
+     * at once rather than at the next tick.
+     */
+    void repaintKitSwap();
+
 private:
     int selectedPad_ = -1;
 
@@ -110,6 +137,9 @@ private:
 
     /// Scale a color to @p percent of its brightness.
     static crosspad::RgbColor dim(uint32_t color, uint8_t percent);
+
+    /// Every pad's swap color at the current breath.
+    void paintKitSwap();
 
     /// Push one pad's swap color, unless it is the white-highlighted selection.
     void paintSwapPad(uint8_t padIdx, uint16_t pending, uint8_t breathPct);
@@ -127,6 +157,10 @@ private:
     /// Pads already repainted in their settled color, so the tick writes each
     /// hand-over once instead of every 100 ms.
     uint16_t swapSettled_ = 0;
+
+    /// Pads whose last reload found a sample the engine could not take.
+    /// Written by the loader thread, read by the LVGL thread.
+    std::atomic<uint16_t> failedMask_{0};
 
     bool    swapActive_ = false;
     uint8_t breathStep_ = 0;
