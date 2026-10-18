@@ -24,19 +24,25 @@
 #include <crosspad-sampler/logic/kit_load_task.hpp>
 #include <crosspad-sampler/ui/sampler_styles.hpp>
 
+#include <crosspad/CrosspadCoreVersion.hpp>
 #include <crosspad/kit/IKitManager.hpp>
 #include <crosspad/kit/KitPathUtils.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
+#if CROSSPAD_CORE_VERSION_MAJOR >= 2
+  #include <crosspad/platform/IFileSystem.hpp>
+#endif
 #include <crosspad-gui/crosspad_gui.h>
 #include <lvgl_private.h>   // lv_image_decoder_dsc_t, for warming the image cache
 
-#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
-#include <sys/stat.h>
 #include <vector>
+#if CROSSPAD_CORE_VERSION_MAJOR < 2
+  #include <cerrno>
+  #include <sys/stat.h>
+#endif
 
 namespace crosspad_sampler {
 
@@ -918,13 +924,20 @@ void new_kit_cb(lv_event_t*) {
     for (int n = 1; n <= 99 && !free_name; ++n) {
         name = n == 1 ? "NEW KIT" : "NEW KIT " + std::to_string(n);
         path = root + "/" + name + "/kit.json";
-        struct stat st;
-        if (stat(crosspad::kitFsPath(path).c_str(), &st) == 0) continue;
-        if (errno == ENOENT) { free_name = true; continue; }
         /* Neither there nor absent -- a card error: counted as taken, so a
          * kit that may be there is never written over. Logged once, not per
          * name: this runs on the LVGL task, and the console blocks it. */
+#if CROSSPAD_CORE_VERSION_MAJOR >= 2
+        const crosspad::FsStat probe = crosspad::getFileSystem().stat(crosspad::kitFsPath(path).c_str(), nullptr);
+        if (probe == crosspad::FsStat::Found) continue;
+        if (probe == crosspad::FsStat::Missing) { free_name = true; continue; }
+        if (!probe_failed) printf("[KitSel] %s: could not be read\n", path.c_str());
+#else
+        struct stat st;
+        if (stat(crosspad::kitFsPath(path).c_str(), &st) == 0) continue;
+        if (errno == ENOENT) { free_name = true; continue; }
         if (!probe_failed) printf("[KitSel] %s: %s\n", path.c_str(), std::strerror(errno));
+#endif
         probe_failed = true;
     }
     if (!free_name) {

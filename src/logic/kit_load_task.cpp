@@ -45,7 +45,12 @@
   #include <freertos/task.h>
 #endif
 
-#include <sys/stat.h>
+#include <crosspad/CrosspadCoreVersion.hpp>
+#if CROSSPAD_CORE_VERSION_MAJOR >= 2
+  #include <crosspad/platform/IFileSystem.hpp>
+#else
+  #include <sys/stat.h>
+#endif
 
 #include <atomic>
 #include <cstring>
@@ -202,8 +207,12 @@ static void render_fx(const crosspad::KitInfo& kit, const crosspad::Pad& pad) {
     for (uint8_t i = 0; i < pad.sampleCount; ++i) {
         const std::string src = crosspad::resolveKitSamplePath(kit.path, pad.samples[i].sample);
         const std::string out = crosspad::kitFsPath(crosspad::renderedSamplePath(src, fx));
+#if CROSSPAD_CORE_VERSION_MAJOR >= 2
+        if (crosspad::getFileSystem().exists(out.c_str())) continue;
+#else
         struct stat sb;
         if (stat(out.c_str(), &sb) == 0) continue;
+#endif
         uint32_t waited = 0;
         while (!st->requestRendered(crosspad::kitFsPath(src), out, fx)) {   // another job runs
             if (waited >= kRenderWaitMs) return;
