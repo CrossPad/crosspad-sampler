@@ -1,17 +1,18 @@
 {
   "name": "Sampler",
   "id": "sampler",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "Sample player with 16 pads, waveform editing, kit management",
   "category": "music",
   "icon": "audio.png",
   "component_path": "components/crosspad-sampler",
   "platforms": ["esp-idf", "arduino"],
   "requires": {
-    "crosspad-core": ">=1.68.0",
-    "crosspad-gui": ">=1.28.0"
+    "crosspad-core": "^2.0.0",
+    "crosspad-gui": "^2.0.0"
   },
   "changelog": [
+    "0.18.0: builds on the PC simulator and with MSVC -- every RTOS call (waveform cache and loader, kit-load and kit-convert workers) goes through port/SamplerRtos.hpp, which keeps the board's PSRAM stacks, cores and priorities; the kit-selector gate (kit_gate) for every platform; the kit browser and waveform styles are the sampler's own, gui 2.0 no longer has them; a root deleted before the app's teardown is handled (gui 2.0 calls destroy with none); a waveform sweep that met a queue another thread had filled no longer ends the sweeps, so a kit with more layers than the queue gets them all; requires core 2.0 and gui 2.0",
     "0.17.0: SPECTRUM, one more click on the waveform after FILE, LIVE and RMS: the live spectrum of what is playing (1024-point FFT, 30 Hz-20 kHz on a log axis, -72..0 dBFS, peak ticks), for the sampler and pitched kits alike; requires crosspad-gui 1.28.0",
     "0.16.0: a kit loads only as far as its pads play. Each reloaded pad is asked whether the engine can sound it (SamplerAudioCallbacks::padPlayable): a pad the kit gives no sample goes dark, one whose sample did not load dim red, and only a pad that plays takes its colour -- the panel taking the new kit's pads mid-swap no longer paints every pad loaded at once. KIT LOADED counts playable pads of those with a sample; a kit none of whose pads plays is a failed load with the reason on the loader bar (no samples on pads / no sample loaded), current so the pad editor can fill it. The waveform cache is read back with the largest buffer PSRAM has (256 kB down to 16), where a fixed 256 kB malloc failed after a few kit changes and every waveform was computed again off the card under the streamer. Swap log: empty=, failed=, why=.",
     "0.15.0: a kit whose samples are not at the engine's rate (48 kHz on the 44.1 kHz engine costs every voice an interpolation: ~53 us a voice against ~10) is offered, once after it loads, Convert / Not now / Never (keep_rate in the kit). Convert runs core's KitRateConverter on a worker with a progress dialog and Stop; the kit is reloaded at the new rate and the originals nothing names any more are removed (retried while a voice still reads one, finished when the kit is loaded again). An offer goes when its kit does. Together with 0.14.0's direct hit path. Requires core 1.68.0.",
