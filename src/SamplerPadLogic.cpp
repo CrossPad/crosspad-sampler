@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 /**
  * @file SamplerPadLogic.cpp
  * @brief IPadLogicHandler for the sampler: sample triggering, EventBus
