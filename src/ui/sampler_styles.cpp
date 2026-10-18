@@ -4,6 +4,11 @@
 #include <crosspad-sampler/ui/sampler_styles.hpp>
 #include <crosspad-gui/theme/crosspad_theme.h>
 #include <crosspad-gui/widgets/gui_helpers.h>
+#include <crosspad-gui/CrosspadGuiVersion.hpp>
+
+// crosspad-gui 1.x still defines these styles itself and rebuilds them in
+// reinitStyles() on a theme change; from 2.0 on they are the sampler's.
+#if CROSSPAD_GUI_VERSION_MAJOR >= 2
 
 lv_style_t styleWaveformBox;
 lv_style_t styleKitBrowserScreen;
@@ -13,7 +18,11 @@ lv_style_t styleKitBrowserRowSelected;
 lv_style_t styleKitBrowserCover;
 lv_style_t styleKitBrowserThumb;
 
+#endif // CROSSPAD_GUI_VERSION_MAJOR >= 2
+
 namespace crosspad_sampler {
+
+#if CROSSPAD_GUI_VERSION_MAJOR >= 2
 
 namespace {
 
@@ -112,6 +121,12 @@ void sampler_styles_init()
     lv_style_set_text_color(&styleKitBrowserThumb, primary);
     lv_style_set_text_font(&styleKitBrowserThumb, &lv_font_montserrat_10);
 }
+
+#else
+
+void sampler_styles_init() {}
+
+#endif // CROSSPAD_GUI_VERSION_MAJOR >= 2
 
 } // namespace crosspad_sampler
 
