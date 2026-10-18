@@ -11,12 +11,7 @@
 #include <crosspad/kit/KitPathUtils.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
-#if !defined(ARDUINO)
-#include "esp_heap_caps.h"
-#endif
+#include "crosspad-sampler/port/SamplerRtos.hpp"
 
 #include <cstring>
 #include <cstdio>
@@ -56,10 +51,10 @@ constexpr uint32_t kRetryDelayMs = 150;
 constexpr uint32_t kSweepIdleMs  = 1000;
 constexpr uint8_t  kSweepBudget  = 8;
 
-// ── FreeRTOS state ──────────────────────────────────────────────────────
+// ── Task state ──────────────────────────────────────────────────────────
 
-static TaskHandle_t   s_task    = nullptr;
-static QueueHandle_t  s_queue   = nullptr;
+static SamplerTask    s_task;
+static SamplerQueue<WaveformLoadRequest> s_queue;
 static volatile bool  s_running = false;
 static WaveformLoaderStats s_stats;
 static uint8_t s_sweepsLeft = kSweepBudget;   // loader task + clear_queue only
@@ -68,9 +63,9 @@ static uint32_t s_kitRequested = 0;           // requests since this kit was pic
 static void requeue_or_fail(WaveformLoadRequest& req, uint32_t& failCounter) {
     if (req.attempt + 1 < kMaxAttempts) {
         req.attempt++;
-        if (xQueueSend(s_queue, &req, 0) == pdTRUE) {
+        if (s_queue.send(req)) {
             s_stats.retried++;
-            vTaskDelay(pdMS_TO_TICKS(kRetryDelayMs));
+            sampler_delay_ms(kRetryDelayMs);
             return;
         }
         s_stats.dropped++;
@@ -86,7 +81,7 @@ static void loader_task(void* /*param*/) {
     WaveformLoadRequest req;
 
     while (s_running) {
-        if (!xQueueReceive(s_queue, &req, pdMS_TO_TICKS(kSweepIdleMs))) {
+        if (!s_queue.receive(req, kSweepIdleMs)) {
             // Nothing waiting: top up from the kit, then block again.
             if (s_running && s_sweepsLeft > 0) {
                 s_stats.sweeps++;
@@ -162,7 +157,7 @@ static void loader_task(void* /*param*/) {
          * stop is still seen — waiting inside the platform read left this task
          * to be killed mid-fopen by waveform_loader_stop(), a handle and a
          * buffer of internal RAM gone each time. */
-        while (s_running && kit_load_task_is_loading()) vTaskDelay(pdMS_TO_TICKS(50));
+        while (s_running && kit_load_task_is_loading()) sampler_delay_ms(50);
         if (!s_running) { free(buf); break; }
 
         // Load via platform callback (handles SD mutex, compression, etc.)
@@ -179,8 +174,8 @@ static void loader_task(void* /*param*/) {
          * load would spend them all and lose the layer. */
         if (!ok && kit_load_task_is_loading()) {
             if (cbs.freeWaveformMem) cbs.freeWaveformMem(buf); else free(buf);
-            while (s_running && kit_load_task_is_loading()) vTaskDelay(pdMS_TO_TICKS(50));
-            if (xQueueSend(s_queue, &req, 0) != pdTRUE) s_stats.dropped++;
+            while (s_running && kit_load_task_is_loading()) sampler_delay_ms(50);
+            if (!s_queue.send(req)) s_stats.dropped++;
             continue;
         }
 
@@ -199,16 +194,11 @@ static void loader_task(void* /*param*/) {
 
         if (cbs.freeWaveformMem) cbs.freeWaveformMem(buf); else free(buf);
 
-        vTaskDelay(pdMS_TO_TICKS(10));
+        sampler_delay_ms(10);
     }
 
     s_running = false;
-    s_task = nullptr;
-#if defined(ARDUINO)
-    vTaskDelete(nullptr);
-#else
-    vTaskDeleteWithCaps(nullptr);
-#endif
+    s_task.exitSelf();
 }
 
 // ── Public API ──────────────────────────────────────────────────────────
@@ -216,18 +206,9 @@ static void loader_task(void* /*param*/) {
 bool waveform_loader_start() {
     if (s_running) return false;
 
-    if (!s_queue) {
-        /* Storage in PSRAM, like the task's stack: 4.5 kB of internal RAM
-         * otherwise, and the consumer already runs on an external stack. The
-         * queue is never deleted, so nothing has to free it WithCaps. */
-#if defined(ARDUINO)
-        s_queue = xQueueCreate(LOADER_QUEUE_SIZE, sizeof(WaveformLoadRequest));
-#else
-        s_queue = xQueueCreateWithCaps(LOADER_QUEUE_SIZE, sizeof(WaveformLoadRequest),
-                                       MALLOC_CAP_SPIRAM);
-#endif
-        if (!s_queue) return false;
-    }
+    /* Storage in PSRAM, like the task's stack: 4.5 kB of internal RAM
+     * otherwise, and the consumer already runs on an external stack. */
+    if (!s_queue.create(LOADER_QUEUE_SIZE)) return false;
 
     /* Running before the create, not after: the loader outranks the LVGL
      * task that starts it, so it could run at once, find the flag still
@@ -240,20 +221,8 @@ bool waveform_loader_start() {
      * one piece is more than the launcher with a kit up tends to have left:
      * the create failed, the queue filled behind it and the kit had no
      * waveform at all. A task created WithCaps must be deleted WithCaps. */
-#if defined(ARDUINO)
-    BaseType_t r = xTaskCreatePinnedToCore(
-        loader_task, "WFLoader",
-        LOADER_STACK_SIZE, nullptr,
-        LOADER_PRIORITY, &s_task, LOADER_CORE);
-#else
-    BaseType_t r = xTaskCreatePinnedToCoreWithCaps(
-        loader_task, "WFLoader",
-        LOADER_STACK_SIZE, nullptr,
-        LOADER_PRIORITY, &s_task, LOADER_CORE,
-        MALLOC_CAP_SPIRAM);
-#endif
-
-    if (r == pdPASS) return true;
+    if (s_task.start(loader_task, nullptr, "WFLoader",
+                     LOADER_STACK_SIZE, LOADER_PRIORITY, LOADER_CORE)) return true;
     s_running = false;
 
     /* 6 kB of internal RAM in one piece, and the launcher with a kit up has
@@ -269,17 +238,10 @@ void waveform_loader_stop() {
     s_running = false;
 
     WaveformLoadRequest term = {};
-    xQueueSend(s_queue, &term, 0);
+    s_queue.send(term);
 
-    for (int i = 0; i < 50 && s_task; i++) vTaskDelay(pdMS_TO_TICKS(10));
-    if (s_task) {
-#if defined(ARDUINO)
-        vTaskDelete(s_task);
-#else
-        vTaskDeleteWithCaps(s_task);
-#endif
-        s_task = nullptr;
-    }
+    for (int i = 0; i < 50 && s_task.running(); i++) sampler_delay_ms(10);
+    s_task.kill();
 }
 
 void waveform_loader_request(const char* filename, bool highPriority,
@@ -289,7 +251,7 @@ void waveform_loader_request(const char* filename, bool highPriority,
     // Self-heal: a request is also the cue to bring the task back if a
     // previous create failed for want of internal RAM.
     if (!s_running) waveform_loader_start();
-    if (!s_queue) return;
+    if (!s_queue.valid()) return;
     if (waveform_cache_find(filename)) return;
 
     WaveformLoadRequest req = {};
@@ -301,23 +263,20 @@ void waveform_loader_request(const char* filename, bool highPriority,
     req.sampleStart = sampleStart;
     req.sampleEnd   = sampleEnd;
 
-    const BaseType_t sent = highPriority
-        ? xQueueSendToFront(s_queue, &req, 0)
-        : xQueueSend(s_queue, &req, 0);
-    if (sent == pdTRUE) { s_stats.requested++; s_kitRequested++; }
+    const bool sent = highPriority ? s_queue.sendToFront(req) : s_queue.send(req);
+    if (sent) { s_stats.requested++; s_kitRequested++; }
     else                s_stats.dropped++;
 }
 
 static void post_pad_request(uint8_t padIndex, uint8_t sampleSlot, bool highPriority) {
     if (!s_running) waveform_loader_start();
-    if (!s_queue) return;
+    if (!s_queue.valid()) return;
     WaveformLoadRequest req = {};
     req.padIndex   = padIndex;
     req.sampleSlot = sampleSlot;
     req.priority   = highPriority ? 1 : 0;
-    const BaseType_t sent = highPriority ? xQueueSendToFront(s_queue, &req, 0)
-                                         : xQueueSend(s_queue, &req, 0);
-    if (sent != pdTRUE) s_stats.dropped++;
+    const bool sent = highPriority ? s_queue.sendToFront(req) : s_queue.send(req);
+    if (!sent) s_stats.dropped++;
 }
 
 void waveform_loader_request_pad(uint8_t padIndex, uint8_t sampleSlot, bool highPriority) {
@@ -331,7 +290,7 @@ void waveform_loader_sweep_now() {
 
 int waveform_loader_preload_kit(int maxPads) {
     if (!s_running) waveform_loader_start();
-    if (!s_queue) return 0;
+    if (!s_queue.valid()) return 0;
 
     auto* mgr = crosspad::getPlatformServices().kitManager;
     if (!mgr) return 0;
@@ -362,14 +321,14 @@ bool waveform_loader_is_running() {
 }
 
 void waveform_loader_clear_queue() {
-    if (s_queue) xQueueReset(s_queue);
+    s_queue.reset();
     s_sweepsLeft = kSweepBudget;   // a new kit gets its own budget
     s_kitRequested = 0;
 }
 
 int waveform_loader_progress() {
-    if (!s_queue || s_kitRequested == 0) return -1;
-    const uint32_t left = (uint32_t)uxQueueMessagesWaiting(s_queue);
+    if (!s_queue.valid() || s_kitRequested == 0) return -1;
+    const uint32_t left = (uint32_t)s_queue.count();
     if (left == 0) return -1;
     const uint32_t done = (left >= s_kitRequested) ? 0 : (s_kitRequested - left);
     return (int)(done * 100 / s_kitRequested);
@@ -378,7 +337,7 @@ int waveform_loader_progress() {
 void waveform_loader_get_stats(WaveformLoaderStats* out) {
     if (!out) return;
     *out = s_stats;
-    out->queued = s_queue ? (uint32_t)uxQueueMessagesWaiting(s_queue) : 0;
+    out->queued = (uint32_t)s_queue.count();
 }
 
 } // namespace crosspad_sampler

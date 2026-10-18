@@ -14,7 +14,14 @@
 #include <crosspad/kit/IKitManager.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
 #include <crosspad-gui/platform/IGuiPlatform.h>
-#include <crosspad-gui/app/App.hpp>
+// The App class differs by platform but not by shape: the PC one derives from
+// crosspad_gui::AppBase<App> just as the device one does, so isStarted() /
+// destroyApp() mean the same thing on both.
+#if __has_include("pc_stubs/PcApp.hpp")
+  #include "pc_stubs/PcApp.hpp"
+#else
+  #include <crosspad-gui/app/App.hpp>
+#endif
 
 #include <lvgl.h>
 
