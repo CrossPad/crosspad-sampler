@@ -24,6 +24,7 @@
 #endif
 
 #include <lvgl.h>
+#include <lvgl_private.h>   // lv_image_cache_drop, private API on LVGL master
 
 static App* s_thisApp = nullptr;
 
