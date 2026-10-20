@@ -356,6 +356,12 @@ static uint8_t* read_cache_file(const char* cachePath, uint32_t* outLen) {
     if (!buf) return nullptr;
     *outLen = wf.readFile(cachePath, buf, maxFile);
     if (*outLen < 8) { free(buf); return nullptr; }
+    /* Down to what was read: a prefetch nobody took held its whole 128 kB --
+     * a kit reloaded away from the Sampler (after Pitch Play) kept it for as
+     * long as the kit stayed, out of the UI's PSRAM. */
+    if (*outLen < maxFile) {
+        if (auto* fit = static_cast<uint8_t*>(realloc(buf, *outLen))) buf = fit;
+    }
     return buf;
 }
 
