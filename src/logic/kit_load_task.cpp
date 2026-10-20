@@ -555,6 +555,10 @@ bool kit_load_task_is_loading() {
     return s_loading;
 }
 
+int kit_load_task_progress() {
+    return s_progress.load(std::memory_order_relaxed);
+}
+
 int kit_load_task_pending_kit() {
     return s_pendingValid ? s_pendingKitId : -1;
 }

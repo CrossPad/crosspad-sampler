@@ -34,6 +34,9 @@ void kit_load_task_start(bool onlyModified, int kitId = -1);
 /// True while a background load task is running.
 bool kit_load_task_is_loading();
 
+/// How far the running load is, 0..100 (what the status bar shows).
+int kit_load_task_progress();
+
 /// True when called on the kit_load worker itself. The platform's pad reload
 /// is also reached from the UI and the CDC task (pad editor, SMPL_PITCH);
 /// work that must only ever run on the worker -- a pitched bank build: seconds

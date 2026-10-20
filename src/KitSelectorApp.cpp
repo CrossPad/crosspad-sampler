@@ -22,11 +22,27 @@
 #else
   #include <crosspad-gui/app/App.hpp>
 #endif
+#include <crosspad-gui/components/app_orchestrator.h>
+#include <crosspad-gui/components/mode_overlay.h>
 
 #include <lvgl.h>
 #include <lvgl_private.h>   // lv_image_cache_drop, private API on LVGL master
 
 static App* s_thisApp = nullptr;
+/* A pick asked for the next selector (kit_selector_app_pick_for()). */
+static void (*s_pickFn)(int, void*) = nullptr;
+static void* s_pickCtx = nullptr;
+static void (*s_pickingFn)(int, void*) = nullptr;   // the open selector's
+static void* s_pickingCtx = nullptr;
+/* Where to go once the browser is closed (KitSelectorConfig::onOpenApp). */
+static const char* s_follow = nullptr;
+/* Closed with back: the app it was opened from, to go back to. */
+static crosspad_gui::ILvglApp* s_back = nullptr;
+
+void kit_selector_app_pick_for(void (*fn)(int kitId, void* ctx), void* ctx) {
+    s_pickFn = fn;
+    s_pickCtx = ctx;
+}
 
 static void on_kit_selected(int kitId, void* /*userData*/) {
     auto& cb = crosspad_sampler::sampler_get_platform_callbacks().kitSelector;
@@ -61,6 +77,16 @@ static void close_app_async() {
         lv_image_cache_drop(nullptr);
         auto& cb = crosspad_sampler::sampler_get_platform_callbacks().kitSelector;
         if (cb.onClosed) cb.onClosed();
+        /* After onClosed: whatever the host brings back gives way to it. */
+        const char* app = s_follow;
+        crosspad_gui::ILvglApp* back = s_back;
+        s_follow = nullptr;
+        s_back = nullptr;
+        if (app) crosspad_gui::mode_overlay_open_app(app);
+        /* One step back, as the power button's click is everywhere -- unless
+         * the host already brought back what the browser was opened over. */
+        else if (back && !crosspad_gui::AppOrchestrator::getInstance().getForegroundApp())
+            crosspad_gui::mode_overlay_open_app(back->getName());
     }, nullptr);
 }
 
@@ -71,6 +97,21 @@ static void on_kit_loaded(void* /*userData*/) {
 }
 
 static void on_kit_closed(void* /*userData*/) {
+    auto& orch = crosspad_gui::AppOrchestrator::getInstance();
+    if (s_thisApp && orch.getForegroundApp() == s_thisApp) s_back = orch.historyBack(s_thisApp);
+    close_app_async();
+}
+
+static void on_open_app(const char* app, void* /*userData*/) {
+    if (s_follow) return;   /* a second click before the close */
+    s_follow = app;
+    close_app_async();
+}
+
+static void on_kit_picked(int kitId, void* /*userData*/) {
+    if (!s_pickingFn) return;   /* a second click before the close: picked already */
+    s_pickingFn(kitId, s_pickingCtx);
+    s_pickingFn = nullptr;
     close_app_async();
 }
 
@@ -79,14 +120,21 @@ lv_obj_t* lv_CreateKitSelector(lv_obj_t* parent, App* app) {
 
     crosspad_sampler::KitSelectorConfig config;
     config.parent        = parent;
+    s_pickingFn  = s_pickFn;
+    s_pickingCtx = s_pickCtx;
+    s_pickFn = nullptr;
+    s_pickCtx = nullptr;
+    config.onPicked      = s_pickingFn ? on_kit_picked : nullptr;
     config.onSelected    = on_kit_selected;
     config.onLoaded      = on_kit_loaded;
     config.onClose       = on_kit_closed;
+    config.onOpenApp     = on_open_app;
     return crosspad_sampler::kit_selector_create(config);
 }
 
 void lv_KitSelector_destroy(lv_obj_t* app) {
     s_thisApp = nullptr;
+    s_pickingFn = nullptr;
     crosspad_sampler::kit_selector_destroy(app);
 }
 

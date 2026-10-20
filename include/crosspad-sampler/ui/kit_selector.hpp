@@ -18,19 +18,31 @@ using KitLoadedFn = void (*)(void* userData);
 /// If null, the overlay calls `kit_selector_destroy` itself.
 using KitClosedFn = void (*)(void* userData);
 
+/// Callback asking the host to close the browser and open @p app (its
+/// registered name): Pitch Play for an instrument, Arrange for a song that has
+/// opened, the Slicer for a take.
+using KitOpenAppFn = void (*)(const char* app, void* userData);
+
 /// Configuration for creating a kit selector overlay.
 struct KitSelectorConfig {
     lv_obj_t* parent = nullptr;
+    /// Set, the selector picks for someone: a kit chosen is handed here and
+    /// not loaded (onSelected and onLoaded are not called), and the host
+    /// closes it. A song's kit track's kit is picked so.
+    KitSelectedFn onPicked = nullptr;
     KitSelectedFn onSelected = nullptr;
     KitLoadedFn   onLoaded = nullptr;
     KitClosedFn   onClose = nullptr;
+    KitOpenAppFn  onOpenApp = nullptr;
     void* userData = nullptr;
 };
 
-/// Create the full-screen kit browser: cover art and author on the left, one
-/// row per kit (thumbnail, name, author) on the right, Back in the status bar.
-/// Kits come from IKitManager; artwork is `cover.png` / `thumb.png` beside the
-/// kit's JSON, with a lettered placeholder where a kit ships none.
+/// Create the browser over the whole app area: KITS / DRUMS / PITCH / SONGS /
+/// USER down the left, five rows of the chosen list, what the highlighted thing
+/// is across the top, LOAD and EDIT along the bottom. Kits come from
+/// IKitManager (DRUMS: "category": "drums"), instruments from Pitch Play's
+/// library, songs from ISongEngine, takes from ISampleTools. While it is up the
+/// pads play and light the highlighted kit.
 lv_obj_t* kit_selector_create(const KitSelectorConfig& config);
 
 /// Destroy the kit selector overlay and clean up LVGL groups.
