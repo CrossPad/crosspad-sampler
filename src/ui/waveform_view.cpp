@@ -24,8 +24,21 @@ static void*                s_fileUserData = nullptr;
 /// PCM buffer used during waveform_view_load() — one sample per canvas pixel column.
 static int16_t s_waveformBuf[WAVEFORM_CANVAS_WIDTH];
 
-/// Canvas pixel buffer — allocated from PSRAM on first use to avoid wasting DRAM.
+/// Canvas pixel buffer -- from PSRAM, on first use, shared by the live views
+/// and given back with the last of them: 21 kB of the UI's PSRAM, which the
+/// Mixer and the rest need more than a closed Sampler does.
 static uint8_t* cbuf = nullptr;
+static uint32_t s_liveViews = 0;
+
+/// After the last view went: the canvas held the buffer until its own
+/// teardown, which runs after the DELETE event, so the free waits a pass. A
+/// view opened meanwhile keeps it.
+static void release_pixels_if_unused(void*)
+{
+    if (s_liveViews || !cbuf) return;
+    free(cbuf);   // sampler_alloc_big(): freed with free()
+    cbuf = nullptr;
+}
 
 /* What is on screen while it says "loading". The view retries on its own
  * timer rather than waiting for whichever panel owns it to tick: a waveform
@@ -111,6 +124,7 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
             cbuf = static_cast<uint8_t*>(malloc(CBUF_BYTES));
         }
     }
+    ++s_liveViews;
     lv_obj_t* canvas = lv_canvas_create(cont);
     lv_canvas_set_buffer(canvas, cbuf, WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT,
                          LV_COLOR_FORMAT_RGB565);
@@ -185,6 +199,7 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
         lv_obj_t* target = (lv_obj_t*)lv_event_get_target(e);
         if (s_pendingView == target) pending_stop();
         band_forget(target);
+        if (s_liveViews && --s_liveViews == 0) lv_async_call(release_pixels_if_unused, nullptr);
     }, LV_EVENT_DELETE, nullptr);
 
     return cont;
