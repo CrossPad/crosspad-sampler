@@ -306,15 +306,16 @@ void cover_show(int idx) {
 
     const std::string path = crosspad::kitAssetPath(kit->path, "cover.png");
     const std::string previous = s_coverPathShown;
-    if (fileExists(path)) {
-        /* Decode here, not at draw time. Setting the source alone leaves the
-         * PNG to be read and decoded inside the next refresh -- one frame in
-         * the middle of a scroll taking over a tenth of a second, which is
-         * felt as the list catching. The same open+close the thumbnails use. */
-        lv_image_decoder_dsc_t dsc;
-        if (lv_image_decoder_open(&dsc, path.c_str(), nullptr) == LV_RESULT_OK) {
-            lv_image_decoder_close(&dsc);
-        }
+    /* Decode here, not at draw time. Setting the source alone leaves the PNG
+     * to be read and decoded inside the next refresh -- one frame in the
+     * middle of a scroll taking over a tenth of a second, which is felt as the
+     * list catching. The same open+close the thumbnails use. Only a cover that
+     * decoded is shown: one that did not (59.5 kB a fragmented PSRAM cannot
+     * give) was tried again at every refresh, each attempt a burst of the
+     * decoder's buffers against a heap already out -- the letter instead. */
+    lv_image_decoder_dsc_t dsc;
+    if (fileExists(path) && lv_image_decoder_open(&dsc, path.c_str(), nullptr) == LV_RESULT_OK) {
+        lv_image_decoder_close(&dsc);
         lv_image_set_src(s_coverImg, path.c_str());
         s_coverPathShown = path;
         lv_obj_remove_flag(s_coverImg, LV_OBJ_FLAG_HIDDEN);
