@@ -54,6 +54,10 @@ static void close_app_async() {
         if (s_thisApp && s_thisApp->isStarted()) {
             s_thisApp->destroyApp();
         }
+        /* Now, not in the teardown's own async call: onClosed starts the app
+         * that waited behind the gate right here, and the covers still in the
+         * image cache left the Sampler no PSRAM for its waveform. */
+        lv_image_cache_drop(nullptr);
         auto& cb = crosspad_sampler::sampler_get_platform_callbacks().kitSelector;
         if (cb.onClosed) cb.onClosed();
     }, nullptr);
