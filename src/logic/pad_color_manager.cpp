@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "crosspad-sampler/logic/pad_color_manager.hpp"
 #include "crosspad-sampler/SamplerConfig.hpp"
 #include "crosspad-sampler/SamplerPlatformCallbacks.hpp"

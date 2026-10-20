@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "crosspad-sampler/PreviewPlayer.hpp"
 
 #include "crosspad/pad/PadManager.hpp"
@@ -179,7 +180,9 @@ void PreviewPlayer::poll(uint32_t nowMs)
     }
     while (next_ < events_.size() && events_[next_].atMs <= into) {
         const Note& n = events_[next_];
-        crosspad::getPadManager().handlePadPress(n.pad, n.velocity);
+        /* App: the kit playing itself, not a player -- a take running meanwhile
+         * does not record it. */
+        crosspad::getPadManager().handlePadPress(n.pad, n.velocity, crosspad::EventSource::App);
         ++next_;
     }
 }

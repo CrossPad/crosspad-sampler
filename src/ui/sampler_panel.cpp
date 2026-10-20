@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #ifdef USE_LVGL
 
 
@@ -17,6 +18,8 @@
 #include "crosspad-gui/crosspad_gui.h"   // styles, widgets, App class
 #include "crosspad-gui/components/app_orchestrator.h"
 #include "crosspad-gui/components/scope_view.h"
+#include "crosspad-gui/components/segment_meter.h"
+#include "crosspad-gui/CrosspadGuiVersion.hpp"
 #include "crosspad-gui/components/ui_modal.h"
 
 // crosspad-core
@@ -50,6 +53,9 @@ using crosspad::IPadLogicHandler;
 using crosspad::PadManager;
 using crosspad::RgbColor;
 using crosspad::HtmlColor;
+#if CROSSPAD_GUI_VERSION_MAJOR >= 2   // gui 1.x has these in the global namespace
+using crosspad_gui::create_segment_meter;
+#endif
 
 namespace crosspad_sampler {
 
@@ -1399,7 +1405,7 @@ void sampler_panel_destroy(lv_obj_t * panel)
 
     LV_LOG_INFO("Sampler GUI destroyed");
 
-    lv_obj_delete_async(panel);
+    if (panel) lv_obj_delete_async(panel);
 
     auto* settingsPtr = crosspad::getPlatformServices().settings;
     if (settingsPtr) {

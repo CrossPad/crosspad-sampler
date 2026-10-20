@@ -10,9 +10,7 @@
 #include <cstring>
 #include <lvgl.h>
 
-#ifdef ESP_PLATFORM
-#include <esp_heap_caps.h>
-#endif
+#include <crosspad-sampler/port/SamplerRtos.hpp>
 
 namespace crosspad_sampler {
 
@@ -26,8 +24,21 @@ static void*                s_fileUserData = nullptr;
 /// PCM buffer used during waveform_view_load() — one sample per canvas pixel column.
 static int16_t s_waveformBuf[WAVEFORM_CANVAS_WIDTH];
 
-/// Canvas pixel buffer — allocated from PSRAM on first use to avoid wasting DRAM.
+/// Canvas pixel buffer -- from PSRAM, on first use (attach_pixels()), shared
+/// by the live views and given back with the last of them: 21 kB of the UI's
+/// PSRAM, which the Mixer and the rest need more than a closed Sampler does.
 static uint8_t* cbuf = nullptr;
+static uint32_t s_liveViews = 0;
+
+/// After the last view went: the canvas held the buffer until its own
+/// teardown, which runs after the DELETE event, so the free waits a pass. A
+/// view opened meanwhile keeps it.
+static void release_pixels_if_unused(void*)
+{
+    if (s_liveViews || !cbuf) return;
+    free(cbuf);   // sampler_alloc_big(): freed with free()
+    cbuf = nullptr;
+}
 
 /* What is on screen while it says "loading". The view retries on its own
  * timer rather than waiting for whichever panel owns it to tick: a waveform
@@ -80,6 +91,24 @@ static lv_color_t color_from_hex(uint32_t hex)
     return lv_color_make((hex >> 16) & 0xFF, (hex >> 8) & 0xFF, hex & 0xFF);
 }
 
+/* The canvas's pixels, attached once there is memory for them. Before the
+ * first that works the view is an empty box: lv_canvas_set_buffer() asserts
+ * on NULL, and it was handed one when the boot's update check, a kit load and
+ * the Sampler opening had left PSRAM no 21 kB block -- an assert that never
+ * returned, and a board dead until reset. Every load asks again. Never from
+ * internal RAM on the board: that is what the audio tasks and the card live on. */
+static bool attach_pixels(lv_obj_t* canvas)
+{
+    if (lv_canvas_get_draw_buf(canvas)) return true;
+    if (!cbuf) {
+        cbuf = static_cast<uint8_t*>(sampler_alloc_big(CBUF_BYTES));
+        if (!cbuf) return false;
+    }
+    lv_canvas_set_buffer(canvas, cbuf, WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT,
+                         LV_COLOR_FORMAT_RGB565);
+    return true;
+}
+
 // ── Public API ──────────────────────────────────────────────────────────
 
 void waveform_view_set_provider(WaveformDataProvider fn, void* userData)
@@ -106,18 +135,10 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
     lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(cont, LV_OBJ_FLAG_CLICKABLE);
 
-    // Canvas, child 0. Its buffer comes from PSRAM when there is any.
-    if (!cbuf) {
-#ifdef ESP_PLATFORM
-        cbuf = static_cast<uint8_t*>(heap_caps_malloc(CBUF_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-#endif
-        if (!cbuf) {
-            cbuf = static_cast<uint8_t*>(malloc(CBUF_BYTES));
-        }
-    }
+    // Canvas, child 0.
+    ++s_liveViews;
     lv_obj_t* canvas = lv_canvas_create(cont);
-    lv_canvas_set_buffer(canvas, cbuf, WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT,
-                         LV_COLOR_FORMAT_RGB565);
+    attach_pixels(canvas);
     lv_obj_set_size(canvas, WAVEFORM_CANVAS_WIDTH, WAVEFORM_CANVAS_HEIGHT);
     lv_obj_align(canvas, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_clear_flag(canvas, LV_OBJ_FLAG_CLICKABLE);
@@ -189,6 +210,7 @@ lv_obj_t* waveform_view_create(lv_obj_t* parent)
         lv_obj_t* target = (lv_obj_t*)lv_event_get_target(e);
         if (s_pendingView == target) pending_stop();
         band_forget(target);
+        if (s_liveViews && --s_liveViews == 0) lv_async_call(release_pixels_if_unused, nullptr);
     }, LV_EVENT_DELETE, nullptr);
 
     return cont;
@@ -229,20 +251,18 @@ static void draw_from_buffer(lv_obj_t* waveformView, uint32_t actualSamples)
     const ViewBand* band = band_slot(waveformView, false);
     const bool reversed = band && band->reversed;
     lv_obj_t* canvas = lv_obj_get_child(waveformView, 0);
-    if (!canvas) return;
+    if (!canvas || !attach_pixels(canvas)) return;
 
     lv_canvas_fill_bg(canvas, color_from_hex(WAVEFORM_BG_COLOR), LV_OPA_COVER);
 
     if (actualSamples < 2) return;
 
-    lv_layer_t layer;
-    lv_canvas_init_layer(canvas, &layer);
-
-    lv_draw_line_dsc_t dsc;
-    lv_draw_line_dsc_init(&dsc);
-    dsc.color   = color_from_hex(WAVEFORM_WAVE_COLOR);
-    dsc.width   = 1;
-    dsc.opa     = LV_OPA_COVER;
+    /* Into the pixels, not through lv_draw_line(): a line is a draw task, and
+     * a column each was 150 allocations queued on the canvas's layer at once
+     * -- the one that failed under an exhausted PSRAM asserted. A bar one
+     * pixel wide needs no renderer. */
+    const lv_draw_buf_t* px = lv_canvas_get_draw_buf(canvas);
+    const uint16_t ink = lv_color_to_u16(color_from_hex(WAVEFORM_WAVE_COLOR));
 
     const int32_t midY  = WAVEFORM_CANVAS_HEIGHT / 2;
     const float   scale = static_cast<float>(midY) / 32768.0f;
@@ -251,25 +271,26 @@ static void draw_from_buffer(lv_obj_t* waveformView, uint32_t actualSamples)
     // bin's abs-max, so mirroring it gives the usual symmetric envelope and
     // keeps transients visible in long bins, where a point-to-point line
     // only zigzagged near the midline.
-    for (uint32_t i = 0; i < actualSamples; ++i) {
+    const uint32_t n = actualSamples < static_cast<uint32_t>(WAVEFORM_CANVAS_WIDTH)
+                     ? actualSamples : static_cast<uint32_t>(WAVEFORM_CANVAS_WIDTH);
+    for (uint32_t i = 0; i < n; ++i) {
         int16_t v   = s_waveformBuf[i];
         int32_t mag = static_cast<int32_t>((v < 0 ? -v : v) * scale);
         if (mag < 1) mag = 1;
 
         /* A reversed sample is drawn as it is heard: its end first. */
-        int32_t x   = static_cast<int32_t>(reversed ? actualSamples - 1 - i : i);
+        int32_t x    = static_cast<int32_t>(reversed ? n - 1 - i : i);
         int32_t yTop = midY - mag;
         int32_t yBot = midY + mag;
+        if (yTop < 0) yTop = 0;
+        if (yBot > WAVEFORM_CANVAS_HEIGHT - 1) yBot = WAVEFORM_CANVAS_HEIGHT - 1;
 
-        dsc.p1 = lv_point_precise_t{ static_cast<lv_value_precise_t>(x),
-                                     static_cast<lv_value_precise_t>(yTop) };
-        dsc.p2 = lv_point_precise_t{ static_cast<lv_value_precise_t>(x),
-                                     static_cast<lv_value_precise_t>(yBot) };
-
-        lv_draw_line(&layer, &dsc);
+        for (int32_t y = yTop; y <= yBot; ++y) {
+            reinterpret_cast<uint16_t*>(px->data + y * px->header.stride)[x] = ink;
+        }
     }
 
-    lv_canvas_finish_layer(canvas, &layer);
+    lv_obj_invalidate(canvas);
 }
 
 void waveform_view_load(lv_obj_t* waveformView, uint8_t padIdx, uint8_t sampleSlot)

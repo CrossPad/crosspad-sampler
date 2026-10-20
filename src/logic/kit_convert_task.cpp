@@ -25,12 +25,12 @@
 
 #include <lvgl.h>
 
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include <freertos/semphr.h>
-#include <freertos/idf_additions.h>
+#include <crosspad-sampler/port/SamplerRtos.hpp>
 
-#include <esp_heap_caps.h>
+#if defined(ARDUINO)
+  #include <freertos/FreeRTOS.h>
+  #include <freertos/task.h>
+#endif
 
 #include <atomic>
 #include <cstdio>
@@ -43,17 +43,21 @@ namespace crosspad_sampler {
 namespace {
 
 constexpr size_t      kStack       = 8192;
-constexpr UBaseType_t kPriority    = 1;
-constexpr BaseType_t  kCore        = 1;
+constexpr int         kPriority    = 1;
+constexpr int         kCore        = 1;
 constexpr uint32_t    kSliceMs     = 20;      // work between two sleeps
 constexpr uint32_t    kPublishMs   = 100;     // progress copies for the UI
 constexpr uint32_t    kPollMs      = 100;     // the LVGL timer
 constexpr uint32_t    kTidyRetryMs = 10000;   // a file a voice still read
 constexpr uint8_t     kTidyRetries = 6;
 
-TaskHandle_t      s_worker = nullptr;
-SemaphoreHandle_t s_doorbell = nullptr;
-SemaphoreHandle_t s_mux = nullptr;
+#if defined(ARDUINO)
+TaskHandle_t  s_arduinoWorker = nullptr;
+#else
+SamplerTask   s_worker;
+#endif
+SamplerSignal s_doorbell;
+SamplerMutex  s_mux;
 
 // The request. Written on the LVGL thread before the doorbell, read by the
 // worker after it. Paths are fixed arrays: a std::string of this length is a
@@ -82,8 +86,8 @@ uint32_t now_ms() { return static_cast<uint32_t>(crosspad::getClock().getTimeUs(
 
 class Lock {
 public:
-    Lock() { xSemaphoreTake(s_mux, portMAX_DELAY); }
-    ~Lock() { xSemaphoreGive(s_mux); }
+    Lock() { s_mux.take(kWaitForever); }
+    ~Lock() { s_mux.give(); }
     Lock(const Lock&) = delete;
     Lock& operator=(const Lock&) = delete;
 };
@@ -106,7 +110,7 @@ void run_convert() {
         if (!conv.step()) break;
         const uint32_t t = now_ms();
         if (t - lastPublish >= kPublishMs) { publish(conv); lastPublish = t; }
-        if (t - sliceStart >= kSliceMs) { vTaskDelay(1); sliceStart = now_ms(); }
+        if (t - sliceStart >= kSliceMs) { sampler_delay_ms(1); sliceStart = now_ms(); }
     }
     publish(conv);
     Lock lk;
@@ -137,28 +141,28 @@ void run_job() {
 
 void worker_fn(void*) {
     for (;;) {
-        if (xSemaphoreTake(s_doorbell, portMAX_DELAY) == pdTRUE) run_job();
+        if (s_doorbell.take(kWaitForever)) run_job();
     }
 }
 
 bool ensure_worker() {
-    if (s_worker) return true;
-    if (!s_mux) s_mux = xSemaphoreCreateMutex();
-    if (!s_doorbell) s_doorbell = xSemaphoreCreateBinary();
-    if (!s_mux || !s_doorbell) return false;
+#if defined(ARDUINO)
+    if (s_arduinoWorker) return true;
+#else
+    if (s_worker.running()) return true;
+#endif
+    // The mutex exists once it has been taken.
+    if (!s_mux.take(kWaitForever)) return false;
+    s_mux.give();
+    if (!s_doorbell.create()) return false;
 #if defined(ARDUINO)
     static StaticTask_t s_tcb;
     static StackType_t  s_stack[kStack / sizeof(StackType_t)];
-    s_worker = xTaskCreateStaticPinnedToCore(worker_fn, "kit_conv", kStack, nullptr, kPriority,
-                                             s_stack, &s_tcb, kCore);
-    return s_worker != nullptr;
+    s_arduinoWorker = xTaskCreateStaticPinnedToCore(worker_fn, "kit_conv", kStack, nullptr,
+                                                    kPriority, s_stack, &s_tcb, kCore);
+    return s_arduinoWorker != nullptr;
 #else
-    if (xTaskCreatePinnedToCoreWithCaps(worker_fn, "kit_conv", kStack, nullptr, kPriority, &s_worker,
-                                        kCore, MALLOC_CAP_SPIRAM) != pdPASS) {
-        s_worker = nullptr;
-        return false;
-    }
-    return true;
+    return s_worker.start(worker_fn, nullptr, "kit_conv", kStack, kPriority, kCore);
 #endif
 }
 
@@ -191,7 +195,7 @@ bool post(KitConvertJob job, int kitId, uint32_t rate) {
     std::snprintf(s_reqPath, sizeof(s_reqPath), "%s", kit->path.c_str());
     s_reqRate = rate;
     s_cancelReq.store(false, std::memory_order_relaxed);
-    xSemaphoreGive(s_doorbell);
+    s_doorbell.give();
     return true;
 }
 
@@ -300,14 +304,14 @@ void kit_convert_cancel() {
 }
 
 bool kit_convert_busy() {
-    if (!s_mux) return false;
+    if (!s_mux.valid()) return false;
     Lock lk;
     return s_workerBusy || s_finished;
 }
 
 KitConvertStatus kit_convert_status() {
     KitConvertStatus st;
-    if (!s_mux) return st;
+    if (!s_mux.valid()) return st;
     {
         Lock lk;
         st = s_status;

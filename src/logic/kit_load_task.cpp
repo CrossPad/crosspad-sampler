@@ -38,19 +38,41 @@
 #include <crosspad-gui/components/status_bar.h>
 #include <lvgl.h>
 
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include <freertos/semphr.h>
-#include <freertos/idf_additions.h>
+#include <crosspad-sampler/port/SamplerRtos.hpp>
 
-#include <sys/stat.h>
-#include <esp_heap_caps.h>
+#if defined(ARDUINO)
+  #include <freertos/FreeRTOS.h>
+  #include <freertos/task.h>
+#endif
+
+#include <crosspad/CrosspadCoreVersion.hpp>
+#if CROSSPAD_CORE_VERSION_MAJOR >= 2
+  #include <crosspad/platform/IFileSystem.hpp>
+#else
+  #include <sys/stat.h>
+#endif
 
 #include <atomic>
 #include <cstring>
 #include <cstdio>
 
 namespace crosspad_sampler {
+
+namespace {
+// __builtin_popcount()/__builtin_ctz() are GCC/Clang; MSVC (crosspad-pc) has neither.
+int pad_count(uint16_t mask) {
+    int n = 0;
+    for (; mask; mask = static_cast<uint16_t>(mask & (mask - 1))) ++n;
+    return n;
+}
+
+int lowest_pad(uint16_t mask) {
+    if (!mask) return 0;
+    int i = 0;
+    for (; !(mask & 1u); mask = static_cast<uint16_t>(mask >> 1)) ++i;
+    return i;
+}
+}  // namespace
 
 static volatile bool s_loading = false;
 
@@ -65,16 +87,20 @@ static constexpr size_t LOAD_TASK_STACK = 8096;
 // task (19), which take what they need and leave the rest to the build.
 // The Arduino build keeps it on core 0, where its LVGL does not run.
 #if defined(ARDUINO)
-static constexpr UBaseType_t LOAD_TASK_PRIORITY = 5;
-static constexpr BaseType_t  LOAD_TASK_CORE     = 0;
+static constexpr int LOAD_TASK_PRIORITY = 5;
+static constexpr int LOAD_TASK_CORE     = 0;
 #else
-static constexpr UBaseType_t LOAD_TASK_PRIORITY = 4;
-static constexpr BaseType_t  LOAD_TASK_CORE     = 1;
+static constexpr int LOAD_TASK_PRIORITY = 4;
+static constexpr int LOAD_TASK_CORE     = 1;
 #endif
 
 // ── The worker, created once ────────────────────────────────────────────────
-static TaskHandle_t      s_worker      = nullptr;
-static SemaphoreHandle_t s_workPending = nullptr;
+#if defined(ARDUINO)
+static TaskHandle_t  s_arduinoWorker = nullptr;
+#else
+static SamplerTask   s_worker;
+#endif
+static SamplerSignal s_workPending;
 
 // The request the worker picks up. Written before the semaphore is given,
 // read after it is taken; a second load waits in the pending slot below.
@@ -181,16 +207,20 @@ static void render_fx(const crosspad::KitInfo& kit, const crosspad::Pad& pad) {
     for (uint8_t i = 0; i < pad.sampleCount; ++i) {
         const std::string src = crosspad::resolveKitSamplePath(kit.path, pad.samples[i].sample);
         const std::string out = crosspad::kitFsPath(crosspad::renderedSamplePath(src, fx));
+#if CROSSPAD_CORE_VERSION_MAJOR >= 2
+        if (crosspad::getFileSystem().exists(out.c_str())) continue;
+#else
         struct stat sb;
         if (stat(out.c_str(), &sb) == 0) continue;
+#endif
         uint32_t waited = 0;
         while (!st->requestRendered(crosspad::kitFsPath(src), out, fx)) {   // another job runs
             if (waited >= kRenderWaitMs) return;
-            vTaskDelay(pdMS_TO_TICKS(kRenderPollMs));
+            sampler_delay_ms(kRenderPollMs);
             waited += kRenderPollMs;
         }
         while (st->job() == crosspad::ToolJob::Busy && waited < kRenderWaitMs) {
-            vTaskDelay(pdMS_TO_TICKS(kRenderPollMs));
+            sampler_delay_ms(kRenderPollMs);
             waited += kRenderPollMs;
         }
     }
@@ -204,7 +234,7 @@ static void force_quiet(uint8_t pad) {
                                                crosspad::EventSource::App);
     for (uint32_t waited = 0; waited < kForceQuietWaitMs && pad_sounding(pad);
          waited += kDeferPollMs) {
-        vTaskDelay(pdMS_TO_TICKS(kDeferPollMs));
+        sampler_delay_ms(kDeferPollMs);
     }
 }
 
@@ -262,8 +292,8 @@ static KitSwapRecord s_noRecord;   // when the ring could not be allocated
 
 static void run_one_load(bool onlyModified, int kitId) {
     if (!s_swaps) {
-        s_swaps = static_cast<KitSwapRecord*>(
-            heap_caps_calloc(kSwapLog, sizeof(KitSwapRecord), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        s_swaps = static_cast<KitSwapRecord*>(sampler_alloc_big(kSwapLog * sizeof(KitSwapRecord)));
+        if (s_swaps) memset(s_swaps, 0, kSwapLog * sizeof(KitSwapRecord));
     }
     KitSwapRecord& rec = s_swaps ? s_swaps[s_swapCount % kSwapLog] : s_noRecord;
     rec = KitSwapRecord{};
@@ -304,7 +334,7 @@ static void run_one_load(bool onlyModified, int kitId) {
     // held by it. 150 ms of every quiet swap otherwise.
     bool anySounding = false;
     for (uint8_t p = 0; p < PAD_COUNT && !anySounding; ++p) anySounding = pad_sounding(p);
-    if (anySounding) vTaskDelay(pdMS_TO_TICKS(150));
+    if (anySounding) sampler_delay_ms(150);
 
     EngineLoadStats before;
     engine_stats(before);
@@ -322,7 +352,7 @@ static void run_one_load(bool onlyModified, int kitId) {
         todo |= static_cast<uint16_t>(1u << padIdx);
     }
     const uint16_t reloaded = todo;
-    const int total = __builtin_popcount(todo);
+    const int total = pad_count(todo);
     int done = 0;
 
     /* Copies of pads with pitch or filters first, while the outgoing kit still
@@ -364,9 +394,9 @@ static void run_one_load(bool onlyModified, int kitId) {
         // Only sounding pads are left. The last one gets a moment to end on
         // its own — most samples are shorter than that — but not to hold the
         // whole kit hostage; nor does anything past the deadline.
-        if (__builtin_popcount(todo) == 1) lastAloneMs += kDeferPollMs;
+        if (pad_count(todo) == 1) lastAloneMs += kDeferPollMs;
         if (lastAloneMs >= kLastPadGraceMs || waitedMs >= kDeferDeadlineMs) {
-            const uint8_t padIdx = static_cast<uint8_t>(__builtin_ctz(todo));
+            const uint8_t padIdx = static_cast<uint8_t>(lowest_pad(todo));
             const uint16_t bit = static_cast<uint16_t>(1u << padIdx);
             force_quiet(padIdx);
             rec.forced |= bit;
@@ -375,7 +405,7 @@ static void run_one_load(bool onlyModified, int kitId) {
             s_progress.store((++done * 100) / (total ? total : 1), std::memory_order_relaxed);
             continue;
         }
-        vTaskDelay(pdMS_TO_TICKS(kDeferPollMs));
+        sampler_delay_ms(kDeferPollMs);
         waitedMs += kDeferPollMs;
     }
 
@@ -409,8 +439,8 @@ static void run_one_load(bool onlyModified, int kitId) {
     // fill it, but saying "loaded" lit sixteen dead pads as ready.
     const uint16_t named = static_cast<uint16_t>(reloaded & ~rec.empty);
     const uint16_t ready = static_cast<uint16_t>(named & ~rec.failed);
-    s_padsDone.store(__builtin_popcount(ready), std::memory_order_relaxed);
-    s_padsTotal.store(__builtin_popcount(named), std::memory_order_relaxed);
+    s_padsDone.store(pad_count(ready), std::memory_order_relaxed);
+    s_padsTotal.store(pad_count(named), std::memory_order_relaxed);
     rec.ok = onlyModified || reloaded == 0 || ready != 0;
     if (!rec.ok) {
         char msg[64];
@@ -426,7 +456,7 @@ static void run_one_load(bool onlyModified, int kitId) {
 // Parks between loads; its stack and TCB are allocated once.
 static void load_fn(void* /*param*/) {
     for (;;) {
-        if (xSemaphoreTake(s_workPending, portMAX_DELAY) != pdTRUE) continue;
+        if (!s_workPending.take(kWaitForever)) continue;
         run_one_load(s_reqOnlyModified, s_reqKitId);
     }
 }
@@ -443,12 +473,13 @@ void kit_load_task_poll() {
 
 // Worker and doorbell, on the first load only.
 static bool ensure_worker() {
-    if (s_worker) return true;
+#if defined(ARDUINO)
+    if (s_arduinoWorker) return true;
+#else
+    if (s_worker.running()) return true;
+#endif
 
-    if (!s_workPending) {
-        s_workPending = xSemaphoreCreateBinary();
-        if (!s_workPending) return false;
-    }
+    if (!s_workPending.create()) return false;
 
     // Stack from PSRAM. xTaskCreatePinnedToCoreWithCaps is ESP-IDF v5 only;
     // the Arduino build uses a static BSS stack, its largest internal free
@@ -458,18 +489,13 @@ static bool ensure_worker() {
     constexpr size_t kArduinoLoadStack = 4096;
     static StaticTask_t s_loadTcb;
     static StackType_t  s_loadStack[kArduinoLoadStack / sizeof(StackType_t)];
-    s_worker = xTaskCreateStaticPinnedToCore(load_fn, "kit_load", kArduinoLoadStack,
-                                             nullptr, LOAD_TASK_PRIORITY, s_loadStack, &s_loadTcb,
-                                             LOAD_TASK_CORE);
-    return s_worker != nullptr;
+    s_arduinoWorker = xTaskCreateStaticPinnedToCore(load_fn, "kit_load", kArduinoLoadStack,
+                                                    nullptr, LOAD_TASK_PRIORITY, s_loadStack,
+                                                    &s_loadTcb, LOAD_TASK_CORE);
+    return s_arduinoWorker != nullptr;
 #else
-    if (xTaskCreatePinnedToCoreWithCaps(load_fn, "kit_load", LOAD_TASK_STACK,
-                                        nullptr, LOAD_TASK_PRIORITY, &s_worker, LOAD_TASK_CORE,
-                                        MALLOC_CAP_SPIRAM) != pdPASS) {
-        s_worker = nullptr;
-        return false;
-    }
-    return true;
+    return s_worker.start(load_fn, nullptr, "kit_load", LOAD_TASK_STACK,
+                          LOAD_TASK_PRIORITY, LOAD_TASK_CORE);
 #endif
 }
 
@@ -514,15 +540,23 @@ void kit_load_task_start(bool onlyModified, int kitId) {
     lv_timer_create(progress_poll_timer_cb, 100, nullptr);
 
     // Last: the worker runs as soon as this is given.
-    xSemaphoreGive(s_workPending);
+    s_workPending.give();
 }
 
 bool kit_load_task_is_worker() {
-    return s_worker != nullptr && xTaskGetCurrentTaskHandle() == s_worker;
+#if defined(ARDUINO)
+    return s_arduinoWorker != nullptr && xTaskGetCurrentTaskHandle() == s_arduinoWorker;
+#else
+    return s_worker.isCurrent();
+#endif
 }
 
 bool kit_load_task_is_loading() {
     return s_loading;
+}
+
+int kit_load_task_progress() {
+    return s_progress.load(std::memory_order_relaxed);
 }
 
 int kit_load_task_pending_kit() {
