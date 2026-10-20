@@ -6,7 +6,8 @@
  * @brief The kit selector in front of an app that needs a kit.
  *
  * An app that plays the kit (Sampler, Sequencer) launched with no kit loaded
- * gets the kit selector first, and starts once a kit has loaded; backing out
+ * -- unless it opens for a song's second kit track, which plays a kit of its
+ * own -- gets the kit selector first, and starts once a kit has loaded; backing out
  * of the selector starts nothing. The same selector opens over a running app
  * (the sampler's pick-kit button, its back) and brings that app back when it
  * closes. The gate also keeps the two most recent screens, the selector
@@ -43,7 +44,9 @@ struct KitGateHost {
 
 /// Keep @p host and fill @p cb with the gate's selector callbacks (onKitLoaded,
 /// onClosed, openSelector, openSelectorForBack); the platform passes @p cb on
-/// in its SamplerPlatformCallbacks.
+/// in its SamplerPlatformCallbacks. Also makes the selector the platform's
+/// kit picker (PlatformServices::kitPicker, core IKitPicker): an app's own
+/// kit, picked over it and handed back instead of loaded.
 void kit_gate_install(const KitGateHost& host, KitSelectorAppCallbacks& cb);
 
 /// The orchestrator's pre-launch hook (OrchestratorConfig::pre_launch).

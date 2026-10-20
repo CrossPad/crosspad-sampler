@@ -8,8 +8,10 @@
 #include <crosspad-sampler/ui/kit_selector_app.hpp>
 
 #include <crosspad/kit/IKitManager.hpp>
+#include <crosspad/kit/IKitPicker.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
 #include <crosspad/song/ArrangeFocus.hpp>
+#include <crosspad/song/ISongEngine.hpp>
 #include <crosspad-gui/components/app_orchestrator.h>
 #include <crosspad-gui/components/mode_overlay.h>
 #include <crosspad-gui/components/status_bar.h>
@@ -24,6 +26,8 @@
 
 #include <cstdio>
 #include <cstring>
+#include <mutex>
+#include <string>
 
 namespace crosspad_sampler {
 
@@ -54,6 +58,14 @@ bool app_requires_kit(const char* app_name) {
      * no kit loaded and asked for one that nothing was going to play. */
     const crosspad::ArrangeFocus& focus = crosspad::arrangeFocus();
     if (focus.held() && focus.seq && focus.source == crosspad::SeqSource::Pitch) return false;
+    /* Nor does a song's second kit track: it plays its own kit, in an engine
+     * of its own (ISecondKit), whatever the pads' kit is. */
+    if (focus.held() && focus.seq) {
+        if (crosspad::ISongEngine* se = crosspad::getPlatformServices().songEngine) {
+            std::lock_guard<std::recursive_mutex> l(se->songMutex());
+            if (se->song().seqRoute(focus.track) == 1) return false;
+        }
+    }
 
     for (auto& name : kKitRequiredApps) {
         if (strcmp(app_name, name) == 0) return true;
@@ -180,6 +192,41 @@ void open_selector_over(bool backReturnsToApp) {
 void open_selector() { open_selector_over(true); }
 void open_selector_for_back() { open_selector_over(false); }
 
+/* The same selector for an app's own kit (core IKitPicker): over the running
+ * app, which comes back when it closes, and the kit picked handed to the app
+ * instead of loaded -- Arrange's kit tracks pick theirs here. */
+class GateKitPicker final : public crosspad::IKitPicker {
+public:
+    bool open(PickedFn picked, void* ctx) override {
+        auto& orch = crosspad_gui::AppOrchestrator::getInstance();
+        if (!picked || !app_container() || !orch.getForegroundApp() || selector_is_up()) return false;
+        s_picked = picked;
+        s_pickedCtx = ctx;
+        kit_selector_app_pick_for(&on_pick, nullptr);
+        open_selector();
+        if (selector_is_up()) return true;
+        kit_selector_app_pick_for(nullptr, nullptr);
+        s_picked = nullptr;
+        return false;
+    }
+
+private:
+    static void on_pick(int kitId, void*) {
+        crosspad::IKitManager* km = crosspad::getKitManager();
+        const crosspad::KitInfo* k = km ? km->getKit(kitId) : nullptr;
+        const PickedFn fn = s_picked;
+        s_picked = nullptr;
+        if (fn && k && !k->path.empty()) fn(k->path, s_pickedCtx);
+    }
+
+    static PickedFn s_picked;
+    static void* s_pickedCtx;
+};
+
+GateKitPicker::PickedFn GateKitPicker::s_picked = nullptr;
+void* GateKitPicker::s_pickedCtx = nullptr;
+GateKitPicker s_kitPicker;
+
 } // namespace
 
 void kit_gate_install(const KitGateHost& host, KitSelectorAppCallbacks& cb) {
@@ -188,6 +235,7 @@ void kit_gate_install(const KitGateHost& host, KitSelectorAppCallbacks& cb) {
     cb.onClosed            = on_closed;
     cb.openSelector        = open_selector;
     cb.openSelectorForBack = open_selector_for_back;
+    crosspad::getPlatformServices().kitPicker = &s_kitPicker;
 }
 
 /* One rule: go to the most recent screen that is not the one showing. From the
