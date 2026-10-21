@@ -357,7 +357,7 @@ static void run_one_load(bool onlyModified, int kitId) {
 
     /* Copies of pads with pitch or filters first, while the outgoing kit still
      * plays: a pad swapped before its copy exists would come back plain. */
-    if (kit->engine == crosspad::KitEngine::Sampler) {
+    if (kit->playsOnSampler()) {
         for (uint8_t padIdx = 0; padIdx < PAD_COUNT; ++padIdx) {
             if (todo & (1u << padIdx)) render_fx(*kit, kit->pads[padIdx]);
         }

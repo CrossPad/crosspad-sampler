@@ -327,7 +327,7 @@ bool kit_convert_keep_rate(int kitId, bool keep) {
      * those carry the flag to the card with their own save. */
     crosspad::KitInfo* kit = kit_by_id(kitId);
     auto* km = crosspad::getKitManager();
-    if (!kit || !km || !kit->parsed || kit->engine != crosspad::KitEngine::Sampler) return false;
+    if (!kit || !km || !kit->parsed || !kit->playsOnSampler()) return false;
     kit->keepRate = keep;
     for (const auto& pad : kit->pads) {
         if (pad.dirty || pad.dirtyModified) return true;

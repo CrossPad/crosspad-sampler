@@ -76,20 +76,26 @@ const lv_color_t kLime  = lv_color_hex(0xC6FF47);
 const lv_color_t kMint  = lv_color_hex(0x00FF88);
 const lv_color_t kRed   = lv_color_hex(0xFF5C5C);
 
+/* The 200 px under the 40 px top bar: the context row (4..26), the list and
+ * the six type keys (30..166), LOAD and EDIT (170..198). */
 constexpr int32_t kRows    = 5;
-constexpr int32_t kRowH    = 28;
+constexpr int32_t kRowH    = 27;
 constexpr int32_t kListX   = 80;
 constexpr int32_t kListW   = 230;
 constexpr int32_t kBodyY   = 30;
-constexpr int32_t kKeysY   = 176;
+constexpr int32_t kKeysY   = 170;
 constexpr int32_t kKeyW    = 154;
+constexpr int32_t kKeyH    = 28;
 constexpr int32_t kTypeW   = 72;
-constexpr int32_t kTypeH   = 26;
-constexpr int32_t kTypeGap = 29;
+constexpr int32_t kTypeH   = 21;
+constexpr int32_t kTypeGap = 23;
 
-enum Type : uint8_t { Kits, Drums, Pitch, Songs, User, kTypes };
-const uint32_t    kTypeCol[kTypes]  = {0xC6FF47, 0xFFC857, 0xA77BF0, 0xF06FD0, 0x4FE0B0};
-const char* const kTypeName[kTypes] = {"KITS", "DRUMS", "PITCH", "SONGS", "USER"};
+/* The kit types: Performance (long and short samples), Drums (short hits,
+ * kDrumVoices voices), Slice (one WAV in regions, one voice), Pitch (one
+ * sample across the pads) -- then songs and what the player made. */
+enum Type : uint8_t { Kits, Drums, Slice, Pitch, Songs, User, kTypes };
+const uint32_t    kTypeCol[kTypes]  = {0xC6FF47, 0xFFC857, 0xFF8A3D, 0xA77BF0, 0xF06FD0, 0x4FE0B0};
+const char* const kTypeName[kTypes] = {"PERF", "DRUMS", "SLICE", "PITCH", "SONGS", "USER"};
 
 /// What a row stands for, and what LOAD does with it.
 enum class Kind : uint8_t {
@@ -215,16 +221,6 @@ crosspad::ISampleTools* tools() { return crosspad::getPlatformServices().sampleT
 crosspad::ISongEngine* songs() { return crosspad::getPlatformServices().songEngine; }
 crosspad::IInstrumentHost* host() { return crosspad::getPlatformServices().instrumentHost; }
 bool picking() { return s_onPicked != nullptr; }
-
-bool same_ci(const std::string& a, const char* b) {
-    if (a.size() != std::strlen(b)) return false;
-    for (size_t i = 0; i < a.size(); ++i) {
-        char x = a[i];
-        if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
-        if (x != b[i]) return false;
-    }
-    return true;
-}
 
 bool ends_wav(const char* n) {
     const size_t l = std::strlen(n);
@@ -519,9 +515,11 @@ void build_items() {
                 if (picking()) continue;
                 it.kind = Kind::PitchedKit;
                 s_items[Pitch].push_back(it);
+            } else if (k->engine == crosspad::KitEngine::Slice) {
+                s_items[Slice].push_back(it);
             } else if (k->isUser()) {
                 s_items[User].push_back(it);
-            } else if (same_ci(k->category, "drums") || same_ci(k->category, "drum")) {
+            } else if (k->isDrums()) {
                 s_items[Drums].push_back(it);
             } else {
                 s_items[Kits].push_back(it);
@@ -580,7 +578,8 @@ void info_text(const Item* it, char* b, size_t n) {
             std::snprintf(bpm, sizeof bpm, "%u", meta ? (unsigned)meta->bpm : 0u);
             const std::string by = meta ? plain(meta->author) : std::string();
             std::snprintf(b, n, "#7B828B %s# %s  #7B828B BPM# %s  #7B828B BY# %s",
-                          it->kind == Kind::PitchedKit ? "PITCHED" : "PADS", k ? pads : "-",
+                          it->kind == Kind::PitchedKit ? "PITCHED" : s_type == Slice ? "SLICES" : "PADS",
+                          k ? pads : "-",
                           meta && meta->bpm ? bpm : "-", by.empty() ? "-" : by.c_str());
             break;
         }
@@ -1246,6 +1245,7 @@ void open_card() {
                      : it->kind == Kind::Song ? "SONG"
                      : it->kind == Kind::Wav ? "RECORDING"
                      : s_type == Drums ? "DRUM KIT"
+                     : s_type == Slice ? "SLICE KIT"
                      : s_type == User ? "YOUR KIT" : "KIT";
     lv_obj_t* kl = txt(head, &lv_font_montserrat_10, lv_color_hex(kTypeCol[s_type]), kind);
     lv_obj_align(kl, LV_ALIGN_RIGHT_MID, -6, 0);
@@ -1521,7 +1521,9 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     s_info = txt(ctx, &lv_font_montserrat_14, kText, "");
     lv_label_set_recolor(s_info, true);
     lv_label_set_long_mode(s_info, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(s_info, 300);
+    /* One line, cut with dots: without a height a dotted label wraps, and a
+     * long author pushed LOADED down over the type keys. */
+    lv_obj_set_size(s_info, 300, lv_font_get_line_height(&lv_font_montserrat_14));
     lv_obj_align(s_info, LV_ALIGN_LEFT_MID, 8, 0);
 
     /* The list: one object the encoder turns, five rows drawn in it. */
@@ -1570,19 +1572,19 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     lv_obj_set_style_radius(s_sbThumb, 1, 0);
 
     /* LOAD and EDIT, then the lists: the encoder's walk after the list. */
-    s_load = key(root, 4, kKeysY, kKeyW, 30, load_cb, nullptr);
+    s_load = key(root, 4, kKeysY, kKeyW, kKeyH, load_cb, nullptr);
     lv_obj_set_style_clip_corner(s_load, true, 0);
     s_loadFill = box(s_load, 0, 0, 0, 30, kLime);
     s_loadLbl = txt(s_load, &lv_font_montserrat_14, kInk, "LOAD");
     lv_group_add_obj(s_group, s_load);
-    s_edit = key(root, 162, kKeysY, kKeyW, 30, edit_cb, nullptr);
+    s_edit = key(root, 162, kKeysY, kKeyW, kKeyH, edit_cb, nullptr);
     lv_obj_center(txt(s_edit, &lv_font_montserrat_14, kText, "EDIT"));
     lv_group_add_obj(s_group, s_edit);
     for (int i = 0; i < kTypes; ++i) {
         s_typ[i] = key(root, 4, kBodyY + i * kTypeGap, kTypeW, kTypeH, type_cb, (void*)(intptr_t)i);
         s_typLbl[i] = txt(s_typ[i], &lv_font_montserrat_14, lv_color_hex(kTypeCol[i]), kTypeName[i]);
         lv_obj_align(s_typLbl[i], LV_ALIGN_LEFT_MID, 9, 0);
-        s_typBar[i] = box(s_typ[i], 2, 6, 3, 14, kLime);
+        s_typBar[i] = box(s_typ[i], 2, (kTypeH - 14) / 2, 3, 14, kLime);
         lv_obj_set_style_radius(s_typBar[i], 2, 0);
         if (type_enabled((uint8_t)i)) lv_group_add_obj(s_group, s_typ[i]);
     }
