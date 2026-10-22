@@ -5,6 +5,8 @@
 
 #include <lvgl.h>
 
+#include "crosspad/kit/IKitPicker.hpp"
+
 namespace crosspad_sampler {
 
 /// Callback invoked when a kit button is selected (before loading).
@@ -30,6 +32,8 @@ struct KitSelectorConfig {
     /// not loaded (onSelected and onLoaded are not called), and the host
     /// closes it. A song's kit track's kit is picked so.
     KitSelectedFn onPicked = nullptr;
+    /// The list it opens on; Any: the one holding the loaded kit.
+    crosspad::KitList list = crosspad::KitList::Any;
     KitSelectedFn onSelected = nullptr;
     KitLoadedFn   onLoaded = nullptr;
     KitClosedFn   onClose = nullptr;

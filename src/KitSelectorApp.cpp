@@ -32,6 +32,7 @@ static App* s_thisApp = nullptr;
 /* A pick asked for the next selector (kit_selector_app_pick_for()). */
 static void (*s_pickFn)(int, void*) = nullptr;
 static void* s_pickCtx = nullptr;
+static crosspad::KitList s_pickList = crosspad::KitList::Any;
 static void (*s_pickingFn)(int, void*) = nullptr;   // the open selector's
 static void* s_pickingCtx = nullptr;
 /* Where to go once the browser is closed (KitSelectorConfig::onOpenApp). */
@@ -39,9 +40,10 @@ static const char* s_follow = nullptr;
 /* Closed with back: the app it was opened from, to go back to. */
 static crosspad_gui::ILvglApp* s_back = nullptr;
 
-void kit_selector_app_pick_for(void (*fn)(int kitId, void* ctx), void* ctx) {
+void kit_selector_app_pick_for(void (*fn)(int kitId, void* ctx), void* ctx, crosspad::KitList list) {
     s_pickFn = fn;
     s_pickCtx = ctx;
+    s_pickList = fn ? list : crosspad::KitList::Any;
 }
 
 static void on_kit_selected(int kitId, void* /*userData*/) {
@@ -125,6 +127,8 @@ lv_obj_t* lv_CreateKitSelector(lv_obj_t* parent, App* app) {
     s_pickFn = nullptr;
     s_pickCtx = nullptr;
     config.onPicked      = s_pickingFn ? on_kit_picked : nullptr;
+    config.list          = s_pickList;
+    s_pickList = crosspad::KitList::Any;
     config.onSelected    = on_kit_selected;
     config.onLoaded      = on_kit_loaded;
     config.onClose       = on_kit_closed;

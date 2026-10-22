@@ -1601,9 +1601,13 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
         build_items();
     }
 
-    /* Open on the list the loaded kit is in, on the kit. */
+    /* Open on the list the loaded kit is in, on the kit -- or, picking for a
+     * track of one kind (Arrange's DRUMS, SLICE), on that list. */
     s_type = Kits;
-    if (auto* km = kits()) {
+    if (config.list != crosspad::KitList::Any) {
+        s_type = config.list == crosspad::KitList::Drums ? Drums
+               : config.list == crosspad::KitList::Slice ? Slice : Kits;
+    } else if (auto* km = kits()) {
         const int id = km->getCurrentKitId();
         for (int t = 0; t < kTypes; ++t) {
             for (const Item& it : s_items[t]) {

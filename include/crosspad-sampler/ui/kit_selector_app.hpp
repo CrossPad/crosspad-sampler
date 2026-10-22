@@ -5,6 +5,8 @@
 
 #include <lvgl.h>
 
+#include "crosspad/kit/IKitPicker.hpp"
+
 class App;
 
 /// LVGL app factory for the kit selector overlay.
@@ -15,7 +17,9 @@ void lv_KitSelector_destroy(lv_obj_t* app);
 
 /// The next selector this app creates picks for @p fn (kit_selector.hpp
 /// KitSelectorConfig::onPicked) and closes, instead of loading the kit; null
-/// for the usual load. Taken by that selector, so one after it loads again.
-void kit_selector_app_pick_for(void (*fn)(int kitId, void* ctx), void* ctx);
+/// for the usual load. It opens on @p list (Any: the loaded kit's). Taken by
+/// that selector, so one after it loads again.
+void kit_selector_app_pick_for(void (*fn)(int kitId, void* ctx), void* ctx,
+                               crosspad::KitList list = crosspad::KitList::Any);
 
 #endif // USE_LVGL

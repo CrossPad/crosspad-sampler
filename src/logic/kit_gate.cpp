@@ -197,12 +197,13 @@ void open_selector_for_back() { open_selector_over(false); }
  * instead of loaded -- Arrange's kit tracks pick theirs here. */
 class GateKitPicker final : public crosspad::IKitPicker {
 public:
-    bool open(PickedFn picked, void* ctx) override {
+    bool open(PickedFn picked, void* ctx) override { return open(picked, ctx, crosspad::KitList::Any); }
+    bool open(PickedFn picked, void* ctx, crosspad::KitList list) override {
         auto& orch = crosspad_gui::AppOrchestrator::getInstance();
         if (!picked || !app_container() || !orch.getForegroundApp() || selector_is_up()) return false;
         s_picked = picked;
         s_pickedCtx = ctx;
-        kit_selector_app_pick_for(&on_pick, nullptr);
+        kit_selector_app_pick_for(&on_pick, nullptr, list);
         open_selector();
         if (selector_is_up()) return true;
         kit_selector_app_pick_for(nullptr, nullptr);
