@@ -1,7 +1,7 @@
 {
   "name": "Sampler",
   "id": "sampler",
-  "version": "0.21.0",
+  "version": "0.21.1",
   "description": "Sample player with 16 pads, waveform editing, kit management",
   "category": "music",
   "icon": "audio.png",
@@ -12,6 +12,7 @@
     "crosspad-gui": ">=2.2.0,<3.0.0"
   },
   "changelog": [
+    "0.21.1: the waveform cache's table (~9.7 kB of names and pointers the UI reads) in PSRAM where the board has it (EXT_RAM_BSS_ATTR), so internal RAM can pay for the 32 kB I-cache the render runs from.",
     "0.21.0: picking a kit for a track opens on the list of its kind (KitSelectorConfig::list, kit_selector_app_pick_for(..., KitList)): Arrange's DRUMS on the drum kits, SLICE on the Slice kits, PERF on the rest. Requires core 2.6.",
     "0.20.0: the kit types down the kit browser's left are PERF (was KITS), DRUMS, SLICE, PITCH, SONGS, USER -- six keys, 22 px each. SLICE lists the Slice kits (\"engine\": \"slice\", what the Slicer writes): one WAV in regions, one voice. Drums are told by KitInfo::isDrums(). Requires core 2.5.",
     "0.19.0: the kit browser in the UX 2000 design -- KITS / DRUMS / PITCH / SONGS / USER down the left, five rows of the list on the right, what the highlighted thing is across the top, LOAD and EDIT below. DRUMS are the factory kits whose kit.json says \"category\": \"drums\"; PITCH the instruments saved in Pitch Play (LOAD opens one there) and the pitched kits; SONGS the projects on the card (LOAD opens one, then Arrange); USER the kits made on the board, the Recorder's takes (LOAD slices one in the Slicer) and + NEW KIT. The encoder turns the list and a click loads -- a long press leaves it for the keys; a finger drags it, taps a row, taps it again to load. The highlighted kit is heard once the list stands still, and the pads play and light it, read off the card on a worker of its own. LOAD shows the load's progress, and on the kit already loaded goes to the Sampler. EDIT is the card of the highlighted thing: pads, date, folder; for a kit of one's own its name, author, note and tempo and DELETE, as before. The covers and row thumbnails are gone. The gate is the platform's kit picker (core IKitPicker): Arrange's kit tracks pick their kit there, handed back, not loaded; an app opened for a song's second kit track is not held behind the gate. Requires core 2.2 (instrumentOpenRequest, readKitCopy, IKitPicker) and gui 2.2 (the kit browser's back is the app history).",
