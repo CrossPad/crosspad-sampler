@@ -12,6 +12,13 @@
 #include <cstdlib>
 #include <cstdio>
 
+#if __has_include("esp_attr.h")
+#include "esp_attr.h"
+#define CP_WAVE_CACHE_ATTR EXT_RAM_BSS_ATTR
+#else
+#define CP_WAVE_CACHE_ATTR
+#endif
+
 namespace crosspad_sampler {
 
 // ── Progress tracking ───────────────────────────────────────────────────
@@ -21,7 +28,9 @@ int waveformsCached       = 0;
 
 // ── Internal state ──────────────────────────────────────────────────────
 
-static WaveformCacheEntry s_cache[WAVEFORM_CACHE_SIZE] = {};
+/* PSRAM where there is any: ~9.7 kB of names and pointers the UI reads, never
+ * the render, and internal RAM is what the instruction cache is paid from. */
+static CP_WAVE_CACHE_ATTR WaveformCacheEntry s_cache[WAVEFORM_CACHE_SIZE];
 static uint32_t           s_timestamp        = 0;
 static void*              s_cachedKit        = nullptr;
 static char               s_cachedKitPath[256] = {};
