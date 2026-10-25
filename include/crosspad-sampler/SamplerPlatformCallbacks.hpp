@@ -63,6 +63,10 @@ struct SamplerPlayerCallbacks {
     void (*setVolume)(uint8_t padIdx, int volume)                                     = nullptr;
     /// Set playback pan for a pad (0-127, 64=center).
     void (*setPan)(uint8_t padIdx, int pan)                                           = nullptr;
+    /// Measure each pad's peak while @p on (the Pad Mixer's meters).
+    void (*setPadMetering)(bool on)                                                   = nullptr;
+    /// A pad's peak since the last call, linear, 1.0 = full scale.
+    float (*takePadPeak)(uint8_t padIdx)                                              = nullptr;
     /// Enable looping for a pad (endPos = sample end in samples).
     void (*setLoopEnd)(uint8_t padIdx, uint32_t endPos)                               = nullptr;
     /// Disable looping for a pad.
@@ -287,7 +291,8 @@ const SamplerPlatformCallbacks& sampler_get_platform_callbacks();
 
 /// The pads' level and pan in whichever engine plays the current kit: the
 /// pitched instrument for a pitched kit, the platform's sample player
-/// (player.setVolume / setPan) otherwise. sampler_service_init() puts it in
+/// (player.setVolume / setPan, its meters player.setPadMetering /
+/// takePadPeak) otherwise. sampler_service_init() puts it in
 /// PlatformServices::padMix.
 crosspad::IPadMix& sampler_pad_mix();
 
