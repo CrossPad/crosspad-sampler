@@ -38,6 +38,29 @@ public:
         if (s_callbacks.player.setVolume) s_callbacks.player.setVolume(pad, volume);
         if (s_callbacks.player.setPan)    s_callbacks.player.setPan(pad, pan);
     }
+
+    // Both engines, whichever plays the kit: a kit swapped while the mixer is
+    // open keeps its meters.
+    void setMetering(bool on) override {
+        if (auto* inst = crosspad::getPlatformServices().pitchedInstrument) {
+            inst->padMeters().setEnabled(on);
+        }
+        if (s_callbacks.player.setPadMetering) s_callbacks.player.setPadMetering(on);
+    }
+
+    bool takePeaks(float* peaks) override {
+        auto* km  = crosspad::getKitManager();
+        auto* kit = km ? km->getCurrentKit() : nullptr;
+        if (kit && kit->engine == crosspad::KitEngine::Pitched) {
+            auto* inst = crosspad::getPlatformServices().pitchedInstrument;
+            if (!inst) return false;
+            for (uint8_t i = 0; i < PAD_COUNT; ++i) peaks[i] = inst->padMeters().take(i);
+            return true;
+        }
+        if (!s_callbacks.player.takePadPeak) return false;
+        for (uint8_t i = 0; i < PAD_COUNT; ++i) peaks[i] = s_callbacks.player.takePadPeak(i);
+        return true;
+    }
 };
 } // namespace
 
