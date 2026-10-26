@@ -4,8 +4,11 @@
 // on the right, what the highlighted thing is across the top, LOAD and EDIT
 // along the bottom. The design is LVGL PROTO/lvgl_kitsel.
 //
-// KITS and DRUMS are the kits a board ships with, filed by the "category" a
-// kit.json gives ("drums"); PITCH the instruments saved in Pitch Play and the
+// The kits are filed by the folder they are in on the card (KitFolders): KITS
+// /crosspad/kits, DRUMS /crosspad/drums, SLICE /crosspad/slicer, where the
+// Slicer writes; a kit anywhere else by its kit.json, as before (a "drums"
+// category, a Slice engine). PITCH the instruments saved in Pitch Play, in
+// their groups (InstrumentGroups: LOAD opens one, back leaves it), and the
 // pitched kits; SONGS the projects on the card; USER the kits made on the
 // board, the Recorder's takes, and + NEW KIT. LOAD loads a kit (and goes to the
 // Sampler), opens an instrument in Pitch Play, a song in Arrange, a take in
@@ -30,8 +33,10 @@
 
 #include <crosspad/CrosspadCoreVersion.hpp>
 #include <crosspad/instrument/IInstrumentHost.hpp>
+#include <crosspad/instrument/InstrumentGroups.hpp>
 #include <crosspad/instrument/InstrumentPlayState.hpp>
 #include <crosspad/kit/IKitManager.hpp>
+#include <crosspad/kit/KitFolders.hpp>
 #include <crosspad/kit/KitPathUtils.hpp>
 #include <crosspad/pad/IPadLogicHandler.hpp>
 #include <crosspad/pad/PadManager.hpp>
@@ -46,6 +51,7 @@
 
 #include "crosspad-sampler/port/SamplerRtos.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <cstdio>
@@ -105,13 +111,15 @@ enum class Kind : uint8_t {
     Song,       ///< a project: opened, then Arrange
     Wav,        ///< a Recorder take: the Slicer
     NewKit,     ///< + NEW KIT: an empty kit of one's own
+    Group,      ///< a group of instruments (InstrumentGroups): LOAD opens it
 };
 
 struct Item {
     Kind        kind  = Kind::Kit;
     std::string name;
-    std::string path;     ///< kit/instrument: logical JSON; take: full path
+    std::string path;     ///< kit/instrument: logical JSON; take: full path; a group's name
     int         kitId = -1;
+    uint16_t    count = 0;    ///< a group's instruments
 };
 
 // ── Timing ───────────────────────────────────────────────────────────────────
@@ -164,6 +172,8 @@ uint8_t  s_type = Kits;
 /* What came off the card, kept apart from the lists so a rebuild (a kit made,
  * renamed, deleted) does not have to read it again. */
 std::vector<std::string> s_insts;   ///< instrument folder names
+/// The group PITCH shows the instruments of; empty for the groups themselves.
+std::string s_pitchGroup;
 std::vector<std::string> s_takes;   ///< full paths
 std::vector<std::string> s_songs;
 uint32_t s_songsGen = 0;
@@ -311,6 +321,10 @@ bool is_loaded(const Item* it) {
         }
         case Kind::Inst: return !it->path.empty() && crosspad::instrumentPlayState().instrumentPath == it->path;
         case Kind::Song: return !s_openSong.empty() && it->name == s_openSong;
+        case Kind::Group: {
+            const std::string& in = crosspad::instrumentPlayState().instrumentPath;
+            return !in.empty() && crosspad::InstrumentGroups::group(base_of(dir_of(in))) == it->path;
+        }
         default:         return false;
     }
 }
@@ -515,11 +529,14 @@ void build_items() {
                 if (picking()) continue;
                 it.kind = Kind::PitchedKit;
                 s_items[Pitch].push_back(it);
-            } else if (k->engine == crosspad::KitEngine::Slice) {
+            } else if (k->engine == crosspad::KitEngine::Slice ||
+                       crosspad::KitFolders::in(k->path, crosspad::KitFolders::kSlicer)) {
                 s_items[Slice].push_back(it);
+            } else if (crosspad::KitFolders::in(k->path, crosspad::KitFolders::kDrums)) {
+                s_items[Drums].push_back(it);
             } else if (k->isUser()) {
                 s_items[User].push_back(it);
-            } else if (k->isDrums()) {
+            } else if (!crosspad::KitFolders::in(k->path, crosspad::KitFolders::kKits) && k->isDrums()) {
                 s_items[Drums].push_back(it);
             } else {
                 s_items[Kits].push_back(it);
@@ -529,9 +546,30 @@ void build_items() {
     if (!picking()) {
         if (auto* h = host()) {
             const std::string root = h->libraryRoot();
-            for (const auto& n : s_insts) {
-                s_items[Pitch].push_back(Item{Kind::Inst, n,
-                                              root + "/" + n + "/" + crosspad::IInstrumentHost::kFileName, -1});
+            using G = crosspad::InstrumentGroups;
+            if (!s_pitchGroup.empty()) {
+                /* The open group alone: its instruments by name, the group
+                 * left off them. */
+                s_items[Pitch].clear();
+                std::vector<std::string> names;
+                for (const auto& n : s_insts)
+                    if (G::group(n) == s_pitchGroup) names.push_back(n);
+                std::sort(names.begin(), names.end());
+                for (const auto& n : names) {
+                    s_items[Pitch].push_back(Item{Kind::Inst, G::shortName(n),
+                                                  root + "/" + n + "/" + crosspad::IInstrumentHost::kFileName, -1});
+                }
+            } else {
+                /* The groups first, by name, then the pitched kits. */
+                std::vector<Item> groups;
+                for (const auto& n : s_insts) {
+                    const std::string g = G::group(n);
+                    auto at = std::find_if(groups.begin(), groups.end(), [&](const Item& e) { return e.path == g; });
+                    if (at == groups.end()) groups.push_back(Item{Kind::Group, g, g, -1, 1});
+                    else                    ++at->count;
+                }
+                std::sort(groups.begin(), groups.end(), [](const Item& a, const Item& b) { return a.path < b.path; });
+                s_items[Pitch].insert(s_items[Pitch].begin(), groups.begin(), groups.end());
             }
         }
         for (const auto& s : s_songs) s_items[Songs].push_back(Item{Kind::Song, s, s, -1});
@@ -606,6 +644,9 @@ void info_text(const Item* it, char* b, size_t n) {
         case Kind::NewKit:
             std::snprintf(b, n, "#7B828B AN EMPTY KIT OF YOUR OWN#");
             break;
+        case Kind::Group:
+            std::snprintf(b, n, "#7B828B GROUP# %u  #7B828B LOAD# opens it", (unsigned)it->count);
+            break;
     }
 }
 
@@ -613,6 +654,7 @@ void meta_text(const Item& it, char* b, size_t n) {
     b[0] = 0;
     if (it.kind == Kind::PitchedKit) std::snprintf(b, n, "pitched");
     else if (it.kind == Kind::Wav)   std::snprintf(b, n, "wav");
+    else if (it.kind == Kind::Group) std::snprintf(b, n, "%u", (unsigned)it.count);
     else if (it.kind == Kind::Song && is_loaded(&it)) {
         if (crosspad::ISongEngine* se = songs()) std::snprintf(b, n, "%u bars", (unsigned)se->playEndBars());
     }
@@ -761,6 +803,7 @@ void paint_load() {
                          : picking() ? "PICK"
                          : it->kind == Kind::NewKit ? LV_SYMBOL_PLUS " MAKE"
                          : it->kind == Kind::Wav ? "SLICE"
+                         : it->kind == Kind::Group ? "OPEN"
                          : ld ? "LOADED" : "LOAD";
         lv_obj_set_style_bg_color(s_load, ld || !it ? kPanel : c, 0);
         set_text(s_loadLbl, what);
@@ -833,6 +876,19 @@ void load_kit(const Item& it) {
 
 void new_kit();
 
+/// PITCH shows the instruments of group @p g, or the groups again for an
+/// empty @p g -- on the group it came out of.
+void open_group(std::string g) {
+    const std::string left = s_pitchGroup;
+    s_pitchGroup = g;
+    s_sel[Pitch] = s_off[Pitch] = 0;
+    build_items();
+    for (size_t i = 0; g.empty() && i < s_items[Pitch].size(); ++i) {
+        if (s_items[Pitch][i].kind == Kind::Group && s_items[Pitch][i].path == left) { s_sel[Pitch] = (uint16_t)i; break; }
+    }
+    moved();
+}
+
 void do_load() {
     const Item* it = cur();
     if (!it || s_card) return;
@@ -862,6 +918,7 @@ void do_load() {
             }
             break;
         case Kind::NewKit: new_kit(); break;
+        case Kind::Group:  open_group(it->path); break;
     }
     refresh();
 }
@@ -889,26 +946,15 @@ uint32_t pad_hue(int i) {
 /// A kit of one's own, empty: a folder with a kit.json in it, sixteen coloured
 /// pads and no samples. What fills it is the pad editor in the Sampler.
 ///
-/// Nothing here knows a path by heart. The kits root is read back off a kit
-/// that is already listed -- "<root>/<folder>/kit.json" -- so this follows
-/// wherever the board scanned, and the name is tried against the card as well
-/// as against the list: a folder nobody has scanned yet still holds somebody's
-/// kit.json, and writing over it would take their kit.
+/// It goes in the kits' folder (KitFolders::kKits), and the name is tried
+/// against the card as well as against the list: a folder nobody has scanned
+/// yet still holds somebody's kit.json, and writing over it would take their
+/// kit.
 void new_kit() {
     auto* mgr = kits();
     if (!mgr) return;
 
-    std::string root = "/crosspad/kits";
-    for (int i = 0, n = mgr->getKitCount(); i < n; ++i) {
-        const auto* k = mgr->getKit(i);
-        if (!k || k->path.size() < 3) continue;
-        const size_t file = k->path.find_last_of('/');
-        if (file == std::string::npos || file == 0) continue;
-        const size_t dir = k->path.find_last_of('/', file - 1);
-        if (dir == std::string::npos) continue;
-        root = k->path.substr(0, dir);
-        break;
-    }
+    const std::string root = crosspad::KitFolders::kKits;
 
     std::string name, path;
     bool free_name = false;
@@ -1207,7 +1253,7 @@ void card_play_cb(lv_event_t*) { audition(cur(), -1); }
 /// EDIT: what the highlighted thing is, where it lives, and what it can do.
 void open_card() {
     const Item* it = cur();
-    if (s_card || !s_overlay || !it || it->kind == Kind::NewKit) return;
+    if (s_card || !s_overlay || !it || it->kind == Kind::NewKit || it->kind == Kind::Group) return;
 
     s_delArmed = false;
     s_cardKit = -1;
@@ -1312,7 +1358,8 @@ void open_card() {
             first = card_button(LV_SYMBOL_PLAY "  PLAY", card_play_cb, false);
             card_button("SLICE IT", card_load_cb, true);
             break;
-        case Kind::NewKit: break;
+        case Kind::NewKit:
+        case Kind::Group:  break;   // no card: open_card() turned both away
     }
     lv_obj_t* done = card_button(LV_SYMBOL_OK "  DONE", [](lv_event_t*) { card_close(); }, false);
     /* A kit of one's own opens on its name; anything else on its action. */
@@ -1381,6 +1428,7 @@ void list_press_cb(lv_event_t* e) {
 bool selector_back_cb(void*) {
     if (!s_overlay) return false;
     if (card_back()) return true;
+    if (s_type == Pitch && !s_pitchGroup.empty()) { open_group({}); return true; }
     kit_selector_close();
     return true;
 }
@@ -1463,7 +1511,7 @@ void tick_cb(lv_timer_t*) {
     /* Heard once the highlight stands still -- and, for a kit, once its pads
      * are known. */
     if (s_previewDue && !s_card && lv_tick_elaps(s_movedMs) >= kPreviewMs) {
-        if (!it || it->kind == Kind::Song || it->kind == Kind::Inst) s_previewDue = false;
+        if (!it || it->kind == Kind::Song || it->kind == Kind::Inst || it->kind == Kind::Group) s_previewDue = false;
         else if (it->kind == Kind::Wav || kit_of(it)) { s_previewDue = false; audition(it, -1); }
     }
     /* A load moving on repaints its key, not the screen. */
@@ -1672,6 +1720,7 @@ void reset_state() {
     /* Swapped out, not cleared: a cleared vector keeps its block. */
     for (auto& v : s_items) std::vector<Item>().swap(v);
     std::vector<std::string>().swap(s_insts);
+    std::string().swap(s_pitchGroup);   // the groups again next time, on the one played
     std::vector<std::string>().swap(s_takes);
     std::vector<std::string>().swap(s_songs);
     s_songsAsked = false;
