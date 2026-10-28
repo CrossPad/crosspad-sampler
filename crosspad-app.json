@@ -1,14 +1,14 @@
 {
   "name": "Sampler",
   "id": "sampler",
-  "version": "0.22.0",
+  "version": "0.23.0",
   "description": "Sample player with 16 pads, waveform editing, kit management",
   "category": "music",
   "icon": "audio.png",
   "component_path": "components/crosspad-sampler",
   "platforms": ["esp-idf", "arduino"],
   "requires": {
-    "crosspad-core": ">=2.22.0,<3.0.0",
+    "crosspad-core": ">=2.27.0,<3.0.0",
     "crosspad-gui": ">=2.2.0,<3.0.0"
   },
   "changelog": [
