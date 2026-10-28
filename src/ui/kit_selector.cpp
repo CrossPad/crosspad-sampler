@@ -10,7 +10,9 @@
 // category, a Slice engine). PITCH the instruments saved in Pitch Play, in
 // their groups (InstrumentGroups: LOAD opens one, back leaves it), and the
 // pitched kits; SONGS the projects on the card; USER the kits made on the
-// board, the Recorder's takes, and + NEW KIT. LOAD loads a kit (and goes to the
+// board before PERF and DRUMS could make them, and the Recorder's takes. PERF
+// starts with + NEW KIT and DRUMS with + NEW DRUMS: an empty kit of one's own
+// in that list's folder, and on that list. LOAD loads a kit (and goes to the
 // Sampler), opens an instrument in Pitch Play, a song in Arrange, a take in
 // the Slicer. EDIT is the highlighted thing's card: what it is, where it is,
 // and for a kit of one's own its name, author, note and tempo to change, and
@@ -110,7 +112,7 @@ enum class Kind : uint8_t {
     Inst,       ///< an instrument saved in Pitch Play: opened there
     Song,       ///< a project: opened, then Arrange
     Wav,        ///< a Recorder take: the Slicer
-    NewKit,     ///< + NEW KIT: an empty kit of one's own
+    NewKit,     ///< + NEW KIT / + NEW DRUMS: an empty kit of one's own, in the folder in path
     Group,      ///< a group of instruments (InstrumentGroups): LOAD opens it
 };
 
@@ -519,7 +521,10 @@ void build_items() {
         s_items[t].clear();
     }
 
-    if (!picking()) s_items[User].push_back(Item{Kind::NewKit, "+ NEW KIT", {}, -1});
+    if (!picking()) {
+        s_items[Kits].push_back(Item{Kind::NewKit, "+ NEW KIT", crosspad::KitFolders::kKits, -1});
+        s_items[Drums].push_back(Item{Kind::NewKit, "+ NEW DRUMS", crosspad::KitFolders::kDrums, -1});
+    }
     if (auto* km = kits()) {
         for (int i = 0, n = km->getKitCount(); i < n; ++i) {
             const crosspad::KitInfo* k = km->getKit(i);
@@ -534,6 +539,11 @@ void build_items() {
                 s_items[Slice].push_back(it);
             } else if (crosspad::KitFolders::in(k->path, crosspad::KitFolders::kDrums)) {
                 s_items[Drums].push_back(it);
+            } else if (k->own && crosspad::KitFolders::in(k->path, crosspad::KitFolders::kKits)) {
+                /* Made with PERF's + NEW KIT: on PERF. A kit of one's own
+                 * from before (category "user", the Slicer's old ones) stays
+                 * on USER. */
+                s_items[Kits].push_back(it);
             } else if (k->isUser()) {
                 s_items[User].push_back(it);
             } else if (!crosspad::KitFolders::in(k->path, crosspad::KitFolders::kKits) && k->isDrums()) {
@@ -642,7 +652,8 @@ void info_text(const Item* it, char* b, size_t n) {
             std::snprintf(b, n, "#7B828B RECORDING#  #7B828B LOAD# slices it");
             break;
         case Kind::NewKit:
-            std::snprintf(b, n, "#7B828B AN EMPTY KIT OF YOUR OWN#");
+            std::snprintf(b, n, "#7B828B %s#", it->path == crosspad::KitFolders::kDrums
+                                                   ? "AN EMPTY DRUM KIT OF YOUR OWN" : "AN EMPTY KIT OF YOUR OWN");
             break;
         case Kind::Group:
             std::snprintf(b, n, "#7B828B GROUP# %u  #7B828B LOAD# opens it", (unsigned)it->count);
@@ -874,7 +885,7 @@ void load_kit(const Item& it) {
     s_loadingKit = it.kitId;
 }
 
-void new_kit();
+void new_kit(const Item& it);
 
 /// PITCH shows the instruments of group @p g, or the groups again for an
 /// empty @p g -- on the group it came out of.
@@ -917,13 +928,13 @@ void do_load() {
                 open_app("Slicer");
             }
             break;
-        case Kind::NewKit: new_kit(); break;
+        case Kind::NewKit: new_kit(*it); break;
         case Kind::Group:  open_group(it->path); break;
     }
     refresh();
 }
 
-// ── + NEW KIT ────────────────────────────────────────────────────────────────
+// ── + NEW KIT, + NEW DRUMS ───────────────────────────────────────────────────
 
 /// Sixteen hues round the wheel, the colours a sliced kit gets, so a new kit's
 /// pads are told apart on the grid instead of being black.
@@ -946,21 +957,26 @@ uint32_t pad_hue(int i) {
 /// A kit of one's own, empty: a folder with a kit.json in it, sixteen coloured
 /// pads and no samples. What fills it is the pad editor in the Sampler.
 ///
-/// It goes in the kits' folder (KitFolders::kKits), and the name is tried
-/// against the card as well as against the list: a folder nobody has scanned
-/// yet still holds somebody's kit.json, and writing over it would take their
-/// kit.
-void new_kit() {
+/// It goes in the folder of the list it was made on (@p it's path: PERF's
+/// KitFolders::kKits, DRUMS' kDrums), so it is on that list; a drum kit says
+/// "drums", for its voices, and both say they are the user's ("own"). The name
+/// is tried against the card as well as against the list: a folder nobody has
+/// scanned yet still holds somebody's kit.json, and writing over it would take
+/// their kit.
+void new_kit(const Item& it) {
     auto* mgr = kits();
     if (!mgr) return;
 
-    const std::string root = crosspad::KitFolders::kKits;
+    const std::string root = it.path;
+    const bool drums = root == crosspad::KitFolders::kDrums;
+    const std::string base = drums ? "NEW DRUMS" : "NEW KIT";
+    const uint8_t list = drums ? Drums : Kits;
 
     std::string name, path;
     bool free_name = false;
     bool probe_failed = false;
     for (int n = 1; n <= 99 && !free_name; ++n) {
-        name = n == 1 ? "NEW KIT" : "NEW KIT " + std::to_string(n);
+        name = n == 1 ? base : base + " " + std::to_string(n);
         path = root + "/" + name + "/kit.json";
         /* Neither there nor absent -- a card error: counted as taken, so a
          * kit that may be there is never written over. Logged once, not per
@@ -982,7 +998,8 @@ void new_kit() {
 
     crosspad::KitInfo info;
     info.name     = name;
-    info.category = "user";          // what puts it in USER (KitInfo::isUser)
+    info.category = drums ? "drums" : "user";   // drums: KitInfo::voiceCap()
+    info.own      = true;                       // KitInfo::isUser(): its card edits it
     info.version  = "1.0";
     info.path     = path;
     for (int p = 0; p < KIT_PADS; ++p) info.pads[p].color = info.pads[p].color_pressed = pad_hue(p);
@@ -990,8 +1007,8 @@ void new_kit() {
     const int id = mgr->addKit(info.path);
 
     build_items();
-    for (size_t i = 0; i < s_items[User].size() && id >= 0; ++i) {
-        if (s_items[User][i].kitId == id) { s_sel[User] = (uint16_t)i; break; }
+    for (size_t i = 0; i < s_items[list].size() && id >= 0; ++i) {
+        if (s_items[list][i].kitId == id) { s_sel[list] = (uint16_t)i; break; }
     }
     say(id >= 0 ? "Made -- EDIT names it, the Sampler fills it" : "Made -- listed after a restart");
     moved();
@@ -1250,6 +1267,13 @@ void card_load_cb(lv_event_t*) {
 
 void card_play_cb(lv_event_t*) { audition(cur(), -1); }
 
+/// A kit made on the board (KitInfo::isUser): its card renames and deletes it.
+bool own_kit(const Item* it) {
+    auto* km = kits();
+    const crosspad::KitInfo* meta = km && it && it->kitId >= 0 ? km->getKit(it->kitId) : nullptr;
+    return meta && meta->isUser();
+}
+
 /// EDIT: what the highlighted thing is, where it lives, and what it can do.
 void open_card() {
     const Item* it = cur();
@@ -1290,9 +1314,9 @@ void open_card() {
                      : it->kind == Kind::Inst ? "INSTRUMENT"
                      : it->kind == Kind::Song ? "SONG"
                      : it->kind == Kind::Wav ? "RECORDING"
-                     : s_type == Drums ? "DRUM KIT"
+                     : s_type == Drums ? (own_kit(it) ? "YOUR DRUM KIT" : "DRUM KIT")
                      : s_type == Slice ? "SLICE KIT"
-                     : s_type == User ? "YOUR KIT" : "KIT";
+                     : own_kit(it) ? "YOUR KIT" : "KIT";
     lv_obj_t* kl = txt(head, &lv_font_montserrat_10, lv_color_hex(kTypeCol[s_type]), kind);
     lv_obj_align(kl, LV_ALIGN_RIGHT_MID, -6, 0);
 

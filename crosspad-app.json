@@ -1,17 +1,18 @@
 {
   "name": "Sampler",
   "id": "sampler",
-  "version": "0.23.0",
+  "version": "0.24.0",
   "description": "Sample player with 16 pads, waveform editing, kit management",
   "category": "music",
   "icon": "audio.png",
   "component_path": "components/crosspad-sampler",
   "platforms": ["esp-idf", "arduino"],
   "requires": {
-    "crosspad-core": ">=2.27.0,<3.0.0",
+    "crosspad-core": ">=2.32.0,<3.0.0",
     "crosspad-gui": ">=2.2.0,<3.0.0"
   },
   "changelog": [
+    "0.24.0: + NEW KIT heads PERF and + NEW DRUMS heads DRUMS: an empty kit of one's own, sixteen coloured pads, in /crosspad/kits or /crosspad/drums and on that list (USER no longer has + NEW KIT). Both write \"own\": true, so their card renames and deletes them; a drum kit made so says category drums -- 12 voices. Kits of one's own from before (category user, the Slicer's old ones) stay on USER. Requires core 2.32 (KitInfo::own).",
     "0.22.0: the pads' meters through IPadMix (setMetering/takePeaks): the pitched instrument's PadMeters for a pitched kit, the platform's player.setPadMetering/takePadPeak otherwise -- what the Pad Mixer shows. Requires core 2.22.",
     "0.21.1: the waveform cache's table (~9.7 kB of names and pointers the UI reads) in PSRAM where the board has it (EXT_RAM_BSS_ATTR), so internal RAM can pay for the 32 kB I-cache the render runs from.",
     "0.21.0: picking a kit for a track opens on the list of its kind (KitSelectorConfig::list, kit_selector_app_pick_for(..., KitList)): Arrange's DRUMS on the drum kits, SLICE on the Slice kits, PERF on the rest. Requires core 2.6.",
