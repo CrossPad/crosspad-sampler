@@ -434,19 +434,20 @@ static void run_one_load(bool onlyModified, int kitId) {
     if (!onlyModified) waveform_cache_prefetch(kit->path.c_str());
 
     // What the pads hold, not how many were visited: "KIT LOADED n/m" counts
-    // the pads that sound out of those the kit gives a sample. A whole kit of
-    // which none sounds is not loaded -- it is current, so the pad editor can
-    // fill it, but saying "loaded" lit sixteen dead pads as ready.
+    // the pads that sound out of those the kit gives a sample. A kit that gives
+    // samples of which none sounds is not loaded -- it is current, so the pad
+    // editor can fill it, but saying "loaded" lit sixteen dead pads as ready.
+    // A kit that gives none (+ NEW KIT, + NEW DRUMS) is loaded: empty, made
+    // to be filled, not broken -- and the open song takes it.
     const uint16_t named = static_cast<uint16_t>(reloaded & ~rec.empty);
     const uint16_t ready = static_cast<uint16_t>(named & ~rec.failed);
     s_padsDone.store(pad_count(ready), std::memory_order_relaxed);
     s_padsTotal.store(pad_count(named), std::memory_order_relaxed);
-    rec.ok = onlyModified || reloaded == 0 || ready != 0;
+    rec.ok = onlyModified || reloaded == 0 || named == 0 || ready != 0;
     if (!rec.ok) {
         char msg[64];
-        rec.why = named ? KitLoadWhy::NoneReadable : KitLoadWhy::NoSamples;
-        snprintf(msg, sizeof(msg), "%.22s: %s", kit->name.c_str(),
-                 named ? "no sample loaded" : "no samples on pads");
+        rec.why = KitLoadWhy::NoneReadable;
+        snprintf(msg, sizeof(msg), "%.22s: no sample loaded", kit->name.c_str());
         set_error(msg);
     }
 
