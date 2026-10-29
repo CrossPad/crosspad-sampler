@@ -8,11 +8,11 @@
   "component_path": "components/crosspad-sampler",
   "platforms": ["esp-idf", "arduino"],
   "requires": {
-    "crosspad-core": ">=2.32.0,<3.0.0",
+    "crosspad-core": ">=2.42.0,<3.0.0",
     "crosspad-gui": ">=2.10.2,<3.0.0"
   },
   "changelog": [
-    "0.24.2: a kit track's seq view asks for a kit like any other: there is no second kit engine to play it (core 2.33).",
+    "0.24.2: a kit track's seq view asks for a kit like any other: there is no second kit engine to play it (core 2.42).",
     "0.24.1: a kit with no sample on any pad (+ NEW KIT, + NEW DRUMS) loads: KIT LOADED  EMPTY on the loader bar, not a red no samples on pads, and the open song takes it. A kit whose samples none load is still a failed load. KitLoadWhy::NoSamples is gone. Requires gui 2.10.2.",
     "0.24.0: + NEW KIT heads PERF and + NEW DRUMS heads DRUMS: an empty kit of one's own, sixteen coloured pads, in /crosspad/kits or /crosspad/drums and on that list (USER no longer has + NEW KIT). Both write \"own\": true, so their card renames and deletes them; a drum kit made so says category drums -- 12 voices. Kits of one's own from before (category user, the Slicer's old ones) stay on USER. Requires core 2.32 (KitInfo::own).",
     "0.22.0: the pads' meters through IPadMix (setMetering/takePeaks): the pitched instrument's PadMeters for a pitched kit, the platform's player.setPadMetering/takePadPeak otherwise -- what the Pad Mixer shows. Requires core 2.22.",

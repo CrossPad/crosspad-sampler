@@ -5,7 +5,7 @@
     "description": "CrossPad Sampler Application — shared LVGL GUI and business logic",
     "keywords": ["crosspad", "sampler", "lvgl", "pad"],
     "dependencies": {
-        "crosspad-core": ">=2.32.0,<3.0.0",
+        "crosspad-core": ">=2.42.0,<3.0.0",
         "crosspad-gui": ">=2.10.2,<3.0.0"
     },
     "build": {
