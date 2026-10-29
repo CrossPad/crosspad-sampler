@@ -288,6 +288,11 @@ static const int notes[] = {13, 14, 15, 16, 9, 10, 11, 12, 5, 6, 7, 8, 1, 2, 3, 
 
 static int s_selectedPad = -1;   // outlined on the grid, 0-based; -1 none
 
+/// What each pad's button shows, so the poll repaints a pad when its colour
+/// changes as well as when it starts or stops sounding.
+struct PaintedPad { RgbColor color; bool active = false; };
+static PaintedPad s_painted[16];
+
 /// A pad on the grid in its kit colour: faint at rest, full with dark ink
 /// while it sounds.
 static void paint_pad(int pad, RgbColor c, bool active)
@@ -298,6 +303,7 @@ static void paint_pad(int pad, RgbColor c, bool active)
     lv_obj_set_style_bg_color(btn, lv_color_make(c.R, c.G, c.B), 0);
     lv_obj_set_style_bg_opa(btn, active ? LV_OPA_COVER : LV_OPA_40, 0);
     lv_obj_set_style_text_color(btn, active ? kInk : kText, 0);
+    s_painted[pad] = {c, active};
 }
 
 /// The last pad hit: outlined on the grid, named on the top row in its colour.
@@ -382,7 +388,6 @@ static float lastPlayheadProgress = 0.0f; // Track playhead to detect restart
 static volatile bool appIsDestroying = false; // Flag to indicate app destruction
 static volatile bool samplerAppActive = false; // Track if sampler app is active
 
-static bool lastPadStatesPlaying[16] = {false};
 
 static uint8_t currentSampleIndex[16] = {0};
 static lv_obj_t * padModeIndicators[16] = {nullptr};
@@ -700,11 +705,10 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
             padIdxTime = pad;
         }
 
-        if (currentlyActive != lastPadStatesPlaying[pad]) {
-            lastPadStatesPlaying[pad] = currentlyActive;
-
-            paint_pad(pad, currentlyActive ? crosspad::getPadManager().getPressedColor(pad)
-                                           : crosspad::getPadManager().getPadColor(pad), currentlyActive);
+        const RgbColor shown = currentlyActive ? crosspad::getPadManager().getPressedColor(pad)
+                                               : crosspad::getPadManager().getPadColor(pad);
+        if (currentlyActive != s_painted[pad].active || !(shown == s_painted[pad].color)) {
+            paint_pad(pad, shown, currentlyActive);
         }
     }
 
