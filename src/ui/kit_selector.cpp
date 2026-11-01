@@ -18,8 +18,10 @@
 // and for a kit of one's own its name, author, note and tempo to change, and
 // DELETE.
 //
-// The encoder turns the list and a click loads; a long press leaves the list
-// for the keys (LVGL's own edit mode). The pads play the highlighted kit --
+// The encoder turns the list and a click loads. A long press leaves it for the
+// lists on the left, on the one shown: turning walks them and the list on the
+// right follows, a click goes back to it on that one (a finger on a list does
+// the same); LOAD and EDIT come after them. The pads play the highlighted kit --
 // its kit.json is read on a worker of its own, never on this thread -- and
 // light in its colours.
 //
@@ -161,6 +163,7 @@ lv_obj_t* s_loadLbl = nullptr;
 lv_obj_t* s_edit = nullptr;
 
 lv_group_t* s_group = nullptr;
+bool        s_listEditing = false;   ///< the list was being turned when it last got FOCUSED
 lv_group_t* s_prevGroup = nullptr;
 lv_timer_t* s_timer = nullptr;
 uint32_t    s_backToken = 0;
@@ -861,6 +864,13 @@ void select_type(uint8_t t) {
     moved();
 }
 
+/// The encoder onto the left panel, on the list shown.
+void focus_type(void*) {
+    if (!s_group || s_type >= kTypes || !s_typ[s_type]) return;
+    lv_group_set_editing(s_group, false);
+    lv_group_focus_obj(s_typ[s_type]);
+}
+
 // ── Loading ──────────────────────────────────────────────────────────────────
 
 void open_app(const char* app) {
@@ -1395,9 +1405,32 @@ void open_card() {
 // ── Events ───────────────────────────────────────────────────────────────────
 
 void type_cb(lv_event_t* e) {
-    select_type((uint8_t)(intptr_t)lv_event_get_user_data(e));
-    /* Back to turning the list -- after this click has been read. */
+    const uint8_t t = (uint8_t)(intptr_t)lv_event_get_user_data(e);
+    if (t != s_type) select_type(t);       // the one shown keeps its place
+    /* Over to the right panel, turning the list -- after this click has been read. */
     lv_async_call(focus_list, nullptr);
+}
+
+/// A list on the left reached by the encoder: the right panel shows it at once.
+void type_focus_cb(lv_event_t* e) {
+    const uint8_t t = (uint8_t)(intptr_t)lv_event_get_user_data(e);
+    if (t != s_type) select_type(t);
+}
+
+/// Still on the list, no longer turning it: the long press let go of it.
+void leave_list(void*) {
+    if (!s_group || lv_group_get_focused(s_group) != s_list || lv_group_get_editing(s_group)) return;
+    focus_type(nullptr);
+}
+
+/// The list let go of: the encoder goes to the left panel, not to LOAD. A
+/// long press ends LVGL's edit mode and sends FOCUSED again -- but so does
+/// every lv_group_focus_obj() from code, which leaves edit mode before it
+/// moves; leave_list() runs after it and acts only if the focus stayed.
+void list_focus_cb(lv_event_t*) {
+    const bool editing = s_group && lv_group_get_editing(s_group);
+    if (s_listEditing && !editing) lv_async_call(leave_list, nullptr);
+    s_listEditing = editing;
 }
 
 void load_cb(lv_event_t*) { do_load(); }
@@ -1615,6 +1648,7 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     lv_obj_add_event_cb(s_list, list_press_cb, LV_EVENT_PRESSED, nullptr);
     lv_obj_add_event_cb(s_list, list_press_cb, LV_EVENT_PRESSING, nullptr);
     lv_obj_add_event_cb(s_list, list_press_cb, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(s_list, list_focus_cb, LV_EVENT_FOCUSED, nullptr);
     lv_group_add_obj(s_group, s_list);
     for (int j = 0; j < kRows; ++j) {
         lv_obj_t* r = box(s_list, 0, j * kRowH, kListW, kRowH - 3, kPanel);
@@ -1643,7 +1677,17 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     s_sbThumb = box(s_sb, 0, 0, 2, 14, kLime);
     lv_obj_set_style_radius(s_sbThumb, 1, 0);
 
-    /* LOAD and EDIT, then the lists: the encoder's walk after the list. */
+    /* The lists on the left, then LOAD and EDIT: the encoder's walk after the
+     * list. */
+    for (int i = 0; i < kTypes; ++i) {
+        s_typ[i] = key(root, 4, kBodyY + i * kTypeGap, kTypeW, kTypeH, type_cb, (void*)(intptr_t)i);
+        lv_obj_add_event_cb(s_typ[i], type_focus_cb, LV_EVENT_FOCUSED, (void*)(intptr_t)i);
+        s_typLbl[i] = txt(s_typ[i], &lv_font_montserrat_14, lv_color_hex(kTypeCol[i]), kTypeName[i]);
+        lv_obj_align(s_typLbl[i], LV_ALIGN_LEFT_MID, 9, 0);
+        s_typBar[i] = box(s_typ[i], 2, (kTypeH - 14) / 2, 3, 14, kLime);
+        lv_obj_set_style_radius(s_typBar[i], 2, 0);
+        if (type_enabled((uint8_t)i)) lv_group_add_obj(s_group, s_typ[i]);
+    }
     s_load = key(root, 4, kKeysY, kKeyW, kKeyH, load_cb, nullptr);
     lv_obj_set_style_clip_corner(s_load, true, 0);
     s_loadFill = box(s_load, 0, 0, 0, 30, kLime);
@@ -1652,14 +1696,6 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     s_edit = key(root, 162, kKeysY, kKeyW, kKeyH, edit_cb, nullptr);
     lv_obj_center(txt(s_edit, &lv_font_montserrat_14, kText, "EDIT"));
     lv_group_add_obj(s_group, s_edit);
-    for (int i = 0; i < kTypes; ++i) {
-        s_typ[i] = key(root, 4, kBodyY + i * kTypeGap, kTypeW, kTypeH, type_cb, (void*)(intptr_t)i);
-        s_typLbl[i] = txt(s_typ[i], &lv_font_montserrat_14, lv_color_hex(kTypeCol[i]), kTypeName[i]);
-        lv_obj_align(s_typLbl[i], LV_ALIGN_LEFT_MID, 9, 0);
-        s_typBar[i] = box(s_typ[i], 2, (kTypeH - 14) / 2, 3, 14, kLime);
-        lv_obj_set_style_radius(s_typBar[i], 2, 0);
-        if (type_enabled((uint8_t)i)) lv_group_add_obj(s_group, s_typ[i]);
-    }
 
     /* What there is. The card's lists are read once per visit; the kits are in
      * memory already. */
@@ -1740,6 +1776,7 @@ void reset_state() {
     }
     s_prevGroup = nullptr;
     if (s_group) { lv_group_delete(s_group); s_group = nullptr; }
+    s_listEditing = false;
 
     /* Swapped out, not cleared: a cleared vector keeps its block. */
     for (auto& v : s_items) std::vector<Item>().swap(v);
