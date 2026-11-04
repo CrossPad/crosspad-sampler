@@ -51,7 +51,6 @@ int kit_load_task_pending_kit();
 enum class KitLoadWhy : uint8_t {
     None = 0,
     Parse,        ///< the kit could not be read or made current
-    NoSamples,    ///< no pad of the kit names a sample
     NoneReadable, ///< pads name samples, the engine could take none of them
 };
 

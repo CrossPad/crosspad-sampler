@@ -11,7 +11,6 @@
 #include <crosspad/kit/IKitPicker.hpp>
 #include <crosspad/platform/PlatformServices.hpp>
 #include <crosspad/song/ArrangeFocus.hpp>
-#include <crosspad/song/ISongEngine.hpp>
 #include <crosspad-gui/components/app_orchestrator.h>
 #include <crosspad-gui/components/mode_overlay.h>
 #include <crosspad-gui/components/status_bar.h>
@@ -58,14 +57,6 @@ bool app_requires_kit(const char* app_name) {
      * no kit loaded and asked for one that nothing was going to play. */
     const crosspad::ArrangeFocus& focus = crosspad::arrangeFocus();
     if (focus.held() && focus.seq && focus.source == crosspad::SeqSource::Pitch) return false;
-    /* Nor does a song's second kit track: it plays its own kit, in an engine
-     * of its own (ISecondKit), whatever the pads' kit is. */
-    if (focus.held() && focus.seq) {
-        if (crosspad::ISongEngine* se = crosspad::getPlatformServices().songEngine) {
-            std::lock_guard<std::recursive_mutex> l(se->songMutex());
-            if (se->song().seqRoute(focus.track) == 1) return false;
-        }
-    }
 
     for (auto& name : kKitRequiredApps) {
         if (strcmp(app_name, name) == 0) return true;
