@@ -19,6 +19,8 @@
  *           player can neither transpose, filter nor reverse, so the pad plays
  *           a copy of its sample rendered once the values stop moving
  *           (crosspad::renderedSamplePath) -- PLAY and LOOP play them at once.
+ *           While START or END is turned the row is one FAST button instead:
+ *           held, every detent moves the marker ten times as far.
  *   wave    the sample: what the pad plays between START and END lit, the
  *           rest dimmed, and the playhead while LOOP plays
  *   tools   START and END are turned: the first click moves the marker a
@@ -94,6 +96,7 @@ constexpr uint32_t kZoomFrames = 12000;   // each side of a marker in fine mode,
  * millisecond again. */
 constexpr uint32_t kFineFastMs = 120;
 constexpr uint32_t kFineRunMax = 64;
+constexpr uint32_t kFastFactor = 10;      // a detent with FAST held
 constexpr uint32_t kSettleMs   = 150;     // a marker still this long: the pad reloads, a loop restarts
 constexpr uint32_t kFxSettleMs = 400;     // PITCH, HP, LP still this long: the pad's copy is rendered
 constexpr float    kNormPeak   = 0.966f;  // NORM's loudest sample: -0.3 dB of full scale
@@ -149,6 +152,8 @@ lv_obj_t* s_hpBtn = nullptr;
 lv_obj_t* s_lpBtn = nullptr;
 lv_obj_t* s_chokeBtn = nullptr;
 lv_obj_t* s_modeBtn = nullptr;
+lv_obj_t* s_params = nullptr;              // VOL .. CHOKE, while no marker is turned
+lv_obj_t* s_fastBtn = nullptr;             // in their place while one is: held, x kFastFactor
 lv_obj_t* s_startBtn = nullptr;
 lv_obj_t* s_endBtn = nullptr;
 lv_obj_t* s_loopBtn = nullptr;
@@ -481,6 +486,15 @@ void show_marker_labels()
     };
     label(s_startBtn, "START", s_editStart);
     label(s_endBtn, "END", s_editEnd);
+    if (!s_params || !s_fastBtn) return;
+    const bool turning = s_editStart != Edit::None || s_editEnd != Edit::None;
+    if (turning) {
+        lv_obj_add_flag(s_params, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_fastBtn, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_fastBtn, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_params, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 /// The input is ours from the moment REC MODE comes on until it goes off: the
@@ -877,8 +891,10 @@ void marker_cb(lv_event_t* e)
         s_fineDir = dir;
         s_fineAt = now;
     }
-    const uint32_t step = edit == Edit::Coarse ? std::max<uint32_t>(1, viewLen / kCols)
-                                               : std::max<uint32_t>(1, s_rate / 1000) * s_fineRun;
+    const bool fast = s_fastBtn && lv_obj_has_state(s_fastBtn, LV_STATE_PRESSED);
+    const uint32_t step = (edit == Edit::Coarse ? std::max<uint32_t>(1, viewLen / kCols)
+                                                : std::max<uint32_t>(1, s_rate / 1000) * s_fineRun) *
+                          (fast ? kFastFactor : 1);
     int64_t v = (int64_t)m + (int64_t)dir * step;
     const int64_t lo = movesStart ? 0 : (int64_t)s_start + 1;
     const int64_t hi = movesStart ? (int64_t)s_end - 1 : (int64_t)s_frames;
@@ -1656,6 +1672,7 @@ void destroy_cb(lv_event_t*)
     s_meter = s_meterText = s_meterBar[0] = s_meterBar[1] = nullptr;
     s_volBtn = s_panBtn = s_pitchBtn = s_hpBtn = s_lpBtn = s_chokeBtn = s_modeBtn = nullptr;
     s_startBtn = s_endBtn = s_loopBtn = s_delBtn = s_overlay = nullptr;
+    s_params = s_fastBtn = nullptr;
     s_recBtn = nullptr;
     s_pad = -1;
     s_sample.clear();
@@ -1748,6 +1765,16 @@ lv_obj_t* pad_editor_create(lv_obj_t* parent, crosspad_gui::ILvglApp* app)
     s_hpBtn = make_number(params, 46, hp_cb);
     s_lpBtn = make_number(params, 46, lp_cb);
     s_chokeBtn = make_number(params, 48, choke_cb);
+    s_params = params;
+    /* Not in the encoder's group: a finger on it leaves the marker being
+     * turned where it is. */
+    s_fastBtn = lv_button_create(s_cont);
+    style_button(s_fastBtn, LV_PCT(100), 22);
+    lv_obj_set_style_bg_color(s_fastBtn, kAccent, LV_STATE_PRESSED);
+    lv_obj_set_style_text_color(s_fastBtn, kInk, LV_STATE_PRESSED);
+    add_label(s_fastBtn, LV_SYMBOL_RIGHT LV_SYMBOL_RIGHT "  FAST x10 -- hold");
+    if (lv_obj_get_group(s_fastBtn)) lv_group_remove_obj(s_fastBtn);
+    lv_obj_add_flag(s_fastBtn, LV_OBJ_FLAG_HIDDEN);
 
     // -- the sample --
     s_wave = lv_obj_create(s_cont);
