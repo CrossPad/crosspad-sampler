@@ -198,9 +198,8 @@ void kit_convert_dialog_tick(lv_group_t* panelGroup) {
     if (++s_tick < kTicksPerLook) return;
     s_tick = 0;
     /* An offer is about the kit that was loaded when it went up: once
-     * another kit is, or a conversion runs, it goes (as "Not now"). It stayed
-     * up through a kit change on the bench, and Convert then converted the
-     * kit before. */
+     * another kit is, or a conversion runs, it goes (as "Not now"). Left up
+     * through a kit change, Convert would convert the kit before. */
     if (s_offer) {
         auto* km = crosspad::getKitManager();
         if (kit_convert_busy() || !km || km->getCurrentKitId() != s_offerKit) {

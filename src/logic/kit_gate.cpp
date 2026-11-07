@@ -107,8 +107,7 @@ void screen_visited(ScreenTok t) {
  * re-creating it per launch leaked one App per prompt. destroyApp() clears
  * `app`/`started_`, so start() rebuilds the UI on the same instance. Hand-off
  * goes through the selector's onClosed callback, not an LV_EVENT_DELETE hook
- * on a root the previous teardown already freed
- * (hil_findings/2026-08-26-kit-selector-panic.md). */
+ * on a root the previous teardown already freed. */
 void show_overlay(lv_obj_t* container) {
     if (!s_overlay) {
         s_overlay = new App(container, "Kit selector", s_host.selectorIcon,

@@ -78,11 +78,12 @@ static volatile bool s_loading = false;
 
 static constexpr size_t LOAD_TASK_STACK = 8096;
 
-// A Marcel load is blocked on SD reads and only its wake latency matters; at
-// priority 1 it round-robined with the console-blocking CDC loop and a ~3 s
-// load stretched past 20 s. A pitched load is CPU: ~2 s of FFT and resampling,
-// which on core 0 at priority 5 starved LVGL (4) and the CDC drain loop (1)
-// for the whole build — a frozen screen and no reply to any verb. So on
+// A load for the prebuilt streaming engine is blocked on SD reads and only its
+// wake latency matters; at priority 1 it round-robined with the
+// console-blocking CDC loop and a ~3 s load stretched past 20 s. A pitched
+// load is CPU: ~2 s of FFT and resampling, which on core 0 at priority 5
+// starved LVGL (4) and the CDC drain loop (1) for the whole build — a frozen
+// screen and no reply to any verb. So on
 // ESP-IDF the worker lives on core 1, under TinyUSB (5) and the RT audio
 // task (19), which take what they need and leave the rest to the build.
 // The Arduino build keeps it on core 0, where its LVGL does not run.
