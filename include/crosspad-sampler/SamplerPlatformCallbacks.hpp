@@ -25,7 +25,7 @@ struct SampleInfo {
 // fingerdrumming response.  When HAS_DIRECT_PLAYBACK is defined the sampler
 // calls these instead of (or in addition to) the EventBus path.
 //
-// The audio engine (e.g. Marcel's ml_sample_stream_player) also calls
+// The audio engine (e.g. the prebuilt ml_sample_stream_player) also calls
 // onNoteOn/onNoteOff back INTO the sampler so it can update GUI state
 // (playhead, pad colors) with zero EventBus latency.
 // ---------------------------------------------------------------------------

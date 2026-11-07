@@ -19,7 +19,7 @@ namespace crosspad_sampler {
  *   1 = hold      — sample stops on pad release
  *   2 = loop      — reserved (treated as one-shot for now)
  *
- * Performance modes, MPC-style, none persisted:
+ * Performance modes, none persisted:
  *   Full level  — every hit plays at velocity 127, whatever the pad measured.
  *   16 levels   — the pad hit last before the mode went on becomes the
  *                 source; every pad then plays that source at one of sixteen
