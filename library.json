@@ -6,7 +6,7 @@
     "keywords": ["crosspad", "sampler", "lvgl", "pad"],
     "dependencies": {
         "crosspad-core": ">=2.42.0,<3.0.0",
-        "crosspad-gui": ">=2.10.2,<3.0.0"
+        "crosspad-gui": ">=2.13.0,<3.0.0"
     },
     "build": {
         "appLibrary": true
