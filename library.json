@@ -1,12 +1,12 @@
 {
     "name": "crosspad-sampler",
-    "version": "0.24.3",
+    "version": "0.25.0",
     "license": "GPL-3.0-or-later",
     "description": "CrossPad Sampler Application — shared LVGL GUI and business logic",
     "keywords": ["crosspad", "sampler", "lvgl", "pad"],
     "dependencies": {
         "crosspad-core": ">=2.42.0,<3.0.0",
-        "crosspad-gui": ">=2.10.2,<3.0.0"
+        "crosspad-gui": ">=2.13.0,<3.0.0"
     },
     "build": {
         "appLibrary": true

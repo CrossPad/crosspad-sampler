@@ -19,8 +19,12 @@
  *           player can neither transpose, filter nor reverse, so the pad plays
  *           a copy of its sample rendered once the values stop moving
  *           (crosspad::renderedSamplePath) -- PLAY and LOOP play them at once.
+ *           While START or END is turned this row and the top one are one
+ *           FAST button instead: held, every detent moves the marker ten
+ *           times as far.
  *   wave    the sample: what the pad plays between START and END lit, the
- *           rest dimmed, and the playhead while LOOP plays
+ *           rest dimmed, and the playhead while LOOP plays. Zoomed in (FINE),
+ *           a finger dragged across it scrolls the view; the markers stay
  *   tools   START and END are turned: the first click moves the marker a
  *           column of the picture per detent, the second a millisecond with
  *           the picture zoomed in round it, the third is done. PLAY plays the
@@ -43,6 +47,7 @@
 
 #include "crosspad-gui/crosspad_gui.h"
 #include "crosspad-gui/widgets/gui_helpers.h"
+#include "crosspad-gui/components/touch_gesture.h"
 
 #include <crosspad/led/ColorList.hpp>
 #include <crosspad/led/HtmlColor.hpp>
@@ -94,6 +99,7 @@ constexpr uint32_t kZoomFrames = 12000;   // each side of a marker in fine mode,
  * millisecond again. */
 constexpr uint32_t kFineFastMs = 120;
 constexpr uint32_t kFineRunMax = 64;
+constexpr uint32_t kFastFactor = 10;      // a detent with FAST held
 constexpr uint32_t kSettleMs   = 150;     // a marker still this long: the pad reloads, a loop restarts
 constexpr uint32_t kFxSettleMs = 400;     // PITCH, HP, LP still this long: the pad's copy is rendered
 constexpr float    kNormPeak   = 0.966f;  // NORM's loudest sample: -0.3 dB of full scale
@@ -149,6 +155,9 @@ lv_obj_t* s_hpBtn = nullptr;
 lv_obj_t* s_lpBtn = nullptr;
 lv_obj_t* s_chokeBtn = nullptr;
 lv_obj_t* s_modeBtn = nullptr;
+lv_obj_t* s_top = nullptr;                 // the pad and its sample, and
+lv_obj_t* s_params = nullptr;              // VOL .. CHOKE, while no marker is turned
+lv_obj_t* s_fastBtn = nullptr;             // in their place while one is: held, x kFastFactor
 lv_obj_t* s_startBtn = nullptr;
 lv_obj_t* s_endBtn = nullptr;
 lv_obj_t* s_loopBtn = nullptr;
@@ -331,6 +340,45 @@ int32_t frame_x(uint32_t f, const lv_area_t& box, bool rev)
     return rev ? box.x1 + box.x2 - x : x;
 }
 
+/// A finger on the picture while it shows part of the sample (FINE) scrolls
+/// it: the frames under the finger stay under it, the markers where they are.
+/// Each position asks for its picture; one asked for while another is read
+/// replaces it (request_view()).
+bool rec_live();
+uint32_t s_dragFrom = 0, s_dragLen = 0, s_dragAsked = 0;
+int32_t  s_dragX = 0;
+bool     s_dragging = false;
+
+void wave_drag_cb(lv_event_t* e)
+{
+    const lv_event_code_t code = lv_event_get_code(e);
+    lv_indev_t* indev = lv_indev_active();
+    if (!indev || !s_wave) return;
+    lv_point_t pt;
+    lv_indev_get_point(indev, &pt);
+    if (code == LV_EVENT_PRESSED) {
+        const uint32_t len = s_ov.end > s_ov.start ? s_ov.end - s_ov.start : 0;
+        s_dragging = !rec_live() && len && len < s_frames;
+        s_dragFrom = s_dragAsked = s_ov.start;
+        s_dragLen = len;
+        s_dragX = pt.x;
+        return;
+    }
+    if (code != LV_EVENT_PRESSING) { s_dragging = false; return; }
+    if (!s_dragging) return;
+    lv_area_t box;
+    lv_obj_get_content_coords(s_wave, &box);
+    const int32_t w = std::max<int32_t>(1, lv_area_get_width(&box));
+    int64_t dx = pt.x - s_dragX;
+    if (reversed()) dx = -dx;                  // drawn mirrored
+    int64_t a = (int64_t)s_dragFrom - dx * (int64_t)s_dragLen / w;
+    a = std::max<int64_t>(0, std::min<int64_t>((int64_t)(s_frames - s_dragLen), a));
+    const uint32_t col = std::max<uint32_t>(1, s_dragLen / kCols);
+    if ((uint32_t)std::llabs(a - (int64_t)s_dragAsked) < col) return;
+    s_dragAsked = (uint32_t)a;
+    request_view(s_dragAsked, s_dragAsked + s_dragLen);
+}
+
 void wave_draw_cb(lv_event_t* e)
 {
     lv_layer_t* layer = lv_event_get_layer(e);
@@ -481,6 +529,12 @@ void show_marker_labels()
     };
     label(s_startBtn, "START", s_editStart);
     label(s_endBtn, "END", s_editEnd);
+    if (!s_top || !s_params || !s_fastBtn) return;
+    const bool turning = s_editStart != Edit::None || s_editEnd != Edit::None;
+    for (lv_obj_t* o : {s_top, s_params, s_fastBtn}) {
+        if ((o == s_fastBtn) == turning) lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN);
+        else                             lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 /// The input is ours from the moment REC MODE comes on until it goes off: the
@@ -833,7 +887,11 @@ void marker_cb(lv_event_t* e)
     if (!s_frames) return;
     if (code == LV_EVENT_FOCUSED) {
         /* The encoder's first click puts the button in edit mode; LVGL says
-         * so with FOCUSED, not CLICKED. */
+         * so with FOCUSED, not CLICKED. A finger's press focuses the button
+         * first, which ends editing on the way; its CLICKED comes next and
+         * decides. */
+        lv_indev_t* in = lv_indev_active();
+        if (in && lv_indev_get_type(in) == LV_INDEV_TYPE_POINTER) return;
         const bool editing = g && lv_group_get_editing(g);
         if (editing && edit == Edit::None) edit = Edit::Coarse;
         else if (!editing && edit != Edit::None) {
@@ -877,8 +935,10 @@ void marker_cb(lv_event_t* e)
         s_fineDir = dir;
         s_fineAt = now;
     }
-    const uint32_t step = edit == Edit::Coarse ? std::max<uint32_t>(1, viewLen / kCols)
-                                               : std::max<uint32_t>(1, s_rate / 1000) * s_fineRun;
+    const bool fast = s_fastBtn && lv_obj_has_state(s_fastBtn, LV_STATE_PRESSED);
+    const uint32_t step = (edit == Edit::Coarse ? std::max<uint32_t>(1, viewLen / kCols)
+                                                : std::max<uint32_t>(1, s_rate / 1000) * s_fineRun) *
+                          (fast ? kFastFactor : 1);
     int64_t v = (int64_t)m + (int64_t)dir * step;
     const int64_t lo = movesStart ? 0 : (int64_t)s_start + 1;
     const int64_t hi = movesStart ? (int64_t)s_end - 1 : (int64_t)s_frames;
@@ -1656,6 +1716,8 @@ void destroy_cb(lv_event_t*)
     s_meter = s_meterText = s_meterBar[0] = s_meterBar[1] = nullptr;
     s_volBtn = s_panBtn = s_pitchBtn = s_hpBtn = s_lpBtn = s_chokeBtn = s_modeBtn = nullptr;
     s_startBtn = s_endBtn = s_loopBtn = s_delBtn = s_overlay = nullptr;
+    s_top = s_params = s_fastBtn = nullptr;
+    s_dragging = false;
     s_recBtn = nullptr;
     s_pad = -1;
     s_sample.clear();
@@ -1725,6 +1787,7 @@ lv_obj_t* pad_editor_create(lv_obj_t* parent, crosspad_gui::ILvglApp* app)
 
     // -- the pad and its sample --
     lv_obj_t* top = make_row(s_cont, 22);
+    s_top = top;
     make_button(top, 30, LV_SYMBOL_LEFT, close_cb);
     s_padBtn = make_number(top, 50, color_cb);
     s_fileBtn = make_button(top, 100, "", file_cb);
@@ -1748,6 +1811,16 @@ lv_obj_t* pad_editor_create(lv_obj_t* parent, crosspad_gui::ILvglApp* app)
     s_hpBtn = make_number(params, 46, hp_cb);
     s_lpBtn = make_number(params, 46, lp_cb);
     s_chokeBtn = make_number(params, 48, choke_cb);
+    s_params = params;
+    /* Not in the encoder's group: a finger on it leaves the marker being
+     * turned where it is. */
+    s_fastBtn = lv_button_create(s_cont);
+    style_button(s_fastBtn, LV_PCT(100), 22 * 2 + lv_obj_get_style_pad_row(s_cont, LV_PART_MAIN));
+    lv_obj_set_style_bg_color(s_fastBtn, kAccent, LV_STATE_PRESSED);
+    lv_obj_set_style_text_color(s_fastBtn, kInk, LV_STATE_PRESSED);
+    add_label(s_fastBtn, LV_SYMBOL_RIGHT LV_SYMBOL_RIGHT "  FAST x10 -- hold");
+    if (lv_obj_get_group(s_fastBtn)) lv_group_remove_obj(s_fastBtn);
+    lv_obj_add_flag(s_fastBtn, LV_OBJ_FLAG_HIDDEN);
 
     // -- the sample --
     s_wave = lv_obj_create(s_cont);
@@ -1760,6 +1833,11 @@ lv_obj_t* pad_editor_create(lv_obj_t* parent, crosspad_gui::ILvglApp* app)
     lv_obj_set_style_pad_all(s_wave, 3, 0);
     lv_obj_remove_flag(s_wave, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_wave, wave_draw_cb, LV_EVENT_DRAW_MAIN_END, nullptr);
+    lv_obj_add_event_cb(s_wave, wave_drag_cb, LV_EVENT_PRESSED, nullptr);
+    lv_obj_add_event_cb(s_wave, wave_drag_cb, LV_EVENT_PRESSING, nullptr);
+    lv_obj_add_event_cb(s_wave, wave_drag_cb, LV_EVENT_RELEASED, nullptr);
+    lv_obj_add_event_cb(s_wave, wave_drag_cb, LV_EVENT_PRESS_LOST, nullptr);
+    lv_obj_add_flag(s_wave, crosspad_gui::kDragsHorizontal);   // not a back swipe
 
     /* The input, over the picture: while a take runs there is nothing to read
      * in the old waveform anyway, and this is where the eye already is. */
