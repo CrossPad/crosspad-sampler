@@ -1284,13 +1284,9 @@ bool own_kit(const Item* it) {
     return meta && meta->isUser();
 }
 
-/// EDIT: what the highlighted thing is, where it lives, and what it can do.
-void open_card() {
-    const Item* it = cur();
-    if (s_card || !s_overlay || !it || it->kind == Kind::NewKit || it->kind == Kind::Group) return;
-
-    s_delArmed = false;
-    s_cardKit = -1;
+/// The card itself: a full-screen column over the browser, with the encoder on
+/// a group of its own.
+void card_create_shell() {
     s_card = lv_obj_create(s_overlay);
     lv_obj_remove_style_all(s_card);
     lv_obj_set_size(s_card, LV_PCT(100), LV_PCT(100));
@@ -1305,8 +1301,10 @@ void open_card() {
 
     s_cardGroup = lv_group_create();
     if (lv_indev_t* enc = encoder()) lv_indev_set_group(enc, s_cardGroup);
+}
 
-    /* The title: the name, and what kind of thing it is, in the list's colour. */
+/// The title: the name, and what kind of thing it is, in the list's colour.
+void card_create_head(const Item* it) {
     lv_obj_t* head = lv_obj_create(s_card);
     lv_obj_remove_style_all(head);
     lv_obj_set_size(head, LV_PCT(100), 22);
@@ -1329,64 +1327,86 @@ void open_card() {
                      : own_kit(it) ? "YOUR KIT" : "KIT";
     lv_obj_t* kl = txt(head, &lv_font_montserrat_10, lv_color_hex(kTypeCol[s_type]), kind);
     lv_obj_align(kl, LV_ALIGN_RIGHT_MID, -6, 0);
+}
 
+/// A kit's card: its fields, what it holds and where, LOAD, and DELETE for a
+/// kit of one's own. @return the button the card opens on, null without the kit.
+lv_obj_t* card_fill_kit(const Item* it) {
     char b[48];
+    auto* km = kits();
+    crosspad::KitInfo* meta = km ? km->getKit(it->kitId) : nullptr;
+    if (!meta) return nullptr;
+    s_cardKit = it->kitId;
+    /* A kit of one's own can be renamed and retold; a factory kit's
+     * folder is not ours to rewrite, so its card is only read. */
+    const bool own = meta->isUser();
+    for (int i = 0; i < kFields; ++i) {
+        s_cardRow[i] = card_row(kFieldTag[i], "", own ? field_cb : nullptr,
+                                (void*)(intptr_t)i, &s_cardVal[i]);
+    }
+    const crosspad::KitInfo* k = kit_of(it);
+    if (k) std::snprintf(b, sizeof b, "%d of 16 with a sample", pads_with_samples(*k));
+    else   std::snprintf(b, sizeof b, "--");
+    card_row("PADS", b, nullptr, nullptr, nullptr);
+    std::snprintf(b, sizeof b, "%s%s%s", meta->version.c_str(),
+                  meta->version.empty() || meta->created_at.empty() ? "" : "  ",
+                  meta->created_at.c_str());
+    card_row("MADE", b[0] ? b : "--", nullptr, nullptr, nullptr);
+    card_row("FOLDER", dir_of(meta->path).c_str(), nullptr, nullptr, nullptr);
+    const bool ld = is_loaded(it) && !picking();
+    lv_obj_t* first = card_button(picking() ? "PICK" : ld ? "PLAY IT IN THE SAMPLER" : "LOAD", card_load_cb, true);
+    if (own && !picking()) s_delRow = card_button("", delete_cb, false);
+    card_paint();
+    return first;
+}
+
+/// A song's card: bars, tempo and kit while it is the open one.
+lv_obj_t* card_fill_song(const Item* it) {
+    char b[48];
+    crosspad::ISongEngine* se = songs();
+    if (is_loaded(it) && se) {
+        float bpm = 0;
+        std::string kit;
+        {
+            std::lock_guard<std::recursive_mutex> l(se->songMutex());
+            bpm = se->song().bpm;
+            kit = se->song().kit;
+        }
+        std::snprintf(b, sizeof b, "%u", (unsigned)se->playEndBars());
+        card_row("BARS", b, nullptr, nullptr, nullptr);
+        std::snprintf(b, sizeof b, "%d", (int)(bpm + 0.5f));
+        card_row("BPM", b, nullptr, nullptr, nullptr);
+        card_row("KIT", kit.empty() ? "--" : base_of(dir_of(kit)).c_str(), nullptr, nullptr, nullptr);
+    } else {
+        card_row("STATE", "on the card -- open it to see more", nullptr, nullptr, nullptr);
+    }
+    return card_button("OPEN IN ARRANGE", card_load_cb, true);
+}
+
+/// EDIT: what the highlighted thing is, where it lives, and what it can do.
+void open_card() {
+    const Item* it = cur();
+    if (s_card || !s_overlay || !it || it->kind == Kind::NewKit || it->kind == Kind::Group) return;
+
+    s_delArmed = false;
+    s_cardKit = -1;
+    card_create_shell();
+    card_create_head(it);
+
     lv_obj_t* first = nullptr;
     switch (it->kind) {
         case Kind::Kit:
-        case Kind::PitchedKit: {
-            auto* km = kits();
-            crosspad::KitInfo* meta = km ? km->getKit(it->kitId) : nullptr;
-            if (!meta) break;
-            s_cardKit = it->kitId;
-            /* A kit of one's own can be renamed and retold; a factory kit's
-             * folder is not ours to rewrite, so its card is only read. */
-            const bool own = meta->isUser();
-            for (int i = 0; i < kFields; ++i) {
-                s_cardRow[i] = card_row(kFieldTag[i], "", own ? field_cb : nullptr,
-                                        (void*)(intptr_t)i, &s_cardVal[i]);
-            }
-            const crosspad::KitInfo* k = kit_of(it);
-            if (k) std::snprintf(b, sizeof b, "%d of 16 with a sample", pads_with_samples(*k));
-            else   std::snprintf(b, sizeof b, "--");
-            card_row("PADS", b, nullptr, nullptr, nullptr);
-            std::snprintf(b, sizeof b, "%s%s%s", meta->version.c_str(),
-                          meta->version.empty() || meta->created_at.empty() ? "" : "  ",
-                          meta->created_at.c_str());
-            card_row("MADE", b[0] ? b : "--", nullptr, nullptr, nullptr);
-            card_row("FOLDER", dir_of(meta->path).c_str(), nullptr, nullptr, nullptr);
-            const bool ld = is_loaded(it) && !picking();
-            first = card_button(picking() ? "PICK" : ld ? "PLAY IT IN THE SAMPLER" : "LOAD", card_load_cb, true);
-            if (own && !picking()) s_delRow = card_button("", delete_cb, false);
-            card_paint();
+        case Kind::PitchedKit:
+            first = card_fill_kit(it);
             break;
-        }
         case Kind::Inst:
             card_row("FOLDER", dir_of(it->path).c_str(), nullptr, nullptr, nullptr);
             card_row("STATE", is_loaded(it) ? "in Pitch Play now" : "saved", nullptr, nullptr, nullptr);
             first = card_button("OPEN IN PITCH PLAY", card_load_cb, true);
             break;
-        case Kind::Song: {
-            crosspad::ISongEngine* se = songs();
-            if (is_loaded(it) && se) {
-                float bpm = 0;
-                std::string kit;
-                {
-                    std::lock_guard<std::recursive_mutex> l(se->songMutex());
-                    bpm = se->song().bpm;
-                    kit = se->song().kit;
-                }
-                std::snprintf(b, sizeof b, "%u", (unsigned)se->playEndBars());
-                card_row("BARS", b, nullptr, nullptr, nullptr);
-                std::snprintf(b, sizeof b, "%d", (int)(bpm + 0.5f));
-                card_row("BPM", b, nullptr, nullptr, nullptr);
-                card_row("KIT", kit.empty() ? "--" : base_of(dir_of(kit)).c_str(), nullptr, nullptr, nullptr);
-            } else {
-                card_row("STATE", "on the card -- open it to see more", nullptr, nullptr, nullptr);
-            }
-            first = card_button("OPEN IN ARRANGE", card_load_cb, true);
+        case Kind::Song:
+            first = card_fill_song(it);
             break;
-        }
         case Kind::Wav:
             card_row("FOLDER", dir_of(it->path).c_str(), nullptr, nullptr, nullptr);
             first = card_button(LV_SYMBOL_PLAY "  PLAY", card_play_cb, false);
@@ -1588,7 +1608,8 @@ void overlay_deleted_cb(lv_event_t* e) {
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
-lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
+/** A visit starts from the caller's callbacks and nothing left of the last one. */
+static void reset_visit(const KitSelectorConfig& config) {
     s_onPicked   = config.onPicked;
     s_onSelected = config.onSelected;
     s_onLoaded   = config.onLoaded;
@@ -1604,8 +1625,11 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     s_listing = Listing::Library;
     s_listAsked = false;
     for (int t = 0; t < kTypes; ++t) { s_sel[t] = s_off[t] = 0; s_seen[t] = false; }
+}
 
-    lv_obj_t* root = lv_obj_create(config.parent);
+/** The full-screen root and the encoder group every key of the browser joins. */
+static lv_obj_t* create_root(lv_obj_t* parent) {
+    lv_obj_t* root = lv_obj_create(parent);
     lv_obj_remove_style_all(root);
     lv_obj_set_size(root, LV_PCT(100), LV_PCT(100));
     lv_obj_set_style_bg_color(root, kBg, 0);
@@ -1620,7 +1644,10 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
         s_prevGroup = lv_indev_get_group(enc);
         lv_indev_set_group(enc, s_group);
     }
+    return root;
+}
 
+static void create_context_row(lv_obj_t* root) {
     /* The context row. */
     lv_obj_t* ctx = box(root, 4, 4, 312, 22, kPanel);
     s_info = txt(ctx, &lv_font_montserrat_14, kText, "");
@@ -1630,7 +1657,9 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
      * long author pushed LOADED down over the type keys. */
     lv_obj_set_size(s_info, 300, lv_font_get_line_height(&lv_font_montserrat_14));
     lv_obj_align(s_info, LV_ALIGN_LEFT_MID, 8, 0);
+}
 
+static void create_list(lv_obj_t* root) {
     /* The list: one object the encoder turns, five rows drawn in it. */
     s_list = lv_CreateEditableButton(root);
     lv_obj_remove_style_all(s_list);
@@ -1676,7 +1705,9 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     lv_obj_set_style_radius(s_sb, 1, 0);
     s_sbThumb = box(s_sb, 0, 0, 2, 14, kLime);
     lv_obj_set_style_radius(s_sbThumb, 1, 0);
+}
 
+static void create_keys(lv_obj_t* root) {
     /* The lists on the left, then LOAD and EDIT: the encoder's walk after the
      * list. */
     for (int i = 0; i < kTypes; ++i) {
@@ -1696,7 +1727,9 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
     s_edit = key(root, 162, kKeysY, kKeyW, kKeyH, edit_cb, nullptr);
     lv_obj_center(txt(s_edit, &lv_font_montserrat_14, kText, "EDIT"));
     lv_group_add_obj(s_group, s_edit);
+}
 
+static void read_contents() {
     /* What there is. The card's lists are read once per visit; the kits are in
      * memory already. */
     s_peekPath.clear();
@@ -1708,7 +1741,9 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
         if (s_songsAsked) s_songs = se->projects();   // the last refresh, until this one is in
         build_items();
     }
+}
 
+static void pick_opening_list(const KitSelectorConfig& config) {
     /* Open on the list the loaded kit is in, on the kit -- or, picking for a
      * track of one kind (Arrange's DRUMS, SLICE), on that list. */
     s_type = Kits;
@@ -1723,6 +1758,19 @@ lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
             }
         }
     }
+}
+
+lv_obj_t* kit_selector_create(const KitSelectorConfig& config) {
+    reset_visit(config);
+
+    /* Creation order is the encoder's walk: the list, the type keys, LOAD, EDIT. */
+    lv_obj_t* root = create_root(config.parent);
+    create_context_row(root);
+    create_list(root);
+    create_keys(root);
+
+    read_contents();
+    pick_opening_list(config);
     land_on_loaded(s_type);
 
     if (!s_padLogicRegistered) {

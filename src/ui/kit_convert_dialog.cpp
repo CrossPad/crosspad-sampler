@@ -101,7 +101,7 @@ void progress_update(lv_timer_t*) {
     if (p.phase == Phase::Planning)        std::snprintf(line, sizeof(line), "Reading the samples...");
     else if (p.phase == Phase::Committing) std::snprintf(line, sizeof(line), "Saving the kit...");
     else std::snprintf(line, sizeof(line), "%u%%  %s", static_cast<unsigned>(p.percent()), p.current);
-    lv_label_set_text(s_prog.msg, line);
+    lv_label_update_text(s_prog.msg, line);
     lv_bar_set_value(s_prog.bar, p.percent(), LV_ANIM_OFF);
 }
 

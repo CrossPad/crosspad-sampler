@@ -681,18 +681,11 @@ static void sync_engine_view() {
 
 // Timer-based pad state monitoring.
 
-static void check_pad_timer_cb(lv_timer_t * timer) {
-    // Skip everything while the app is being destroyed: the LVGL objects and
-    // styles are already freed.
-    if (appIsDestroying) return;
+static uint8_t lastDisplayedPad = 0;         // pad whose sample the panel shows, 1-based; 0 = none
+static uint8_t lastDisplayedSampleIdx = 255; // its sample index; 255 = none
 
-    sync_engine_view();
-    kit_convert_dialog_tick(g_sampler);
-
-    static long lastTime = 0;
-    static char time_str[40]; // "M:SS:T / M:SS:T", sized for the widest ints snprintf can emit
-    static crosspad::KitInfo * lastKit = NULL; // last kit
-
+/** Pad tiles follow the pads: colour, pressed state, and the selected pad. */
+static void tick_pad_tiles() {
     for (uint8_t pad = 0; pad < 16; pad++) {
         bool currentlyPlaying = crosspad::getPadManager().isPadPlaying(pad);
         bool currentlyPressed = crosspad::getPadManager().isPadPressed(pad);
@@ -711,13 +704,17 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
             paint_pad(pad, shown, currentlyActive);
         }
     }
+}
 
-    crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
+/** Takes a new current kit into the panel: name, pad colours, pad config.
+ *  @return false while there is no kit, and the rest of the tick is skipped. */
+static bool tick_kit_change(crosspad::KitInfo * kit) {
+    static crosspad::KitInfo * lastKit = NULL;
     if (kit == NULL) {
         if (lastKit != NULL) {
             LV_LOG_INFO("Kit became NULL");
         }
-        return;
+        return false;
     }
     if (lastKit != kit) { // kit changed
         LV_LOG_INFO("Kit changed: %s (previous: %s)", kit->name.c_str(),
@@ -749,31 +746,39 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
         show_selected_pad(s_selectedPad);   // the chip takes the new kit's colour
     }
     lastKit = kit;
-    if (kit) {
-        for (uint8_t n = 0; n < 16; ++n) {
-            uint8_t mode = kit->pads[n].playbackMode; // 0=one shot, 1=hold, 2=loop
-            if (mode != lastPlaybackMode[n] && padModeIndicators[n]) {
-                switch (mode) {
-                    case 0: // One Shot (default, no indicator)
-                        lv_label_set_text(padModeIndicators[n], "");
-                        break;
-                    case 1: // Hold
-                        lv_label_set_text(padModeIndicators[n], "H");
-                        lv_obj_set_style_text_color(padModeIndicators[n], kText, 0);
-                        break;
-                    case 2: // Loop
-                        lv_label_set_text(padModeIndicators[n], LV_SYMBOL_REFRESH);
-                        lv_obj_set_style_text_color(padModeIndicators[n], kAccent, 0);
-                        break;
-                    default:
-                        lv_label_set_text(padModeIndicators[n], "");
-                        break;
-                }
-                lastPlaybackMode[n] = mode;
+    return true;
+}
+
+/** The H / loop mark on each pad tile follows the pad's playback mode. */
+static void tick_playback_mode_marks(const crosspad::KitInfo * kit) {
+    for (uint8_t n = 0; n < 16; ++n) {
+        uint8_t mode = kit->pads[n].playbackMode; // 0=one shot, 1=hold, 2=loop
+        if (mode != lastPlaybackMode[n] && padModeIndicators[n]) {
+            switch (mode) {
+                case 0: // One Shot (default, no indicator)
+                    lv_label_set_text(padModeIndicators[n], "");
+                    break;
+                case 1: // Hold
+                    lv_label_set_text(padModeIndicators[n], "H");
+                    lv_obj_set_style_text_color(padModeIndicators[n], kText, 0);
+                    break;
+                case 2: // Loop
+                    lv_label_set_text(padModeIndicators[n], LV_SYMBOL_REFRESH);
+                    lv_obj_set_style_text_color(padModeIndicators[n], kAccent, 0);
+                    break;
+                default:
+                    lv_label_set_text(padModeIndicators[n], "");
+                    break;
             }
+            lastPlaybackMode[n] = mode;
         }
     }
-    long now = portable_millis();
+}
+
+/** "elapsed / total" of the pad that sounds, ten times a second. */
+static void tick_play_time(long now) {
+    static long lastTime = 0;
+    static char time_str[40]; // "M:SS:T / M:SS:T", sized for the widest ints snprintf can emit
 
     if (now - lastTime > 100 && padIdxTime < 16 && crosspad::getPadManager().isPadPlaying(padIdxTime)) {
         lastTime = now;
@@ -814,7 +819,9 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
         // Reset the label after 2 s with no update.
         lv_subject_copy_string(&s_audio_time, "0:00:0");
     }
+}
 
+static void tick_loading_ring() {
     /* The status bar's loading ring, the one the kit loader drives, says how
      * far the waveforms are too — otherwise the only way to know a pad had
      * arrived was to press it. The kit load owns the ring while it runs. */
@@ -826,11 +833,12 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
             crosspad_gui::statusbar_set_loading(ring);
         }
     }
+}
 
+/** Name, index, waveform and trim markers of the selected pad's sample. */
+static void tick_selected_sample() {
     uint8_t pad = lv_subject_get_int(&s_pad_sampler);
     if ((int)pad - 1 != s_selectedPad) show_selected_pad((int)pad - 1);
-    static uint8_t lastDisplayedPad = 0; // Track which pad was last displayed
-    static uint8_t lastDisplayedSampleIdx = 255; // Track last sample index displayed
 
     // A waveform the loader was asked for: redraw as soon as it is cached.
     // The cache generation, not a shared flag — the pad editor draws from the
@@ -932,7 +940,10 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
             waveform_view_clear(waveformCanvas);
         }
     }
+}
 
+/** The playhead over the waveform while the last pressed pad sounds. */
+static void tick_playhead(long now) {
     if (waveformCanvas) {
         if (padIdxTime < 16 && crosspad::getPadManager().isPadPlaying(padIdxTime)) {
             if (infoPath[0] == '\0' || (lastDisplayedPad > 0)) {
@@ -992,6 +1003,26 @@ static void check_pad_timer_cb(lv_timer_t * timer) {
             waveform_view_set_playhead(waveformCanvas, -1.0f); // hide playhead
         }
     }
+}
+
+static void check_pad_timer_cb(lv_timer_t * timer) {
+    // Skip everything while the app is being destroyed: the LVGL objects and
+    // styles are already freed.
+    if (appIsDestroying) return;
+
+    sync_engine_view();
+    kit_convert_dialog_tick(g_sampler);
+
+    tick_pad_tiles();
+    crosspad::KitInfo * kit = crosspad::getKitManager() ? crosspad::getKitManager()->getCurrentKit() : nullptr;
+    if (!tick_kit_change(kit)) return;
+    tick_playback_mode_marks(kit);
+
+    const long now = portable_millis();
+    tick_play_time(now);
+    tick_loading_ring();
+    tick_selected_sample();
+    tick_playhead(now);
 }
 
 // ── Shared logic objects (must precede sampler_panel_create) ───────────
