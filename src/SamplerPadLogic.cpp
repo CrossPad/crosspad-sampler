@@ -41,7 +41,16 @@ static crosspad::RgbColor colorFromUint32(uint32_t rrggbb) {
 /// MidiInputHandler behind getMidiOutput().
 static bool padMidiEnabled() {
     auto* settings = crosspad::CrosspadSettings::getInstance();
-    return settings && settings->keypad.enableKeypad && !settings->keypad.sendCC;
+    return settings && settings->keypad.enableKeypad;
+}
+
+/// Settings > MIDI > "Send CC": a pad sends a Control Change instead of a
+/// note, the same way PadManager's default path does — controller = the
+/// pad's note number, value = velocity on press (at least 1, so a press is
+/// never read as a release) and 0 on release.
+static bool padSendsCC() {
+    auto* settings = crosspad::CrosspadSettings::getInstance();
+    return settings && settings->keypad.sendCC;
 }
 
 // ── Static event callbacks ────────────────────────────────────────────────────
@@ -159,9 +168,12 @@ void SamplerPadLogic::onPadPress(crosspad::PadManager& padManager,
     padManager.notifyNoteOn(padIdx, velocity, /*fromSampler=*/true);
 
     if (padMidiEnabled()) {
-        crosspad::getMidiOutput().sendNoteOn(midiNote(padManager, soundPad, transpose),
-                                             velocity,
-                                             padManager.getPadChannel(soundPad));
+        const uint8_t note = midiNote(padManager, soundPad, transpose);
+        const uint8_t channel = padManager.getPadChannel(soundPad);
+        if (padSendsCC())
+            crosspad::getMidiOutput().sendControlChange(note, velocity ? velocity : 1, channel);
+        else
+            crosspad::getMidiOutput().sendNoteOn(note, velocity, channel);
     }
 }
 
@@ -223,9 +235,12 @@ void SamplerPadLogic::onPadRelease(crosspad::PadManager& padManager,
     }
 
     if (padMidiEnabled()) {
-        crosspad::getMidiOutput().sendNoteOff(midiNote(padManager, soundPad, transpose),
-                                              /*velocity=*/0,
-                                              padManager.getPadChannel(soundPad));
+        const uint8_t note = midiNote(padManager, soundPad, transpose);
+        const uint8_t channel = padManager.getPadChannel(soundPad);
+        if (padSendsCC())
+            crosspad::getMidiOutput().sendControlChange(note, 0, channel);
+        else
+            crosspad::getMidiOutput().sendNoteOff(note, /*velocity=*/0, channel);
     }
 }
 
